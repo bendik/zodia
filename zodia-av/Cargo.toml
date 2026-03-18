@@ -1,0 +1,12 @@
+[package]
+name = "zodia-av"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebRTC audio/video session — signaling over the noise channel, no identity metadata"
+
+[dependencies]
+zodia-core.workspace = true
+zodia-net.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "zodia-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite persistence via p2panda-store — aspect interpretation index and local state"
+
+[dependencies]
+zodia-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "zodia-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "p2panda network layer — swarm topics, peer discovery, ZodiaNetEvent stream"
+
+[dependencies]
+zodia-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "zodia-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ephemeris, aspect engine, and chart types for Zodia — no network dependencies"
+
+[dependencies]
+blake3.workspace = true
+geohash = "0.13"
+serde.workspace = true
+thiserror.workspace = true

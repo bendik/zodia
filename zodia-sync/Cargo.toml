@@ -1,0 +1,12 @@
+[package]
+name = "zodia-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custom sync protocol for the interpretation commons, built on p2panda-sync"
+
+[dependencies]
+zodia-core.workspace = true
+zodia-store.workspace = true
+serde.workspace = true
+thiserror.workspace = true

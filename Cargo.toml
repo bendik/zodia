@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "zodia-core",
+    "zodia-net",
+    "zodia-store",
+    "zodia-crypto",
+    "zodia-sync",
+    "zodia-av",
+    "zodia-app",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+zodia-core   = { path = "zodia-core" }
+zodia-net    = { path = "zodia-net" }
+zodia-store  = { path = "zodia-store" }
+zodia-crypto = { path = "zodia-crypto" }
+zodia-sync   = { path = "zodia-sync" }
+zodia-av     = { path = "zodia-av" }
+
+blake3  = "1"
+serde   = { version = "1", features = ["derive"] }
+thiserror = "2"

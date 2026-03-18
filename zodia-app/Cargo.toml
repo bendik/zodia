@@ -1,0 +1,18 @@
+[package]
+name = "zodia-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Relm4 + GTK4 frontend for Zodia"
+
+[[bin]]
+name = "zodia"
+path = "src/main.rs"
+
+[dependencies]
+zodia-core.workspace = true
+zodia-net.workspace = true
+zodia-store.workspace = true
+zodia-crypto.workspace = true
+zodia-av.workspace = true
+serde.workspace = true

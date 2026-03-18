@@ -1,0 +1,11 @@
+[package]
+name = "zodia-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Consent tier key material — X3DH, Double Ratchet, p2panda-encryption glue"
+
+[dependencies]
+zodia-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
