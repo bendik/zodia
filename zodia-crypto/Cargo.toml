@@ -3,9 +3,16 @@ name = "zodia-crypto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Consent tier key material — X3DH, Double Ratchet, p2panda-encryption glue"
+description = "Consent tier key material — identity keypair, X3DH, symmetric ratchet"
 
 [dependencies]
 zodia-core.workspace = true
+p2panda-core = "0.5.2"
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+blake3.workspace = true
+chacha20poly1305 = "0.10"
+rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true

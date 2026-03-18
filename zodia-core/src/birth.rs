@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Encode a lat/lon + JDN into a `BirthData` using the geohash crate.
+///
+/// `precision` sets the geohash length:  3 ≈ 600 km, 5 ≈ 5 km, 9 ≈ 2 m.
+pub fn birth_from_coords(jdn: f64, lat: f64, lon: f64, precision: usize) -> BirthData {
+    let coord = geohash::Coord { x: lon, y: lat };
+    let gh = geohash::encode(coord, precision).unwrap_or_else(|_| "gcpvj".to_string());
+    BirthData::new(jdn, gh)
+}
+
 /// Core identity of a birth moment — no calendar date, no timezone, no name.
 ///
 /// `jdn` is the Julian Day Number (fractional), computed once from the user's

@@ -7,5 +7,20 @@ description = "p2panda network layer — swarm topics, peer discovery, ZodiaNetE
 
 [dependencies]
 zodia-core.workspace = true
+iroh = "0.96"
+p2panda-net = { version = "0.5.2", features = [
+    "address_book",
+    "iroh_endpoint",
+    "iroh_mdns",
+    "discovery",
+    "gossip",
+] }
+p2panda-core = "0.5.2"
+ed25519-dalek.workspace = true
+tokio.workspace = true
+futures-util = "0.3"
+ciborium = "0.2"
+hex = "0.4"
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true

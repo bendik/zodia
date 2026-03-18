@@ -1,5 +1,6 @@
 pub mod aspects;
 pub mod birth;
+pub mod calendar;
 pub mod chart;
 pub mod ephemeris;
 pub mod houses;
@@ -9,8 +10,9 @@ pub mod topic;
 pub mod transit;
 
 pub use aspects::{Aspect, AspectKind, AspectSet, AspectSig, SynastryAspect,
-                  compute_aspects, compute_synastry};
-pub use birth::BirthData;
+                  angular_separation, detect_aspect, compute_aspects, compute_synastry};
+pub use birth::{BirthData, birth_from_coords};
+pub use calendar::{gregorian_to_jdn, current_jdn};
 pub use chart::Chart;
 pub use ephemeris::{EphemerisError, compute_positions};
 pub use houses::{HouseError, HouseKind, HouseSystem};

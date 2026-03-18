@@ -1,0 +1,16 @@
+[package]
+name = "zodia-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XDG-style persistent identity and birth data for Zodia — minimal config layer"
+
+[dependencies]
+zodia-core.workspace = true
+zodia-crypto.workspace = true
+ciborium.workspace = true
+dirs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand_core.workspace = true

@@ -125,12 +125,13 @@ pub struct AspectSet {
 // ── computation ─────────────────────────────────────────────────────────────
 
 /// Unsigned angular separation between two ecliptic longitudes (0–180°).
-pub(crate) fn angular_separation(a: f64, b: f64) -> f64 {
+pub fn angular_separation(a: f64, b: f64) -> f64 {
     let d = (b - a).rem_euclid(360.0);
     if d > 180.0 { 360.0 - d } else { d }
 }
 
-pub(crate) fn detect_aspect(sep: f64) -> Option<(AspectKind, f64)> {
+/// Aspect detection against the standard orb table.
+pub fn detect_aspect(sep: f64) -> Option<(AspectKind, f64)> {
     ASPECTS.iter().find_map(|&kind| {
         let orb = sep - kind.angle();
         (orb.abs() <= kind.default_orb()).then_some((kind, orb))

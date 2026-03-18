@@ -5,6 +5,7 @@ members = [
     "zodia-store",
     "zodia-crypto",
     "zodia-sync",
+    "zodia-config",
     "zodia-av",
     "zodia-app",
 ]
@@ -23,6 +24,15 @@ zodia-crypto = { path = "zodia-crypto" }
 zodia-sync   = { path = "zodia-sync" }
 zodia-av     = { path = "zodia-av" }
 
-blake3  = "1"
-serde   = { version = "1", features = ["derive"] }
-thiserror = "2"
+zodia-config = { path = "zodia-config" }
+
+blake3     = "1"
+serde      = { version = "1", features = ["derive"] }
+thiserror  = "2"
+tokio      = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+x25519-dalek  = { version = "2.0.1", features = ["static_secrets", "getrandom", "reusable_secrets"] }
+rand_core  = { version = "0.6", features = ["getrandom"] }
+tracing    = "0.1"
+dirs       = "5"
+ciborium   = "0.2"

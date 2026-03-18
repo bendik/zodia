@@ -12,7 +12,12 @@ path = "src/main.rs"
 [dependencies]
 zodia-core.workspace = true
 zodia-net.workspace = true
-zodia-store.workspace = true
 zodia-crypto.workspace = true
-zodia-av.workspace = true
+zodia-config.workspace = true
+relm4 = { version = "0.9", features = ["macros"] }
+gtk4 = "0.9"
 serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"

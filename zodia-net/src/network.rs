@@ -1,0 +1,233 @@
+//! ZodiaNetwork — composes p2panda-net's modular building blocks into a
+//! single handle the app layer holds for all network operations.
+//!
+//! Component roles:
+//!   AddressBook  — knows which peers are on which topics, manages reconnects
+//!   Endpoint     — QUIC transport (iroh), the actual I/O primitive
+//!   MdnsDiscovery — local LAN peer discovery
+//!   Discovery    — internet-wide peer discovery via p2panda DHT random walk
+//!   Gossip       — topic-scoped ephemeral broadcast (Tier-0 announcements)
+//!
+//! The app receives all domain events via a `tokio::sync::mpsc::Receiver<ZodiaNetEvent>`.
+
+use crate::{PeerId, SwarmTopics, Tier0Blob, ZodiaNetEvent};
+use ed25519_dalek::SigningKey;
+use futures_util::StreamExt;
+use p2panda_core::PrivateKey as PandaKey;
+use p2panda_net::gossip::{GossipHandle, GossipSubscription};
+use p2panda_net::iroh_mdns::{MdnsDiscovery, MdnsDiscoveryMode};
+use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip};
+use thiserror::Error;
+use tokio::sync::mpsc;
+use tracing::{debug, info, instrument, warn};
+use zodia_core::BirthData;
+
+/// Zodia's network identifier — all nodes sharing this ID form one logical
+/// overlay; peers on different IDs are invisible to each other.
+const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+/// Protocol identifier for direct peer-to-peer Tier-1 consent exchanges.
+pub const TIER1_PROTOCOL: &[u8] = b"zodia/tier1/1";
+
+#[derive(Debug, Error)]
+pub enum NetworkError {
+    #[error("address book: {0}")]
+    AddressBook(String),
+    #[error("endpoint: {0}")]
+    Endpoint(String),
+    #[error("gossip: {0}")]
+    Gossip(String),
+    #[error("discovery: {0}")]
+    Discovery(String),
+    #[error("publish failed")]
+    Publish,
+}
+
+/// Configuration for spawning a ZodiaNetwork.
+pub struct NetworkConfig {
+    /// The peer's ed25519 identity key.  The same bytes are used as the
+    /// p2panda identity (operation signing) AND the iroh NodeId (transport).
+    pub signing_key: SigningKey,
+}
+
+/// The live network handle.  Holds all p2panda-net components alive.
+///
+/// Cheap to clone — all inner components are reference-counted.
+pub struct ZodiaNetwork {
+    // Kept alive for the interpretation index sync (LogSync wiring — coming in zodia-sync)
+    #[allow(dead_code)]
+    gossip: Gossip,
+    broad_handle: GossipHandle,
+    narrow_handle: GossipHandle,
+    endpoint: Endpoint,
+    /// Pre-constructed, signed announce blob for this peer.
+    my_blob: Tier0Blob,
+    event_tx: mpsc::Sender<ZodiaNetEvent>,
+    // Keep discovery components alive (their drop = shutdown).
+    _address_book: AddressBook,
+    _mdns: MdnsDiscovery,
+    _discovery: Discovery,
+}
+
+impl ZodiaNetwork {
+    /// Spawn all network components and return the network handle plus the
+    /// event channel receiver the app should poll.
+    #[instrument(skip_all, fields(geohash = %birth.geohash))]
+    pub async fn spawn(
+        config: NetworkConfig,
+        birth: &BirthData,
+    ) -> Result<(Self, mpsc::Receiver<ZodiaNetEvent>), NetworkError> {
+        // Derive the p2panda PrivateKey from the same scalar bytes.
+        let panda_key = PandaKey::from_bytes(config.signing_key.as_bytes());
+
+        let address_book = AddressBook::builder()
+            .spawn()
+            .await
+            .map_err(|e| NetworkError::AddressBook(e.to_string()))?;
+        debug!("address book ready");
+
+        let endpoint = Endpoint::builder(address_book.clone())
+            .network_id(NETWORK_ID)
+            .private_key(panda_key)
+            .spawn()
+            .await
+            .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
+        let node_id_hex = hex::encode_upper(&endpoint.node_id().as_bytes()[..4]);
+        info!(node_id = %node_id_hex, "endpoint ready");
+
+        let mdns = MdnsDiscovery::builder(address_book.clone(), endpoint.clone())
+            .mode(MdnsDiscoveryMode::Active)
+            .spawn()
+            .await
+            .map_err(|e| NetworkError::Discovery(e.to_string()))?;
+        debug!("mDNS discovery active");
+
+        let discovery = Discovery::builder(address_book.clone(), endpoint.clone())
+            .spawn()
+            .await
+            .map_err(|e| NetworkError::Discovery(e.to_string()))?;
+        debug!("DHT discovery active");
+
+        let gossip = Gossip::builder(address_book.clone(), endpoint.clone())
+            .spawn()
+            .await
+            .map_err(|e| NetworkError::Gossip(e.to_string()))?;
+        debug!("gossip engine ready");
+
+        // Subscribe to both astrological neighbourhood topics.
+        let topics = SwarmTopics::from_birth(birth);
+        let broad_handle = gossip
+            .stream(topics.broad.0)
+            .await
+            .map_err(|e| NetworkError::Gossip(e.to_string()))?;
+        let narrow_handle = gossip
+            .stream(topics.narrow.0)
+            .await
+            .map_err(|e| NetworkError::Gossip(e.to_string()))?;
+        info!("subscribed to broad + narrow gossip topics");
+
+        let my_blob = Tier0Blob::sign(birth, &config.signing_key);
+        let (event_tx, event_rx) = mpsc::channel(256);
+
+        // Background tasks: relay gossip messages as ZodiaNetEvents.
+        spawn_gossip_listener(broad_handle.subscribe(), event_tx.clone());
+        spawn_gossip_listener(narrow_handle.subscribe(), event_tx.clone());
+
+        let net = ZodiaNetwork {
+            gossip,
+            broad_handle,
+            narrow_handle,
+            endpoint,
+            my_blob,
+            event_tx,
+            _address_book: address_book,
+            _mdns: mdns,
+            _discovery: discovery,
+        };
+        info!("ZodiaNetwork spawned");
+        Ok((net, event_rx))
+    }
+
+    /// Broadcast our signed Tier-0 announce blob to both swarm topics.
+    ///
+    /// Call this once on startup and again whenever re-announcing (e.g. after
+    /// a long offline period).
+    #[instrument(skip(self))]
+    pub async fn publish_announce(&self) -> Result<(), NetworkError> {
+        let bytes = self.my_blob.to_cbor();
+        self.broad_handle
+            .publish(bytes.clone())
+            .await
+            .map_err(|_| NetworkError::Publish)?;
+        self.narrow_handle
+            .publish(bytes)
+            .await
+            .map_err(|_| NetworkError::Publish)?;
+        info!("tier-0 announce published to both topics");
+        Ok(())
+    }
+
+    /// Open a direct QUIC connection to `peer` for the Tier-1 handshake.
+    ///
+    /// Both sides then use `channel::tier1_exchange` to exchange `Tier1Blob`s
+    /// and derive the shared session key via X3DH.
+    #[instrument(skip(self), fields(peer = %hex::encode_upper(&peer.0[..4])))]
+    pub async fn connect_peer(&self, peer: &PeerId) -> Result<crate::channel::DirectChannel, NetworkError> {
+        debug!("opening tier-1 QUIC connection");
+        let node_id = peer.to_node_id();
+        let conn = self
+            .endpoint
+            .connect(node_id, TIER1_PROTOCOL)
+            .await
+            .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
+        info!("tier-1 channel open");
+        Ok(crate::channel::DirectChannel::from_connection(conn))
+    }
+
+    /// Our own node ID (= public key bytes of the identity keypair).
+    pub fn node_id(&self) -> PeerId {
+        let bytes: [u8; 32] = *self.endpoint.node_id().as_bytes();
+        PeerId(bytes)
+    }
+
+    /// A clone of the event sender — allows other subsystems (e.g. the AV
+    /// layer) to inject events into the same stream.
+    pub fn event_sender(&self) -> mpsc::Sender<ZodiaNetEvent> {
+        self.event_tx.clone()
+    }
+}
+
+// ── gossip listener ───────────────────────────────────────────────────────────
+
+fn spawn_gossip_listener(
+    mut sub: GossipSubscription,
+    tx: mpsc::Sender<ZodiaNetEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(result) = sub.next().await {
+            match result {
+                Ok(bytes) => match Tier0Blob::from_cbor(&bytes) {
+                    Ok(blob) if blob.verify().is_ok() => {
+                        let peer_id = PeerId(blob.pubkey);
+                        debug!(
+                            peer = %hex::encode_upper(&peer_id.0[..4]),
+                            geohash = %blob.geohash_prefix,
+                            solar_month = blob.solar_month,
+                            "peer discovered via gossip"
+                        );
+                        let _ = tx.send(ZodiaNetEvent::PeerDiscovered { peer_id, blob }).await;
+                    }
+                    Ok(_) => {
+                        warn!("gossip: received blob with invalid signature — discarding");
+                    }
+                    Err(e) => {
+                        debug!(err = %e, "gossip: CBOR decode error — discarding");
+                    }
+                },
+                Err(_lagged) => {
+                    warn!("gossip: broadcast channel lagged — messages dropped");
+                }
+            }
+        }
+    });
+}
