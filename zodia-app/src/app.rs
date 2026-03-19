@@ -2,29 +2,32 @@
 //!
 //! `AppModel` is an `AsyncComponent` that drives the full lifecycle:
 //!   1. First-run setup  — collect birth date + location, compute chart
-//!   2. Main view        — display natal aspects, current transits, and
-//!                         peer discovery with approximate synastry glyphs
-//!   3. Network events   — `CommandOutput = ZodiaNetEvent` keeps the peer
+//!   2. Main view        — Chart / Sky / Peers tabs in an `adw::NavigationView`
+//!   3. Connected peer   — pushed `adw::NavigationPage` with synastry + call
+//!   4. Network events   — `CommandOutput = ZodiaNetEvent` keeps the peer
 //!                         list reactive without blocking the GTK thread
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use libadwaita as adw;
-use libadwaita::prelude::*; // also re-exports gtk::prelude
+use libadwaita::prelude::*;
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 use tokio::sync::mpsc::Receiver;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use zodia_av::AudioSession;
 use zodia_config::LocalConfig;
 use zodia_core::{birth_from_coords, current_jdn, gregorian_to_jdn, Chart};
-use zodia_net::{ChannelMsg, DirectChannel, NetworkConfig, PeerId, ZodiaNetEvent, ZodiaNetwork};
+use zodia_net::{ChannelMsg, DirectChannel, NetworkConfig, PeerId, Tier1Blob, ZodiaNetEvent,
+                ZodiaNetwork};
 use zodia_store::ZodiaStore;
 
 use crate::aspect_list;
+use crate::aspect_view::AspectView;
 use crate::peer_list::{PeerEntry, PeerInit, PeerOutput};
+use crate::peer_page;
 use crate::util::approximate_aspects;
 
 // ── init ──────────────────────────────────────────────────────────────────────
@@ -84,7 +87,7 @@ pub struct AppModel {
     on_setup_page: bool,
     chart: Option<Chart>,
 
-    // Shared store — wrapped so signal handlers in aspect rows can access it.
+    /// Shared store — Rc so GTK signal closures can borrow it.
     store: Rc<RefCell<ZodiaStore>>,
 
     network: Option<ZodiaNetwork>,
@@ -99,6 +102,10 @@ pub struct AppModel {
 
     call_state: CallState,
     connected_channels: HashMap<PeerId, DirectChannel>,
+
+    /// Peers whose Tier-1 exchange has completed — drives peer page creation.
+    connected_peers: HashMap<PeerId, Tier1Blob>,
+
     active_audio: Option<AudioSession>,
 }
 
@@ -109,9 +116,10 @@ pub struct AppWidgets {
     outer_stack: gtk::Stack,
     setup_status: gtk::Label,
 
-    // ListBox widgets for the chart / sky tabs (lazily populated).
-    natal_list: gtk::ListBox,
-    transit_list: gtk::ListBox,
+    /// Container for the natal `AspectView` — lazily populated.
+    chart_container: gtk::Box,
+    /// Container for the transit `AspectView` — lazily populated.
+    sky_container: gtk::Box,
 
     peers_page: adw::ViewStackPage,
     peer_count_label: gtk::Label,
@@ -122,8 +130,10 @@ pub struct AppWidgets {
     accept_btn: gtk::Button,
     hangup_btn: gtk::Button,
 
-    // Root window reference — needed by update_view to pass to dialog builder.
-    window: adw::ApplicationWindow,
+    /// NavigationView holding the main page + pushed peer pages.
+    nav_view: adw::NavigationView,
+    /// Peers already pushed as navigation pages (avoids duplicates).
+    shown_peers: HashSet<PeerId>,
 }
 
 // ── async component ───────────────────────────────────────────────────────────
@@ -169,6 +179,7 @@ impl AsyncComponent for AppModel {
             author_pk,
             call_state: CallState::Idle,
             connected_channels: HashMap::new(),
+            connected_peers: HashMap::new(),
             active_audio: None,
         };
 
@@ -252,6 +263,21 @@ impl AsyncComponent for AppModel {
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
                             info!(peer = %hex::encode_upper(&peer_id.0[..4]), "tier-1 channel opened");
+
+                            // Exchange birth data before registering the channel listener
+                            // so the handshake stream is consumed by exchange_tier1, not
+                            // the generic message loop.
+                            if let Some(our_blob) = make_tier1_blob(&self.config) {
+                                match channel.exchange_tier1(&our_blob).await {
+                                    Ok(their_blob) => {
+                                        info!(peer = %hex::encode_upper(&peer_id.0[..4]),
+                                              "tier-1 exchange complete");
+                                        self.connected_peers.insert(peer_id.clone(), their_blob);
+                                    }
+                                    Err(e) => warn!("tier-1 exchange: {e}"),
+                                }
+                            }
+
                             net.accept_channel(peer_id.clone(), channel.clone());
                             self.connected_channels.insert(peer_id, channel);
                         }
@@ -351,6 +377,23 @@ impl AsyncComponent for AppModel {
                     self.peer_count = self.peer_count.saturating_sub(1);
                 }
             }
+            ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
+                if let Some(net) = &self.network {
+                    // Exchange before registering the message loop.
+                    if let Some(our_blob) = make_tier1_blob(&self.config) {
+                        match channel.exchange_tier1(&our_blob).await {
+                            Ok(their_blob) => {
+                                info!(peer = %hex::encode_upper(&peer_id.0[..4]),
+                                      "tier-1 exchange complete (incoming)");
+                                self.connected_peers.insert(peer_id.clone(), their_blob);
+                            }
+                            Err(e) => warn!("tier-1 exchange (incoming): {e}"),
+                        }
+                    }
+                    net.accept_channel(peer_id.clone(), channel.clone());
+                    self.connected_channels.insert(peer_id, channel);
+                }
+            }
             ZodiaNetEvent::CallOffer { from, session_id } => {
                 self.call_state = CallState::Ringing { peer_id: from, session_id };
             }
@@ -365,18 +408,11 @@ impl AsyncComponent for AppModel {
                 self.active_audio = None;
                 self.call_state = CallState::Idle;
             }
-            ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
-                if let Some(net) = &self.network {
-                    info!(peer = %hex::encode_upper(&peer_id.0[..4]), "incoming tier-1 channel");
-                    net.accept_channel(peer_id.clone(), channel.clone());
-                    self.connected_channels.insert(peer_id, channel);
-                }
-            }
             _ => {}
         }
     }
 
-    fn update_view(&self, widgets: &mut Self::Widgets, _sender: AsyncComponentSender<Self>) {
+    fn update_view(&self, widgets: &mut Self::Widgets, sender: AsyncComponentSender<Self>) {
         if self.on_setup_page {
             widgets.outer_stack.set_visible_child_name("setup");
         } else {
@@ -384,51 +420,44 @@ impl AsyncComponent for AppModel {
         }
         widgets.setup_status.set_text(&self.setup_error);
 
-        // Lazily populate aspect lists the first time the main page is shown.
-        // `first_child().is_none()` means the list has never been populated.
-        if !self.on_setup_page && widgets.natal_list.first_child().is_none() {
+        // Lazily populate aspect views the first time the main page is shown.
+        if !self.on_setup_page && widgets.chart_container.first_child().is_none() {
             if let Some(chart) = &self.chart {
-                // Natal aspects
-                let nat = aspect_list::natal_items(&chart.natal_aspects());
-                let nat_list = aspect_list::build_list(
-                    nat,
+                let nav = AspectView::natal(
+                    aspect_list::natal_items(&chart.natal_aspects()),
+                    chart,
                     Rc::clone(&self.store),
                     self.author_pk,
-                    &widgets.window,
                 );
-                // Swap the placeholder list for the populated one.
-                // We built natal_list as an empty ListBox; populate it in-place.
-                for item in nat_list
-                    .observe_children()
-                    .into_iter()
-                    .flat_map(|o| o.ok())
-                    .flat_map(|o| o.downcast::<gtk::Widget>().ok())
-                {
-                    nat_list.remove(&item);
-                    widgets.natal_list.append(&item);
-                }
+                nav.widget().set_vexpand(true);
+                widgets.chart_container.append(nav.widget());
 
-                // Transit aspects
                 if let Ok(ts) = chart.transits_at(current_jdn()) {
-                    let tr = aspect_list::transit_items(
-                        &ts.transit_aspects,
-                        &ts.house_transits,
-                    );
-                    let tr_list = aspect_list::build_list(
-                        tr,
+                    let tav = AspectView::new(
+                        aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
                         Rc::clone(&self.store),
                         self.author_pk,
-                        &widgets.window,
                     );
-                    for item in tr_list
-                        .observe_children()
-                        .into_iter()
-                        .flat_map(|o| o.ok())
-                        .flat_map(|o| o.downcast::<gtk::Widget>().ok())
-                    {
-                        tr_list.remove(&item);
-                        widgets.transit_list.append(&item);
-                    }
+                    tav.widget().set_vexpand(true);
+                    widgets.sky_container.append(tav.widget());
+                }
+            }
+        }
+
+        // Push a navigation page for each newly connected peer.
+        for (peer_id, their_blob) in &self.connected_peers {
+            if !widgets.shown_peers.contains(peer_id) {
+                if let Some(chart) = &self.chart {
+                    let page = peer_page::build_peer_page(
+                        peer_id,
+                        their_blob,
+                        chart,
+                        Rc::clone(&self.store),
+                        self.author_pk,
+                        &sender,
+                    );
+                    widgets.nav_view.push(&page);
+                    widgets.shown_peers.insert(peer_id.clone());
                 }
             }
         }
@@ -512,6 +541,18 @@ fn start_network_command(
     });
 }
 
+/// Construct our Tier-1 blob with exact birth data.
+///
+/// Prekey/ephemeral fields are zeroed — crypto key exchange is deferred
+/// until message support is added (see zodia-crypto).
+fn make_tier1_blob(config: &LocalConfig) -> Option<Tier1Blob> {
+    config.birth.as_ref().map(|birth| Tier1Blob {
+        birth: birth.clone(),
+        prekey:   [0u8; 32], // TODO: real X25519 prekey
+        ephemeral: [0u8; 32], // TODO: real ephemeral key for X3DH
+    })
+}
+
 // ── widget construction ───────────────────────────────────────────────────────
 
 fn build_widgets(
@@ -528,34 +569,32 @@ fn build_widgets(
     let (setup_page, setup_status) = build_setup_page(sender);
     outer_stack.add_named(&setup_page, Some("setup"));
 
-    let (main_page, natal_list, transit_list, peers_page, peer_count_label,
+    let (nav_view, chart_container, sky_container, peers_page, peer_count_label,
          node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn) =
         build_main_page(model, sender);
-    outer_stack.add_named(&main_page, Some("main"));
+    outer_stack.add_named(&nav_view, Some("main"));
 
     peers_scrolled.set_child(Some(model.peers.widget()));
 
-    // If chart is already available (returning user), populate the lists now
-    // so they appear immediately without waiting for a model mutation.
+    // For returning users with an existing chart, populate aspect views now.
     if let Some(chart) = &model.chart {
-        let nat = aspect_list::natal_items(&chart.natal_aspects());
-        let nat_list = aspect_list::build_list(
-            nat,
+        let nav = AspectView::natal(
+            aspect_list::natal_items(&chart.natal_aspects()),
+            chart,
             Rc::clone(&model.store),
             model.author_pk,
-            root,
         );
-        reparent_children(&nat_list, &natal_list);
+        nav.widget().set_vexpand(true);
+        chart_container.append(nav.widget());
 
         if let Ok(ts) = chart.transits_at(current_jdn()) {
-            let tr = aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits);
-            let tr_list = aspect_list::build_list(
-                tr,
+            let tav = AspectView::new(
+                aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
                 Rc::clone(&model.store),
                 model.author_pk,
-                root,
             );
-            reparent_children(&tr_list, &transit_list);
+            tav.widget().set_vexpand(true);
+            sky_container.append(tav.widget());
         }
     }
 
@@ -570,8 +609,8 @@ fn build_widgets(
     AppWidgets {
         outer_stack,
         setup_status,
-        natal_list,
-        transit_list,
+        chart_container,
+        sky_container,
         peers_page,
         peer_count_label,
         node_id_label,
@@ -579,19 +618,8 @@ fn build_widgets(
         call_status,
         accept_btn,
         hangup_btn,
-        window: root.clone(),
-    }
-}
-
-/// Move all children from `src` list into `dst` list.
-///
-/// `build_list` returns a freshly constructed `gtk::ListBox`.  Since GTK
-/// widgets can only have one parent, we detach each row from `src` and
-/// append it to `dst` (the list that lives inside our widget hierarchy).
-fn reparent_children(src: &gtk::ListBox, dst: &gtk::ListBox) {
-    while let Some(child) = src.first_child() {
-        src.remove(&child);
-        dst.append(&child);
+        nav_view,
+        shown_peers: HashSet::new(),
     }
 }
 
@@ -635,7 +663,6 @@ fn build_setup_page(
     subtitle.set_max_width_chars(50);
     content.append(&subtitle);
 
-    // Birth date / time group
     let date_group = adw::PreferencesGroup::new();
     date_group.set_title("Birth Date & Time");
 
@@ -666,7 +693,6 @@ fn build_setup_page(
 
     content.append(&date_group);
 
-    // Location group
     let loc_group = adw::PreferencesGroup::new();
     loc_group.set_title("Birth Location");
 
@@ -724,60 +750,35 @@ fn build_setup_page(
 
 // ── main page ─────────────────────────────────────────────────────────────────
 
-#[allow(deprecated)] // ViewSwitcherTitle — see note in aspect_list.rs
+#[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4; migrate when bindings catch up
 #[allow(clippy::type_complexity)]
 fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
-    adw::ToolbarView,
-    gtk::ListBox, gtk::ListBox,
-    adw::ViewStackPage, gtk::Label,
-    gtk::Label,
-    gtk::ScrolledWindow,
-    gtk::Box, gtk::Label, gtk::Button, gtk::Button,
+    adw::NavigationView,
+    gtk::Box, gtk::Box,               // chart_container, sky_container
+    adw::ViewStackPage, gtk::Label,   // peers_page, peer_count_label
+    gtk::Label,                       // node_id_label
+    gtk::ScrolledWindow,              // peers_scrolled
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button, // call bar widgets
 ) {
     let toolbar_view = adw::ToolbarView::new();
     let view_stack = adw::ViewStack::new();
 
     // ── Chart tab ─────────────────────────────────────────────────────────────
-    let chart_scroll = gtk::ScrolledWindow::new();
-    chart_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    let chart_clamp = adw::Clamp::new();
-    chart_clamp.set_maximum_size(720);
-    chart_clamp.set_margin_top(16);
-    chart_clamp.set_margin_bottom(16);
-    chart_clamp.set_margin_start(12);
-    chart_clamp.set_margin_end(12);
+    let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    chart_container.set_vexpand(true);
 
-    // Placeholder list — populated lazily (or immediately if chart is known).
-    let natal_list = gtk::ListBox::new();
-    natal_list.add_css_class("boxed-list");
-    natal_list.set_selection_mode(gtk::SelectionMode::None);
-    chart_clamp.set_child(Some(&natal_list));
-    chart_scroll.set_child(Some(&chart_clamp));
-
-    let chart_page = view_stack.add_titled(&chart_scroll, Some("chart"), "Chart");
+    let chart_page = view_stack.add_titled(&chart_container, Some("chart"), "Chart");
     chart_page.set_icon_name(Some("weather-clear-symbolic"));
     let _ = chart_page;
 
     // ── Sky tab ───────────────────────────────────────────────────────────────
-    let sky_scroll = gtk::ScrolledWindow::new();
-    sky_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    let sky_clamp = adw::Clamp::new();
-    sky_clamp.set_maximum_size(720);
-    sky_clamp.set_margin_top(16);
-    sky_clamp.set_margin_bottom(16);
-    sky_clamp.set_margin_start(12);
-    sky_clamp.set_margin_end(12);
+    let sky_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sky_container.set_vexpand(true);
 
-    let transit_list = gtk::ListBox::new();
-    transit_list.add_css_class("boxed-list");
-    transit_list.set_selection_mode(gtk::SelectionMode::None);
-    sky_clamp.set_child(Some(&transit_list));
-    sky_scroll.set_child(Some(&sky_clamp));
-
-    let sky_page = view_stack.add_titled(&sky_scroll, Some("sky"), "Sky");
+    let sky_page = view_stack.add_titled(&sky_container, Some("sky"), "Sky");
     sky_page.set_icon_name(Some("night-light-symbolic"));
     let _ = sky_page;
 
@@ -840,7 +841,6 @@ fn build_main_page(
         .build();
     toolbar_view.add_bottom_bar(&switcher_bar);
 
-    // Call bar (above switcher — added after so it sits closer to content)
     let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     call_bar.add_css_class("toolbar");
     call_bar.set_margin_start(8);
@@ -869,10 +869,13 @@ fn build_main_page(
 
     toolbar_view.add_bottom_bar(&call_bar);
 
-    // Ignore unused model reference (kept for possible future use).
+    // Wrap in NavigationView so peer pages can be pushed onto the stack.
+    let nav_view = adw::NavigationView::new();
+    nav_view.push(&adw::NavigationPage::new(&toolbar_view, "Zodia"));
+
     let _ = model;
 
-    (toolbar_view, natal_list, transit_list, peers_page, peer_count_label,
+    (nav_view, chart_container, sky_container, peers_page, peer_count_label,
      node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
 }
 

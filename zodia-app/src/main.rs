@@ -5,7 +5,10 @@
 
 mod app;
 mod aspect_list;
+mod aspect_view;
 mod peer_list;
+mod peer_page;
+mod placements;
 mod util;
 
 use app::{AppInit, AppModel};
