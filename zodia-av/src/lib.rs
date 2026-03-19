@@ -57,11 +57,14 @@ pub enum AvError {
 ///
 /// Drop to end the call — the codec threads and QUIC tasks shut down
 /// automatically when the `shutdown` flag is set and their channels close.
+///
+/// Audio streams are `Option` — if no suitable device is found, the call
+/// continues without audio (the QUIC transport and signaling still work).
 pub struct AudioSession {
-    /// Keeps the capture stream alive (drop = mic off).
-    _capture: cpal::Stream,
-    /// Keeps the playback stream alive (drop = speaker off).
-    _playback: cpal::Stream,
+    /// Keeps the capture stream alive (drop = mic off).  `None` = no mic.
+    _capture: Option<cpal::Stream>,
+    /// Keeps the playback stream alive (drop = speaker off).  `None` = muted.
+    _playback: Option<cpal::Stream>,
     /// Signals codec threads to exit.
     shutdown: Arc<AtomicBool>,
 }
@@ -81,8 +84,21 @@ impl AudioSession {
         let (cap_prod, cap_cons) = HeapRb::<f32>::new(cap_samples).split();
         let (play_prod, play_cons) = HeapRb::<f32>::new(play_samples).split();
 
-        let _capture = capture::start_capture(cap_prod)?;
-        let _playback = playback::start_playback(play_cons)?;
+        let _capture = match capture::start_capture(cap_prod) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!("microphone unavailable, call will be muted: {e}");
+                None
+            }
+        };
+
+        let _playback = match playback::start_playback(play_cons) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!("speaker unavailable, call will be silent: {e}");
+                None
+            }
+        };
 
         transport::start_transport(
             channel.connection(),

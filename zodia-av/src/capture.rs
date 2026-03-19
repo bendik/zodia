@@ -22,7 +22,7 @@ pub enum CaptureError {
 /// Starts a cpal input stream.  Returns the stream (must be kept alive).
 pub fn start_capture(mut prod: HeapProducer<f32>) -> Result<cpal::Stream, CaptureError> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or(CaptureError::NoDevice)?;
+    let device = find_input_device(&host).ok_or(CaptureError::NoDevice)?;
 
     let config = StreamConfig {
         channels: 1,
@@ -44,4 +44,16 @@ pub fn start_capture(mut prod: HeapProducer<f32>) -> Result<cpal::Stream, Captur
 
     stream.play().map_err(|e| CaptureError::Play(e.to_string()))?;
     Ok(stream)
+}
+
+/// Try the default input device first; if it has no supported configs, fall
+/// back to enumerating all input devices and return the first usable one.
+fn find_input_device(host: &cpal::Host) -> Option<cpal::Device> {
+    if let Some(dev) = host.default_input_device() {
+        if dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false) {
+            return Some(dev);
+        }
+        tracing::warn!("default input device has no supported configs, enumerating");
+    }
+    host.input_devices().ok()?.next()
 }

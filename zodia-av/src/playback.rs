@@ -22,7 +22,7 @@ pub enum PlaybackError {
 /// Starts a cpal output stream.  Returns the stream (must be kept alive).
 pub fn start_playback(mut cons: HeapConsumer<f32>) -> Result<cpal::Stream, PlaybackError> {
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or(PlaybackError::NoDevice)?;
+    let device = find_output_device(&host).ok_or(PlaybackError::NoDevice)?;
 
     let config = StreamConfig {
         channels: 1,
@@ -45,4 +45,16 @@ pub fn start_playback(mut cons: HeapConsumer<f32>) -> Result<cpal::Stream, Playb
 
     stream.play().map_err(|e| PlaybackError::Play(e.to_string()))?;
     Ok(stream)
+}
+
+/// Try the default output device first; if it has no supported configs, fall
+/// back to enumerating all output devices and return the first usable one.
+fn find_output_device(host: &cpal::Host) -> Option<cpal::Device> {
+    if let Some(dev) = host.default_output_device() {
+        if dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false) {
+            return Some(dev);
+        }
+        tracing::warn!("default output device has no supported configs, enumerating");
+    }
+    host.output_devices().ok()?.next()
 }
