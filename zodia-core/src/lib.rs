@@ -10,7 +10,8 @@ pub mod topic;
 pub mod transit;
 
 pub use aspects::{Aspect, AspectKind, AspectSet, AspectSig, SynastryAspect,
-                  angular_separation, detect_aspect, compute_aspects, compute_synastry};
+                  angular_separation, detect_aspect,
+                  compute_aspects, compute_synastry};
 pub use birth::{BirthData, birth_from_coords};
 pub use calendar::{gregorian_to_jdn, current_jdn};
 pub use chart::Chart;

@@ -23,6 +23,7 @@ pub struct PeerInit {
 #[derive(Debug)]
 pub enum PeerOutput {
     Connect(PeerId),
+    Call(PeerId),
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -87,13 +88,27 @@ impl FactoryComponent for PeerEntry {
                     },
                 },
 
-                // right: connect button
-                gtk::Button {
-                    set_label: "Connect",
+                // right: action buttons
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_spacing: 6,
                     set_valign: gtk::Align::Center,
-                    set_css_classes: &["connect-btn"],
-                    connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
-                        sender.output(PeerOutput::Connect(peer_id.clone())).ok();
+
+                    gtk::Button {
+                        set_label: "Connect",
+                        set_css_classes: &["connect-btn"],
+                        connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
+                            sender.output(PeerOutput::Connect(peer_id.clone())).ok();
+                        },
+                    },
+
+                    gtk::Button {
+                        set_label: "☎",
+                        set_tooltip_text: Some("Voice call"),
+                        set_css_classes: &["call-btn"],
+                        connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
+                            sender.output(PeerOutput::Call(peer_id.clone())).ok();
+                        },
                     },
                 },
             }

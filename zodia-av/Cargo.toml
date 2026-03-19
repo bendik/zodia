@@ -3,10 +3,17 @@ name = "zodia-av"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "WebRTC audio/video session — signaling over the noise channel, no identity metadata"
+description = "Opus-over-QUIC audio sessions — capture, encode, transport, decode, play"
 
 [dependencies]
 zodia-core.workspace = true
 zodia-net.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+iroh      = "0.96"
+opus      = "0.3"
+cpal      = "0.15"
+ringbuf   = "0.3"

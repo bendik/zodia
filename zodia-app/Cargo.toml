@@ -14,6 +14,9 @@ zodia-core.workspace = true
 zodia-net.workspace = true
 zodia-crypto.workspace = true
 zodia-config.workspace = true
+zodia-store.workspace = true
+zodia-av.workspace = true
+blake3.workspace = true
 relm4 = { version = "0.9", features = ["macros"] }
 gtk4 = "0.9"
 serde.workspace = true

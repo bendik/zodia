@@ -10,6 +10,7 @@
 //!
 //! The app receives all domain events via a `tokio::sync::mpsc::Receiver<ZodiaNetEvent>`.
 
+use crate::channel::{ChannelMsg, DirectChannel};
 use crate::{PeerId, SwarmTopics, Tier0Blob, ZodiaNetEvent};
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
@@ -195,6 +196,51 @@ impl ZodiaNetwork {
     pub fn event_sender(&self) -> mpsc::Sender<ZodiaNetEvent> {
         self.event_tx.clone()
     }
+
+    /// Register an established `DirectChannel` and start listening for incoming
+    /// `ChannelMsg` messages from that peer, translating them into
+    /// `ZodiaNetEvent`s on the shared event stream.
+    ///
+    /// Call this after a successful outgoing `connect_peer()` AND after
+    /// accepting an incoming connection, so that call signaling is always
+    /// handled in one place.
+    pub fn accept_channel(&self, peer_id: PeerId, channel: DirectChannel) {
+        spawn_channel_listener(peer_id, channel, self.event_tx.clone());
+    }
+}
+
+// ── channel listener ──────────────────────────────────────────────────────────
+
+/// Spawn a background task that reads `ChannelMsg`s from `channel` and
+/// forwards them as `ZodiaNetEvent`s.
+pub(crate) fn spawn_channel_listener(
+    peer_id: PeerId,
+    channel: DirectChannel,
+    tx: mpsc::Sender<ZodiaNetEvent>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match channel.recv_msg().await {
+                Ok(ChannelMsg::CallOffer { session_id }) => {
+                    let _ = tx.send(ZodiaNetEvent::CallOffer { from: peer_id.clone(), session_id }).await;
+                }
+                Ok(ChannelMsg::CallAccept { session_id }) => {
+                    let _ = tx.send(ZodiaNetEvent::CallAccepted { from: peer_id.clone(), session_id }).await;
+                }
+                Ok(ChannelMsg::CallReject { .. }) => {
+                    let _ = tx.send(ZodiaNetEvent::CallRejected { from: peer_id.clone() }).await;
+                }
+                Ok(ChannelMsg::CallHangup { .. }) => {
+                    let _ = tx.send(ZodiaNetEvent::CallHungUp { from: peer_id.clone() }).await;
+                }
+                Ok(_) => {} // Tier1Handshake already handled at connect time
+                Err(e) => {
+                    debug!(peer = %hex::encode_upper(&peer_id.0[..4]), err = %e, "channel closed");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 // ── gossip listener ───────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ pub mod announce;
 pub mod channel;
 pub mod network;
 
+pub use channel::{ChannelMsg, DirectChannel};
 pub use network::{NetworkConfig, NetworkError, ZodiaNetwork};
 
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,14 @@ pub enum ZodiaNetEvent {
     SessionRequested { peer_id: PeerId },
     /// The peer has accepted our Tier-1 connection request.
     SessionAccepted { peer_id: PeerId },
+    /// An established peer is requesting a voice call.
+    CallOffer { from: PeerId, session_id: [u8; 32] },
+    /// The remote peer accepted our outgoing call offer.
+    CallAccepted { from: PeerId, session_id: [u8; 32] },
+    /// The remote peer rejected our outgoing call offer.
+    CallRejected { from: PeerId },
+    /// The remote peer ended an active call.
+    CallHungUp { from: PeerId },
 }
 
 // ── topic helpers ─────────────────────────────────────────────────────────────

@@ -2,15 +2,16 @@
 //!
 //! Used for all post-tier-0 exchanges:
 //!   - Tier 1: `Tier1Blob` exchange + X3DH key agreement
-//!   - Tier 2: WebRTC offer/answer/ICE (signaling)
-//!   - Tier 3: in-session plaintext messages
+//!   - Call signaling: `ChannelMsg` over reliable QUIC streams
+//!   - Audio transport: raw QUIC datagrams (unreliable, low-latency)
 //!
-//! Each message is length-prefixed (4 bytes, big-endian u32) over fresh
-//! bidirectional QUIC streams.  Opening a new stream per message keeps
-//! head-of-line blocking isolated to individual messages.
+//! Reliable messages use a length-prefix (4 bytes, big-endian u32) over fresh
+//! bidirectional QUIC streams — one stream per message to isolate HoL blocking.
 
 use crate::Tier1Blob;
+use bytes::Bytes;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -27,18 +28,47 @@ pub enum ChannelError {
     TooLarge(u32),
 }
 
-/// Maximum single message size (1 MiB).
+/// Maximum single reliable message size (1 MiB).
 const MAX_MSG_BYTES: u32 = 1024 * 1024;
 
+// ── signaling messages ────────────────────────────────────────────────────────
+
+/// Typed messages exchanged over reliable QUIC streams.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChannelMsg {
+    /// Tier-1 handshake: exchange exact birth data + X25519 prekeys.
+    Tier1Handshake(Tier1Blob),
+    /// Caller proposes a voice session.
+    CallOffer  { session_id: [u8; 32] },
+    /// Callee accepts.
+    CallAccept { session_id: [u8; 32] },
+    /// Callee rejects.
+    CallReject { session_id: [u8; 32] },
+    /// Either party ends an active session.
+    CallHangup { session_id: [u8; 32] },
+}
+
+// ── channel ───────────────────────────────────────────────────────────────────
+
 /// A framed duplex channel over an iroh QUIC connection.
+///
+/// Clone is cheap — `Connection` is internally reference-counted.
+#[derive(Clone)]
 pub struct DirectChannel {
     conn: Connection,
 }
 
 impl DirectChannel {
-    pub(crate) fn from_connection(conn: Connection) -> Self {
+    pub fn from_connection(conn: Connection) -> Self {
         Self { conn }
     }
+
+    /// The underlying iroh connection — used by `zodia-av` for audio datagrams.
+    pub fn connection(&self) -> Connection {
+        self.conn.clone()
+    }
+
+    // ── reliable stream methods ───────────────────────────────────────────────
 
     /// Send a byte frame: `[ len (4B, BE) | payload ]` over a new QUIC stream.
     pub async fn send_raw(&self, bytes: &[u8]) -> Result<(), ChannelError> {
@@ -87,6 +117,37 @@ impl DirectChannel {
             .map_err(|e| ChannelError::Recv(e.to_string()))?;
         Ok(buf)
     }
+
+    /// Send a typed `ChannelMsg` over a new reliable stream.
+    pub async fn send_msg(&self, msg: &ChannelMsg) -> Result<(), ChannelError> {
+        self.send_raw(&cbor_encode(msg)).await
+    }
+
+    /// Receive a typed `ChannelMsg` from the next incoming stream.
+    pub async fn recv_msg(&self) -> Result<ChannelMsg, ChannelError> {
+        let bytes = self.recv_raw().await?;
+        ciborium::from_reader(bytes.as_slice())
+            .map_err(|e| ChannelError::Decode(e.to_string()))
+    }
+
+    // ── datagram methods (unreliable, low-latency — audio transport) ──────────
+
+    /// Send a QUIC datagram (fire-and-forget, no ordering guarantee).
+    pub fn send_datagram(&self, data: Bytes) -> Result<(), ChannelError> {
+        self.conn
+            .send_datagram(data)
+            .map_err(|e| ChannelError::Send(e.to_string()))
+    }
+
+    /// Receive the next incoming QUIC datagram.
+    pub async fn recv_datagram(&self) -> Result<Bytes, ChannelError> {
+        self.conn
+            .read_datagram()
+            .await
+            .map_err(|e| ChannelError::Recv(e.to_string()))
+    }
+
+    // ── tier-1 handshake ──────────────────────────────────────────────────────
 
     /// Mutual Tier-1 blob exchange.
     ///

@@ -22,5 +22,6 @@ futures-util = "0.3"
 ciborium = "0.2"
 hex = "0.4"
 serde.workspace = true
+bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

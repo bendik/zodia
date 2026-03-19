@@ -62,6 +62,19 @@ impl AspectKind {
             Self::Opposition  => "opposition",
         }
     }
+
+    /// Human-readable display name (hyphen instead of underscore for semi-sextile).
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Conjunction => "conjunction",
+            Self::SemiSextile => "semi-sextile",
+            Self::Sextile     => "sextile",
+            Self::Square      => "square",
+            Self::Trine       => "trine",
+            Self::Quincunx    => "quincunx",
+            Self::Opposition  => "opposition",
+        }
+    }
 }
 
 const ASPECTS: &[AspectKind] = &[

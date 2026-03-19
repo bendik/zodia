@@ -26,7 +26,13 @@ zodia-av     = { path = "zodia-av" }
 
 zodia-config = { path = "zodia-config" }
 
+rusqlite   = "0.31"
+toml       = "0.8"
 blake3     = "1"
+bytes      = "1"
+opus       = "0.3"
+cpal       = "0.15"
+ringbuf    = "0.3"
 serde      = { version = "1", features = ["derive"] }
 thiserror  = "2"
 tokio      = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }

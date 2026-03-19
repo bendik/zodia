@@ -10,6 +10,9 @@ mod util;
 use app::{AppInit, AppModel};
 use relm4::RelmApp;
 use zodia_config::LocalConfig;
+use zodia_store::{ZodiaStore, seed::BaselineData};
+
+const BASELINE_TOML: &str = include_str!("../assets/baseline_aspects.toml");
 
 fn main() {
     // ── tracing ───────────────────────────────────────────────────────────────
@@ -29,10 +32,30 @@ fn main() {
         }
     };
 
+    // ── store (open or create, then seed baseline if empty) ──────────────────
+    let store_path = config.data_dir().join("interpretations.db");
+    let store = match ZodiaStore::open(&store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: could not open store: {e}");
+            std::process::exit(1);
+        }
+    };
+    match BaselineData::from_toml(BASELINE_TOML) {
+        Ok(baseline) => {
+            if let Ok(n) = store.seed_if_empty(&baseline) {
+                if n > 0 {
+                    tracing::info!("seeded {n} baseline interpretations");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("baseline parse failed: {e}"),
+    }
+
     // ── GTK application ───────────────────────────────────────────────────────
     let app = RelmApp::new("net.zodia.app");
     apply_css();
-    app.run_async::<AppModel>(AppInit { config });
+    app.run_async::<AppModel>(AppInit { config, store });
 }
 
 fn apply_css() {

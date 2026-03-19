@@ -1,35 +1,102 @@
-//! WebRTC audio/video sessions for Zodia via `webrtc-rs`.
+//! Zodia AV — Opus voice calls over iroh QUIC datagrams.
 //!
-//! Signaling (offer/answer/ICE) flows through the existing noise-encrypted
-//! p2panda channel — no STUN server ever sees peer identities.
+//! # Pipeline
 //!
-//! Sessions open only after both peers have reached Tier 1.
+//! ```text
+//!  cpal capture callback
+//!       └─ ringbuf Producer<f32>
+//!            └─ std::thread "zodia-encoder"
+//!                 └─ tokio mpsc Sender<Bytes>
+//!                      └─ tokio task "quic-send"
+//!                           └─ conn.send_datagram(...)
+//!
+//!  conn.read_datagram()
+//!       └─ tokio task "quic-recv"
+//!            └─ tokio mpsc Sender<Bytes>
+//!                 └─ std::thread "zodia-decoder"
+//!                      └─ ringbuf Producer<f32>
+//!                           └─ cpal output callback
+//! ```
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let session = AudioSession::start(channel).await?;
+//! // ... keep `session` alive for the duration of the call ...
+//! drop(session); // or let it go out of scope to hang up
+//! ```
 
-use serde::{Deserialize, Serialize};
-use zodia_net::PeerId;
+pub mod codec;
+mod capture;
+mod playback;
+mod transport;
 
-/// State of a single AV session with one peer.
-#[derive(Debug)]
-pub struct AvSession {
-    pub peer_id: PeerId,
-    // rtc: RTCPeerConnection  -- added with webrtc-rs dep
-    pub state: AvState,
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use ringbuf::HeapRb;
+use thiserror::Error;
+use zodia_net::channel::DirectChannel;
+
+/// 4× frame capacity in the capture ring buffer (~80 ms of headroom).
+const CAPTURE_BUF_FRAMES: usize = 4;
+/// 8× frame capacity in the playback ring buffer (~160 ms of jitter headroom).
+const PLAYBACK_BUF_FRAMES: usize = 8;
+
+#[derive(Debug, Error)]
+pub enum AvError {
+    #[error("capture: {0}")]
+    Capture(#[from] capture::CaptureError),
+    #[error("playback: {0}")]
+    Playback(#[from] playback::PlaybackError),
+    #[error("opus: {0}")]
+    Opus(#[from] opus::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AvState {
-    /// Offer/answer exchange in progress over the noise channel.
-    Signaling,
-    /// ICE negotiation complete, media flowing.
-    Connected { video: bool, audio: bool },
-    /// Session terminated by either party.
-    Ended,
+/// A live audio session with one peer.
+///
+/// Drop to end the call — the codec threads and QUIC tasks shut down
+/// automatically when the `shutdown` flag is set and their channels close.
+pub struct AudioSession {
+    /// Keeps the capture stream alive (drop = mic off).
+    _capture: cpal::Stream,
+    /// Keeps the playback stream alive (drop = speaker off).
+    _playback: cpal::Stream,
+    /// Signals codec threads to exit.
+    shutdown: Arc<AtomicBool>,
 }
 
-/// WebRTC signaling messages passed through the noise channel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SignalingMsg {
-    Offer  { sdp: String },
-    Answer { sdp: String },
-    Ice    { candidate: String, sdp_mid: Option<String>, sdp_mline_index: Option<u16> },
+impl AudioSession {
+    /// Start capture, transport, and playback using the given `DirectChannel`.
+    ///
+    /// The channel's underlying QUIC connection is used for audio datagrams.
+    /// Signaling (CallOffer/Accept/Hangup) must be done separately via
+    /// `channel.send_msg()` before calling this.
+    pub async fn start(channel: &DirectChannel) -> Result<Self, AvError> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let cap_samples = codec::FRAME_SAMPLES * CAPTURE_BUF_FRAMES;
+        let play_samples = codec::FRAME_SAMPLES * PLAYBACK_BUF_FRAMES;
+
+        let (cap_prod, cap_cons) = HeapRb::<f32>::new(cap_samples).split();
+        let (play_prod, play_cons) = HeapRb::<f32>::new(play_samples).split();
+
+        let _capture = capture::start_capture(cap_prod)?;
+        let _playback = playback::start_playback(play_cons)?;
+
+        transport::start_transport(
+            channel.connection(),
+            Arc::clone(&shutdown),
+            cap_cons,
+            play_prod,
+        );
+
+        Ok(AudioSession { _capture, _playback, shutdown })
+    }
+}
+
+impl Drop for AudioSession {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
 }

@@ -7,27 +7,58 @@
 //!   3. Network events   — `CommandOutput = ZodiaNetEvent` keeps the peer
 //!                         list reactive without blocking the GTK thread
 
+use std::collections::HashMap;
+
 use gtk::prelude::*;
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 use tokio::sync::mpsc::Receiver;
 use tracing::{error, info};
+use zodia_av::AudioSession;
 use zodia_config::LocalConfig;
 use zodia_core::{birth_from_coords, current_jdn, gregorian_to_jdn, Chart};
-use zodia_net::{NetworkConfig, PeerId, ZodiaNetEvent, ZodiaNetwork};
+use zodia_net::{ChannelMsg, DirectChannel, NetworkConfig, PeerId, ZodiaNetEvent, ZodiaNetwork};
+use zodia_store::ZodiaStore;
 
 use crate::peer_list::{PeerEntry, PeerInit, PeerOutput};
-use crate::util::{approximate_aspects, format_house_transit, format_natal_aspect, format_transit};
+use crate::util::{approximate_aspects, format_aspect_card, format_transit_card, format_house_transit_card};
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
 pub struct AppInit {
     pub config: LocalConfig,
+    pub store: ZodiaStore,
+}
+
+// ── call state ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub enum CallState {
+    #[default]
+    Idle,
+    /// We sent a CallOffer and are waiting for the remote to accept.
+    Calling { peer_id: PeerId },
+    /// The remote sent us a CallOffer; user needs to accept or reject.
+    Ringing { peer_id: PeerId, session_id: [u8; 32] },
+    /// Audio is flowing.
+    Active  { peer_id: PeerId },
+}
+
+impl CallState {
+    fn active_peer(&self) -> Option<PeerId> {
+        match self {
+            CallState::Calling { peer_id }
+            | CallState::Ringing { peer_id, .. }
+            | CallState::Active  { peer_id } => Some(peer_id.clone()),
+            CallState::Idle => None,
+        }
+    }
 }
 
 // ── messages ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum AppMsg {
     // first-run form
     ConfirmBirth {
@@ -42,6 +73,11 @@ pub enum AppMsg {
     SetupError(String),
     // peer list
     ConnectPeer(PeerId),
+    // call lifecycle
+    CallPeer(PeerId),
+    AcceptCall,
+    RejectCall,
+    HangUp,
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -54,6 +90,9 @@ pub struct AppModel {
     natal_text: String,
     transit_text: String,
     chart: Option<Chart>,
+
+    // store
+    store: ZodiaStore,
 
     // network
     network: Option<ZodiaNetwork>,
@@ -68,6 +107,11 @@ pub struct AppModel {
 
     // status
     setup_error: String,
+
+    // call state
+    call_state: CallState,
+    connected_channels: HashMap<PeerId, DirectChannel>,
+    active_audio: Option<AudioSession>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -92,6 +136,12 @@ pub struct AppWidgets {
     transit_label: gtk::Label,
     peer_count_label: gtk::Label,
     node_id_label: gtk::Label,
+
+    // ── call bar (shown when a call is active/ringing/calling) ────────────────
+    call_bar: gtk::Box,
+    call_status: gtk::Label,
+    accept_btn: gtk::Button,
+    hangup_btn: gtk::Button,
 }
 
 // ── async component ───────────────────────────────────────────────────────────
@@ -118,6 +168,7 @@ impl AsyncComponent for AppModel {
             .launch(gtk::ListBox::new())
             .forward(sender.input_sender(), |msg| match msg {
                 PeerOutput::Connect(id) => AppMsg::ConnectPeer(id),
+                PeerOutput::Call(id)    => AppMsg::CallPeer(id),
             });
 
         // ── model ─────────────────────────────────────────────────────────────
@@ -127,20 +178,24 @@ impl AsyncComponent for AppModel {
             natal_text: String::new(),
             transit_text: String::new(),
             chart: None,
+            store: init.store,
             network: None,
             peer_count: 0,
             node_id_text: String::new(),
             peers,
             config: init.config,
             setup_error: String::new(),
+            call_state: CallState::Idle,
+            connected_channels: HashMap::new(),
+            active_audio: None,
         };
 
         // ── compute chart if birth is already known ───────────────────────────
         if let Some(birth) = model.config.birth.clone() {
             if let Ok(chart) = Chart::compute(birth.clone()) {
                 let jdn = current_jdn();
-                model.natal_text  = build_natal_text(&chart);
-                model.transit_text = build_transit_text(&chart, jdn);
+                model.natal_text  = build_natal_text(&chart, &model.store);
+                model.transit_text = build_transit_text(&chart, jdn, &model.store);
                 model.chart = Some(chart);
             }
         }
@@ -193,8 +248,8 @@ impl AsyncComponent for AppModel {
                 match Chart::compute(birth.clone()) {
                     Ok(chart) => {
                         let now = current_jdn();
-                        self.natal_text   = build_natal_text(&chart);
-                        self.transit_text = build_transit_text(&chart, now);
+                        self.natal_text   = build_natal_text(&chart, &self.store);
+                        self.transit_text = build_transit_text(&chart, now, &self.store);
                         self.chart = Some(chart);
                     }
                     Err(e) => {
@@ -224,10 +279,70 @@ impl AsyncComponent for AppModel {
             AppMsg::ConnectPeer(peer_id) => {
                 if let Some(net) = &self.network {
                     match net.connect_peer(&peer_id).await {
-                        Ok(_channel) => info!("tier-1 channel opened"),
+                        Ok(channel) => {
+                            info!(peer = %hex::encode_upper(&peer_id.0[..4]), "tier-1 channel opened");
+                            net.accept_channel(peer_id.clone(), channel.clone());
+                            self.connected_channels.insert(peer_id, channel);
+                        }
                         Err(e) => error!("connect_peer: {e}"),
                     }
                 }
+            }
+
+            AppMsg::CallPeer(peer_id) => {
+                if let Some(channel) = self.connected_channels.get(&peer_id) {
+                    let session_id = new_session_id(&peer_id);
+                    match AudioSession::start(channel).await {
+                        Ok(session) => {
+                            let _ = channel.send_msg(&ChannelMsg::CallOffer { session_id }).await;
+                            self.active_audio = Some(session);
+                            self.call_state = CallState::Calling { peer_id };
+                            info!("call offer sent");
+                        }
+                        Err(e) => error!("start audio session: {e}"),
+                    }
+                }
+            }
+
+            AppMsg::AcceptCall => {
+                if let CallState::Ringing { peer_id, session_id } = &self.call_state {
+                    let peer_id = peer_id.clone();
+                    let session_id = *session_id;
+                    if let Some(channel) = self.connected_channels.get(&peer_id) {
+                        match AudioSession::start(channel).await {
+                            Ok(session) => {
+                                let _ = channel.send_msg(&ChannelMsg::CallAccept { session_id }).await;
+                                self.active_audio = Some(session);
+                                self.call_state = CallState::Active { peer_id };
+                                info!("call accepted");
+                            }
+                            Err(e) => error!("start audio session: {e}"),
+                        }
+                    }
+                }
+            }
+
+            AppMsg::RejectCall => {
+                if let CallState::Ringing { peer_id, session_id } = &self.call_state {
+                    let session_id = *session_id;
+                    if let Some(channel) = self.connected_channels.get(peer_id) {
+                        let _ = channel.send_msg(&ChannelMsg::CallReject { session_id }).await;
+                    }
+                }
+                self.call_state = CallState::Idle;
+            }
+
+            AppMsg::HangUp => {
+                if let Some(peer_id) = self.call_state.active_peer() {
+                    if let Some(channel) = self.connected_channels.get(&peer_id) {
+                        let _ = channel.send_msg(&ChannelMsg::CallHangup {
+                            session_id: [0u8; 32],
+                        }).await;
+                    }
+                }
+                self.active_audio = None;
+                self.call_state = CallState::Idle;
+                info!("hung up");
             }
         }
     }
@@ -266,6 +381,20 @@ impl AsyncComponent for AppModel {
                     self.peer_count = self.peer_count.saturating_sub(1);
                 }
             }
+            ZodiaNetEvent::CallOffer { from, session_id } => {
+                self.call_state = CallState::Ringing { peer_id: from, session_id };
+            }
+            ZodiaNetEvent::CallAccepted { from, .. } => {
+                self.call_state = CallState::Active { peer_id: from };
+            }
+            ZodiaNetEvent::CallRejected { .. } => {
+                self.active_audio = None;
+                self.call_state = CallState::Idle;
+            }
+            ZodiaNetEvent::CallHungUp { .. } => {
+                self.active_audio = None;
+                self.call_state = CallState::Idle;
+            }
             _ => {}
         }
     }
@@ -290,6 +419,36 @@ impl AsyncComponent for AppModel {
         });
         if !self.node_id_text.is_empty() {
             widgets.node_id_label.set_text(&format!("Node ···{}", self.node_id_text));
+        }
+
+        match &self.call_state {
+            CallState::Idle => {
+                widgets.call_bar.set_visible(false);
+            }
+            CallState::Calling { peer_id } => {
+                widgets.call_bar.set_visible(true);
+                widgets.call_status.set_text(&format!(
+                    "Calling ···{} …", hex::encode_upper(&peer_id.0[..4])
+                ));
+                widgets.accept_btn.set_visible(false);
+                widgets.hangup_btn.set_visible(true);
+            }
+            CallState::Ringing { peer_id, .. } => {
+                widgets.call_bar.set_visible(true);
+                widgets.call_status.set_text(&format!(
+                    "Incoming call from ···{}", hex::encode_upper(&peer_id.0[..4])
+                ));
+                widgets.accept_btn.set_visible(true);
+                widgets.hangup_btn.set_visible(true);
+            }
+            CallState::Active { peer_id } => {
+                widgets.call_bar.set_visible(true);
+                widgets.call_status.set_text(&format!(
+                    "In call with ···{}", hex::encode_upper(&peer_id.0[..4])
+                ));
+                widgets.accept_btn.set_visible(false);
+                widgets.hangup_btn.set_visible(true);
+            }
         }
     }
 }
@@ -342,8 +501,9 @@ fn build_widgets(
          lat_entry, lon_entry, setup_status) = build_setup_page(sender);
     stack.add_named(&setup_page, Some("setup"));
 
-    let (main_page, natal_label, transit_label, peer_count_label, node_id_label, peers_scrolled) =
-        build_main_page(model);
+    let (main_page, natal_label, transit_label, peer_count_label, node_id_label,
+         peers_scrolled, call_bar, call_status, accept_btn, hangup_btn) =
+        build_main_page(model, sender);
     stack.add_named(&main_page, Some("main"));
 
     peers_scrolled.set_child(Some(model.peers.widget()));
@@ -362,6 +522,7 @@ fn build_widgets(
         year_spin, month_spin, day_spin, hour_spin, minute_spin,
         lat_entry, lon_entry, setup_status,
         natal_label, transit_label, peer_count_label, node_id_label,
+        call_bar, call_status, accept_btn, hangup_btn,
     }
 }
 
@@ -481,7 +642,9 @@ fn build_setup_page(
 #[allow(clippy::type_complexity)]
 fn build_main_page(
     model: &AppModel,
-) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label, gtk::Label, gtk::ScrolledWindow) {
+    sender: &AsyncComponentSender<AppModel>,
+) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label, gtk::Label,
+      gtk::ScrolledWindow, gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
     let root_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
 
     // ── chart panel ───────────────────────────────────────────────────────────
@@ -552,7 +715,39 @@ fn build_main_page(
 
     root_box.append(&peers_box);
 
-    (root_box, natal_label, transit_label, peer_count_label, node_id_label, peers_scrolled)
+    // ── call bar (overlay at bottom of peers panel) ───────────────────────────
+    let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    call_bar.set_css_classes(&["call-bar"]);
+    call_bar.set_margin_start(14);
+    call_bar.set_margin_end(14);
+    call_bar.set_margin_top(8);
+    call_bar.set_margin_bottom(8);
+    call_bar.set_visible(false);
+
+    let call_status = gtk::Label::new(None);
+    call_status.set_css_classes(&["call-status"]);
+    call_status.set_hexpand(true);
+    call_status.set_halign(gtk::Align::Start);
+    call_bar.append(&call_status);
+
+    let accept_btn = gtk::Button::with_label("Accept  ✓");
+    accept_btn.set_css_classes(&["suggested-action"]);
+    accept_btn.set_visible(false);
+    let s = sender.clone();
+    accept_btn.connect_clicked(move |_| { s.input(AppMsg::AcceptCall); });
+
+    let hangup_btn = gtk::Button::with_label("Hang up  ✕");
+    hangup_btn.set_css_classes(&["destructive-action"]);
+    let s = sender.clone();
+    hangup_btn.connect_clicked(move |_| { s.input(AppMsg::HangUp); });
+
+    call_bar.append(&accept_btn);
+    call_bar.append(&hangup_btn);
+    peers_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    peers_box.append(&call_bar);
+
+    (root_box, natal_label, transit_label, peer_count_label, node_id_label,
+     peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
 }
 
 // ── small widget builders ─────────────────────────────────────────────────────
@@ -611,26 +806,40 @@ fn aspect_label(text: &str) -> gtk::Label {
 
 // ── text builders ─────────────────────────────────────────────────────────────
 
-fn build_natal_text(chart: &Chart) -> String {
+/// Generate a unique session ID from the peer's key + current nanosecond time.
+/// Uses BLAKE3 so the output is well-distributed even with low-entropy inputs.
+fn new_session_id(peer_id: &PeerId) -> [u8; 32] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&peer_id.0);
+    hasher.update(&ts.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn build_natal_text(chart: &Chart, store: &ZodiaStore) -> String {
     let aspects = chart.natal_aspects();
     if aspects.is_empty() {
         return "(none within default orbs)".to_string();
     }
-    aspects.iter().map(format_natal_aspect).collect::<Vec<_>>().join("\n")
+    aspects.iter().map(|a| format_aspect_card(a, store)).collect::<Vec<_>>().join("\n\n")
 }
 
-fn build_transit_text(chart: &Chart, jdn: f64) -> String {
+fn build_transit_text(chart: &Chart, jdn: f64, store: &ZodiaStore) -> String {
     match chart.transits_at(jdn) {
         Err(e) => format!("(transit error: {e})"),
         Ok(ts) => {
             let mut lines: Vec<String> = ts.transit_aspects.iter()
-                .map(format_transit)
+                .map(|ta| format_transit_card(ta, store))
                 .collect();
             if !ts.house_transits.is_empty() {
                 lines.push(String::new());
-                lines.push("— house ingresses —".to_string());
+                lines.push("― house ingresses ―".to_string());
                 for ht in &ts.house_transits {
-                    lines.push(format_house_transit(ht));
+                    lines.push(format_house_transit_card(ht, store));
                 }
             }
             if lines.is_empty() {

@@ -94,6 +94,11 @@ impl LocalConfig {
         Ok(LocalConfig { identity, birth, dir })
     }
 
+    /// The resolved data directory — e.g. `~/.local/share/zodia/`.
+    pub fn data_dir(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+
     /// Persist `birth` to disk and update the in-memory copy.
     #[instrument(skip(self), err)]
     pub fn save_birth(&mut self, birth: BirthData) -> Result<(), ConfigError> {

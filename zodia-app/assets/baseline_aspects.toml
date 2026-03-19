@@ -1,0 +1,89 @@
+# Baseline aspect interpretations — seeded on first run.
+#
+# Keys are the discriminator portion of InterpKey::to_sig():
+#   natal       → the sorted aspect sig, e.g. "moon_trine_venus"
+#   transit     → "transiting_aspect_natal_body", e.g. "saturn_square_sun"
+#   house_transit → "planet:house_number", e.g. "saturn:7"
+#
+# These are intentionally short — a starting point, not a destination.
+# Community contributions displace them the moment they arrive.
+
+[natal]
+"moon_conjunction_sun" = "The light and the feeling nature are born together. Who you are and how you feel move as one — the world reads you as settled, even when you aren't."
+"moon_square_sun" = "Inner life and outer self pull against each other. Emotion tends to complicate identity rather than clarify it."
+"moon_trine_sun" = "Feeling and will flow in the same direction. There's a quietness to it — not absence of conflict, but the ability to return to yourself."
+"moon_opposition_sun" = "The emotional self and the willed self face each other across a distance. Intimacy asks which one speaks first."
+
+"mars_conjunction_sun" = "Drive and identity are fused. High output, tendency to lead with force, difficulty pacing. The engine is the self."
+"mars_square_sun" = "Will and desire frequently cross each other. The friction is generative but expensive."
+"mars_trine_sun" = "Action feels like self-expression rather than effort. Forward movement arrives without needing permission."
+
+"saturn_conjunction_sun" = "Identity is shaped by discipline and the long build. Recognition arrives late and through real work — rarely frivolous."
+"saturn_square_sun" = "The world doesn't simply hand it over. What you build is tested thoroughly before it's allowed to stand."
+"saturn_trine_sun" = "Structure and ambition are quiet allies. You tend to earn rather than claim."
+
+"jupiter_conjunction_sun" = "Confidence and scale feel native. The risk is overreach — the gift is genuine expansion."
+"jupiter_trine_sun" = "What you put forward finds purchase. A natural current of good timing, when used well."
+"jupiter_square_sun" = "Optimism runs ahead of capacity. The lesson is learning where growth actually leads."
+
+"moon_trine_venus" = "Warmth is given easily. Home and beauty feel like the same thing. Comfort is offered before it's asked for."
+"moon_square_venus" = "What feels safe and what feels desirable are sometimes at odds. Relationships ask you to choose between them."
+"moon_conjunction_venus" = "Emotion and affection move together. Care is almost involuntary — you feel things into warmth."
+"moon_trine_saturn" = "Feelings are quietly reliable. You tend to stay when others leave, and this is mostly a gift."
+"moon_square_saturn" = "Emotional security feels hard-won. Early conditions may have asked you to need less than you did."
+"moon_conjunction_saturn" = "Feeling is accompanied by weight. Depth arrives naturally; lightness takes more work."
+
+"mars_conjunction_venus" = "Desire and aesthetics are tangled together. Attraction is immediate, declarations come before plans."
+"mars_square_venus" = "What you want and how you want to feel about it rarely align on the first pass."
+"mars_trine_venus" = "Attraction expresses naturally. Desire feels more gift than conflict."
+
+"jupiter_trine_venus" = "Pleasure arrives with relative ease. Relationships tend toward generosity on both sides."
+"jupiter_square_venus" = "The appetite for connection can outrun good judgment. Abundance and excess travel together."
+"jupiter_square_saturn" = "Expansion and consolidation are perennial opponents. Each win costs something; each loss teaches something real."
+"jupiter_trine_saturn" = "Growth and discipline work together rather than against each other. What you build tends to last."
+
+"mercury_trine_sun" = "Thought and will speak the same language. Communication is an extension of self rather than a translation of it."
+"mercury_square_sun" = "The mind has opinions the ego doesn't always want to hear. Restlessness is the texture of the intellect."
+"mercury_square_moon" = "The mind tends to loop on feelings. Sleep can be complicated; insight arrives sideways."
+"mercury_trine_moon" = "Emotional intelligence and verbal ability move together. You can name what you feel before it overflows."
+
+"saturn_square_venus" = "Love arrives with conditions — sometimes from others, sometimes from yourself. Worth examining which."
+"saturn_trine_venus" = "Commitment is comfortable rather than constraining. Relationships built here tend to be durable."
+"saturn_conjunction_venus" = "Affection is taken seriously, sometimes too seriously. Depth over breadth, almost always."
+
+[transit]
+"jupiter_conjunction_sun" = "Expansion arrives in person. Visibility increases, confidence is accessible. A year to act on what you believe rather than only plan for it."
+"jupiter_trine_sun" = "A season of good timing. What you put forward finds an easier path than usual. Use it — it's not permanent."
+"jupiter_square_sun" = "Growth is available but the direction needs checking. Enthusiasm is high; discrimination is the work."
+"jupiter_conjunction_moon" = "Emotional life opens. Generosity feels available in ways it usually doesn't. Home, family, belonging — these expand."
+"jupiter_trine_moon" = "Feeling good comes with less effort than usual. Nourishment feels accessible. A good season for care."
+
+"saturn_conjunction_sun" = "A biographical reckoning — with what you've been building toward and whether the structure still fits. Slower, heavier, more honest."
+"saturn_square_sun" = "What doesn't hold is being shown. The scaffolding is stress-tested. Frustration is information."
+"saturn_trine_sun" = "Effort pays off with unusual clarity. A quiet season of productive work and earned recognition."
+"saturn_conjunction_moon" = "Emotional needs feel crowded out by responsibility. Loneliness is more informative than permanent."
+"saturn_square_moon" = "The gap between what you need and what you're allowing yourself to receive is visible. The question is what to do with that."
+"saturn_trine_moon" = "Emotional steadiness arrives without drama. A good season for doing the quiet work of repair."
+
+"uranus_conjunction_sun" = "Disruption is coming from inside the house. The upheaval is biographical — who you've been doesn't quite fit what's arriving."
+"uranus_square_sun" = "The life you've built is being revised whether you asked for it or not. Resistance is costly; curiosity is cheaper."
+"uranus_conjunction_moon" = "The emotional ground shifts. Unexpected change in home, family, or inner life. Instability and freedom arrive together."
+
+"neptune_conjunction_moon" = "Boundaries between self and feeling soften. Intuition is up; groundedness requires active attention."
+"neptune_square_sun" = "Identity feels less solid than usual. Disorientation and creativity share the same territory here."
+
+"pluto_square_sun" = "Something structural is being demolished. The reconstruction won't look like the original — that's the point."
+"pluto_conjunction_moon" = "The emotional foundations are being remade. Intensity is high; what survives will be more honestly yours."
+
+[house_transit]
+"saturn:1" = "The body and immediate presence feel under scrutiny — your own and others'. A season for intentional projection."
+"saturn:2" = "Resources and security are being renegotiated. What you actually have and what you actually need become clearer."
+"saturn:4" = "Home life or psychological foundations are being restructured. What doesn't belong to you anymore becomes visible."
+"saturn:7" = "Relationships are being held to account. Commitment becomes concrete; casual arrangements resolve one way or another."
+"saturn:10" = "Career and public role are being tested. Reputation is being built or dismantled — often both at once."
+"saturn:12" = "A season of withdrawal and inner work. Isolation is productive when chosen; crushing when imposed."
+
+"jupiter:1" = "Physical vitality and confidence are expansive. A good season to begin things, make asks, and occupy space."
+"jupiter:7" = "Partnership is favored. Alliances formed now tend to hold. A good season for collaboration over solo effort."
+"jupiter:10" = "Career visibility opens. Recognition arrives more easily than usual. What you've built is being seen."
+"jupiter:4" = "Home life expands. Family, belonging, or a sense of roots is available in ways it hasn't been."

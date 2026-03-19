@@ -80,4 +80,56 @@ impl InterpKey {
     pub fn from_synastry(aspect: &SynastryAspect) -> Self {
         Self::Synastry { aspect_sig: aspect.sig() }
     }
+
+    /// Plain-English label suitable for UI display.
+    ///
+    /// Examples:
+    /// - `Natal { "moon_trine_venus" }`     → `"Moon trine Venus"`
+    /// - `Transit { saturn, sun, square }`  → `"Saturn square Sun (transit)"`
+    /// - `HouseTransit { jupiter, 7 }`      → `"Jupiter in house 7"`
+    pub fn plain_name(&self) -> String {
+        match self {
+            Self::Natal { aspect_sig } => parse_aspect_sig(aspect_sig),
+            Self::Synastry { aspect_sig } => {
+                format!("{} (synastry)", parse_aspect_sig(aspect_sig))
+            }
+            Self::Transit { transiting, natal_body, kind } => {
+                format!(
+                    "{} {} {} (transit)",
+                    cap(transiting.name()), kind.display_name(), cap(natal_body.name())
+                )
+            }
+            Self::HouseTransit { transiting, house } => {
+                format!("{} in house {house}", cap(transiting.name()))
+            }
+        }
+    }
+}
+
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
+/// "moon_trine_venus" → "Moon trine Venus", handling "semi_sextile" correctly.
+fn parse_aspect_sig(sig: &str) -> String {
+    use crate::aspects::AspectKind;
+    const ALL: &[AspectKind] = &[
+        AspectKind::SemiSextile,  // longest first so it matches before "sextile"
+        AspectKind::Conjunction, AspectKind::Sextile, AspectKind::Square,
+        AspectKind::Trine, AspectKind::Quincunx, AspectKind::Opposition,
+    ];
+    for kind in ALL {
+        let needle = format!("_{}_", kind.name());
+        if let Some(pos) = sig.find(&needle) {
+            let a = cap(&sig[..pos]);
+            let b = cap(&sig[pos + needle.len()..]);
+            return format!("{} {} {}", a, kind.display_name(), b);
+        }
+    }
+    // fallback: just capitalise each word
+    sig.split('_').map(cap).collect::<Vec<_>>().join(" ")
 }
