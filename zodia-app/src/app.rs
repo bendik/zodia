@@ -9,7 +9,8 @@
 
 use std::collections::HashMap;
 
-use gtk::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*; // also re-exports gtk::prelude
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 use tokio::sync::mpsc::Receiver;
@@ -60,7 +61,6 @@ impl CallState {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AppMsg {
-    // first-run form
     ConfirmBirth {
         year: i32,
         month: u32,
@@ -71,9 +71,7 @@ pub enum AppMsg {
         lon: f64,
     },
     SetupError(String),
-    // peer list
     ConnectPeer(PeerId),
-    // call lifecycle
     CallPeer(PeerId),
     AcceptCall,
     RejectCall,
@@ -83,32 +81,17 @@ pub enum AppMsg {
 // ── model ─────────────────────────────────────────────────────────────────────
 
 pub struct AppModel {
-    // navigation
     on_setup_page: bool,
-
-    // chart & transits (populated once birth is known)
     natal_text: String,
     transit_text: String,
     chart: Option<Chart>,
-
-    // store
     store: ZodiaStore,
-
-    // network
     network: Option<ZodiaNetwork>,
     peer_count: usize,
     node_id_text: String,
-
-    // peer list (FactoryVecDeque owns the gtk::ListBox)
     peers: FactoryVecDeque<PeerEntry>,
-
-    // mutable config (for saving birth data on first run)
     config: LocalConfig,
-
-    // status
     setup_error: String,
-
-    // call state
     call_state: CallState,
     connected_channels: HashMap<PeerId, DirectChannel>,
     active_audio: Option<AudioSession>,
@@ -116,28 +99,15 @@ pub struct AppModel {
 
 // ── widgets ───────────────────────────────────────────────────────────────────
 
-// Widget references are kept for lifetime management; spin/entry fields are
-// read through clones wired up in signal handlers, not through this struct.
 #[allow(dead_code)]
 pub struct AppWidgets {
-    // ── setup page ────────────────────────────────────────────────────────────
-    stack: gtk::Stack,
-    year_spin: gtk::SpinButton,
-    month_spin: gtk::SpinButton,
-    day_spin: gtk::SpinButton,
-    hour_spin: gtk::SpinButton,
-    minute_spin: gtk::SpinButton,
-    lat_entry: gtk::Entry,
-    lon_entry: gtk::Entry,
+    outer_stack: gtk::Stack,
     setup_status: gtk::Label,
-
-    // ── main page ─────────────────────────────────────────────────────────────
     natal_label: gtk::Label,
     transit_label: gtk::Label,
+    peers_page: adw::ViewStackPage,
     peer_count_label: gtk::Label,
     node_id_label: gtk::Label,
-
-    // ── call bar (shown when a call is active/ringing/calling) ────────────────
     call_bar: gtk::Box,
     call_status: gtk::Label,
     accept_btn: gtk::Button,
@@ -151,11 +121,11 @@ impl AsyncComponent for AppModel {
     type Input = AppMsg;
     type Output = ();
     type CommandOutput = ZodiaNetEvent;
-    type Root = gtk::ApplicationWindow;
+    type Root = adw::ApplicationWindow;
     type Widgets = AppWidgets;
 
     fn init_root() -> Self::Root {
-        gtk::ApplicationWindow::new(&relm4::main_application())
+        adw::ApplicationWindow::new(&relm4::main_application())
     }
 
     async fn init(
@@ -163,7 +133,6 @@ impl AsyncComponent for AppModel {
         root: Self::Root,
         sender: AsyncComponentSender<Self>,
     ) -> AsyncComponentParts<Self> {
-        // ── peers factory ─────────────────────────────────────────────────────
         let peers = FactoryVecDeque::builder()
             .launch(gtk::ListBox::new())
             .forward(sender.input_sender(), |msg| match msg {
@@ -171,7 +140,6 @@ impl AsyncComponent for AppModel {
                 PeerOutput::Call(id)    => AppMsg::CallPeer(id),
             });
 
-        // ── model ─────────────────────────────────────────────────────────────
         let has_birth = init.config.birth.is_some();
         let mut model = AppModel {
             on_setup_page: !has_birth,
@@ -190,20 +158,17 @@ impl AsyncComponent for AppModel {
             active_audio: None,
         };
 
-        // ── compute chart if birth is already known ───────────────────────────
         if let Some(birth) = model.config.birth.clone() {
             if let Ok(chart) = Chart::compute(birth.clone()) {
                 let jdn = current_jdn();
-                model.natal_text  = build_natal_text(&chart, &model.store);
+                model.natal_text   = build_natal_text(&chart, &model.store);
                 model.transit_text = build_transit_text(&chart, jdn, &model.store);
                 model.chart = Some(chart);
             }
         }
 
-        // ── build all GTK widgets ─────────────────────────────────────────────
         let widgets = build_widgets(&root, &model, &sender);
 
-        // ── spawn network if birth is known ───────────────────────────────────
         if let Some(birth) = model.config.birth.clone() {
             if let Some((net, rx)) = try_spawn_network(&model.config, &birth).await {
                 model.node_id_text = {
@@ -370,7 +335,6 @@ impl AsyncComponent for AppModel {
                 self.peer_count += 1;
             }
             ZodiaNetEvent::PeerLeft { peer_id } => {
-                // sequential guards: first read, then write
                 let maybe_idx = self
                     .peers
                     .guard()
@@ -401,22 +365,23 @@ impl AsyncComponent for AppModel {
 
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: AsyncComponentSender<Self>) {
         if self.on_setup_page {
-            widgets.stack.set_visible_child_name("setup");
+            widgets.outer_stack.set_visible_child_name("setup");
         } else {
-            widgets.stack.set_visible_child_name("main");
+            widgets.outer_stack.set_visible_child_name("main");
         }
+
         widgets.setup_status.set_text(&self.setup_error);
         widgets.natal_label.set_text(&self.natal_text);
         widgets.transit_label.set_text(&self.transit_text);
-        widgets.peer_count_label.set_text(&if self.peer_count == 0 {
+
+        let count_text = if self.peer_count == 0 {
             "Scanning for peers…".to_string()
         } else {
-            format!(
-                "{} peer{} nearby",
-                self.peer_count,
-                if self.peer_count == 1 { "" } else { "s" }
-            )
-        });
+            format!("{} peer{} online", self.peer_count, if self.peer_count == 1 { "" } else { "s" })
+        };
+        widgets.peer_count_label.set_text(&count_text);
+        widgets.peers_page.set_needs_attention(self.peer_count > 0);
+
         if !self.node_id_text.is_empty() {
             widgets.node_id_label.set_text(&format!("Node ···{}", self.node_id_text));
         }
@@ -486,328 +451,342 @@ fn start_network_command(
 // ── widget construction ───────────────────────────────────────────────────────
 
 fn build_widgets(
-    root: &gtk::ApplicationWindow,
+    root: &adw::ApplicationWindow,
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> AppWidgets {
-    root.set_title(Some("Zodia"));
-    root.set_default_size(1000, 680);
+    root.set_default_size(800, 620);
 
-    let stack = gtk::Stack::new();
-    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    stack.set_transition_duration(200);
+    let outer_stack = gtk::Stack::new();
+    outer_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    outer_stack.set_transition_duration(200);
 
-    let (setup_page, year_spin, month_spin, day_spin, hour_spin, minute_spin,
-         lat_entry, lon_entry, setup_status) = build_setup_page(sender);
-    stack.add_named(&setup_page, Some("setup"));
+    // ── setup page ────────────────────────────────────────────────────────────
+    let (setup_page, setup_status) = build_setup_page(sender);
+    outer_stack.add_named(&setup_page, Some("setup"));
 
-    let (main_page, natal_label, transit_label, peer_count_label, node_id_label,
-         peers_scrolled, call_bar, call_status, accept_btn, hangup_btn) =
+    // ── main page ─────────────────────────────────────────────────────────────
+    let (main_page, natal_label, transit_label, peers_page, peer_count_label,
+         node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn) =
         build_main_page(model, sender);
-    stack.add_named(&main_page, Some("main"));
+    outer_stack.add_named(&main_page, Some("main"));
 
     peers_scrolled.set_child(Some(model.peers.widget()));
-    model.peers.widget().set_css_classes(&["peer-list"]);
 
     if model.on_setup_page {
-        stack.set_visible_child_name("setup");
+        outer_stack.set_visible_child_name("setup");
     } else {
-        stack.set_visible_child_name("main");
+        outer_stack.set_visible_child_name("main");
     }
 
-    root.set_child(Some(&stack));
+    root.set_content(Some(&outer_stack));
 
     AppWidgets {
-        stack,
-        year_spin, month_spin, day_spin, hour_spin, minute_spin,
-        lat_entry, lon_entry, setup_status,
-        natal_label, transit_label, peer_count_label, node_id_label,
-        call_bar, call_status, accept_btn, hangup_btn,
+        outer_stack,
+        setup_status,
+        natal_label,
+        transit_label,
+        peers_page,
+        peer_count_label,
+        node_id_label,
+        call_bar,
+        call_status,
+        accept_btn,
+        hangup_btn,
     }
 }
 
-#[allow(clippy::type_complexity)]
+// ── setup page ────────────────────────────────────────────────────────────────
+
 fn build_setup_page(
     sender: &AsyncComponentSender<AppModel>,
-) -> (
-    gtk::Box,
-    gtk::SpinButton, gtk::SpinButton, gtk::SpinButton,
-    gtk::SpinButton, gtk::SpinButton,
-    gtk::Entry, gtk::Entry,
-    gtk::Label,
-) {
-    let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+) -> (adw::ToolbarView, gtk::Label) {
+    let toolbar_view = adw::ToolbarView::new();
 
-    let inner = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    inner.set_halign(gtk::Align::Center);
-    inner.set_valign(gtk::Align::Center);
-    inner.set_vexpand(true);
-    inner.set_margin_start(40);
-    inner.set_margin_end(40);
-    outer.append(&inner);
+    let header_bar = adw::HeaderBar::new();
+    let title_label = gtk::Label::new(Some("Zodia"));
+    title_label.add_css_class("title");
+    header_bar.set_title_widget(Some(&title_label));
+    toolbar_view.add_top_bar(&header_bar);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_vexpand(true);
+
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(480);
+    clamp.set_margin_top(24);
+    clamp.set_margin_bottom(24);
+    clamp.set_margin_start(12);
+    clamp.set_margin_end(12);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    content.set_valign(gtk::Align::Center);
+    content.set_vexpand(true);
 
     let title = gtk::Label::new(Some("Welcome to Zodia"));
-    title.set_css_classes(&["setup-title"]);
-    inner.append(&title);
+    title.add_css_class("title-1");
+    content.append(&title);
 
     let subtitle = gtk::Label::new(Some(
         "Enter your birth details to find your astrological neighbourhood.",
     ));
-    subtitle.set_css_classes(&["setup-subtitle"]);
+    subtitle.add_css_class("dim-label");
     subtitle.set_wrap(true);
     subtitle.set_max_width_chars(50);
-    inner.append(&subtitle);
+    content.append(&subtitle);
 
-    // date/time grid
-    let grid = gtk::Grid::new();
-    grid.set_column_spacing(8);
-    grid.set_row_spacing(6);
-    grid.set_halign(gtk::Align::Center);
+    // Birth date / time group
+    let date_group = adw::PreferencesGroup::new();
+    date_group.set_title("Birth Date & Time");
 
-    let lbl = |t: &str| -> gtk::Label {
-        let l = gtk::Label::new(Some(t));
-        l.set_halign(gtk::Align::Start);
-        l.set_css_classes(&["field-label"]);
-        l
-    };
+    let year_row = adw::SpinRow::with_range(1900.0, 2100.0, 1.0);
+    year_row.set_title("Year");
+    year_row.set_value(1990.0);
+    date_group.add(&year_row);
 
-    let year_spin  = spin(1900.0, 2100.0, 1990.0);
-    let month_spin = spin(1.0,    12.0,   6.0);
-    let day_spin   = spin(1.0,    31.0,   15.0);
-    let hour_spin  = spin(0.0,    23.0,   12.0);
-    let min_spin   = spin(0.0,    59.0,   0.0);
+    let month_row = adw::SpinRow::with_range(1.0, 12.0, 1.0);
+    month_row.set_title("Month");
+    month_row.set_value(6.0);
+    date_group.add(&month_row);
 
-    grid.attach(&lbl("Year"),     0, 0, 1, 1);
-    grid.attach(&year_spin,       1, 0, 1, 1);
-    grid.attach(&lbl("Month"),    2, 0, 1, 1);
-    grid.attach(&month_spin,      3, 0, 1, 1);
-    grid.attach(&lbl("Day"),      4, 0, 1, 1);
-    grid.attach(&day_spin,        5, 0, 1, 1);
-    grid.attach(&lbl("Hour UTC"), 0, 1, 1, 1);
-    grid.attach(&hour_spin,       1, 1, 1, 1);
-    grid.attach(&lbl("Minute"),   2, 1, 1, 1);
-    grid.attach(&min_spin,        3, 1, 1, 1);
-    inner.append(&grid);
+    let day_row = adw::SpinRow::with_range(1.0, 31.0, 1.0);
+    day_row.set_title("Day");
+    day_row.set_value(15.0);
+    date_group.add(&day_row);
 
-    // location row
-    let loc = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    loc.set_halign(gtk::Align::Center);
+    let hour_row = adw::SpinRow::with_range(0.0, 23.0, 1.0);
+    hour_row.set_title("Hour (UTC)");
+    hour_row.set_value(12.0);
+    date_group.add(&hour_row);
 
-    let lat_entry = entry("Latitude  e.g. 51.5");
-    let lon_entry = entry("Longitude  e.g. -0.1");
-    loc.append(&lbl("Latitude"));
-    loc.append(&lat_entry);
-    loc.append(&lbl("Longitude"));
-    loc.append(&lon_entry);
-    inner.append(&loc);
+    let minute_row = adw::SpinRow::with_range(0.0, 59.0, 1.0);
+    minute_row.set_title("Minute");
+    minute_row.set_value(0.0);
+    date_group.add(&minute_row);
+
+    content.append(&date_group);
+
+    // Location group
+    let loc_group = adw::PreferencesGroup::new();
+    loc_group.set_title("Birth Location");
+
+    let lat_row = adw::EntryRow::new();
+    lat_row.set_title("Latitude  (e.g. 51.5)");
+    loc_group.add(&lat_row);
+
+    let lon_row = adw::EntryRow::new();
+    lon_row.set_title("Longitude  (e.g. -0.1)");
+    loc_group.add(&lon_row);
+
+    content.append(&loc_group);
 
     let setup_status = gtk::Label::new(None);
-    setup_status.set_css_classes(&["setup-error"]);
-    inner.append(&setup_status);
+    setup_status.add_css_class("error");
+    content.append(&setup_status);
 
     let btn = gtk::Button::with_label("Begin  →");
-    btn.set_css_classes(&["suggested-action", "confirm-btn"]);
+    btn.add_css_class("suggested-action");
+    btn.add_css_class("pill");
     btn.set_halign(gtk::Align::Center);
-    inner.append(&btn);
+    content.append(&btn);
 
-    // wire up
+    // Wire the button
     let s = sender.clone();
-    let (ys, ms, ds, hs, mins, late, lone) = (
-        year_spin.clone(), month_spin.clone(), day_spin.clone(),
-        hour_spin.clone(), min_spin.clone(),
-        lat_entry.clone(), lon_entry.clone(),
+    let (yr, mr, dr, hr, minr, latr, lonr) = (
+        year_row.clone(), month_row.clone(), day_row.clone(),
+        hour_row.clone(), minute_row.clone(),
+        lat_row.clone(), lon_row.clone(),
     );
     btn.connect_clicked(move |_| {
-        let lat = match late.text().parse::<f64>() {
+        let lat = match latr.text().parse::<f64>() {
             Ok(v) => v,
             Err(_) => { s.input(AppMsg::SetupError("Invalid latitude".into())); return; }
         };
-        let lon = match lone.text().parse::<f64>() {
+        let lon = match lonr.text().parse::<f64>() {
             Ok(v) => v,
             Err(_) => { s.input(AppMsg::SetupError("Invalid longitude".into())); return; }
         };
         s.input(AppMsg::ConfirmBirth {
-            year:   ys.value() as i32,
-            month:  ms.value() as u32,
-            day:    ds.value() as u32,
-            hour:   hs.value() as u32,
-            minute: mins.value() as u32,
+            year:   yr.value() as i32,
+            month:  mr.value() as u32,
+            day:    dr.value() as u32,
+            hour:   hr.value() as u32,
+            minute: minr.value() as u32,
             lat, lon,
         });
     });
 
-    (outer, year_spin, month_spin, day_spin, hour_spin, min_spin, lat_entry, lon_entry, setup_status)
+    clamp.set_child(Some(&content));
+    scroll.set_child(Some(&clamp));
+    toolbar_view.set_content(Some(&scroll));
+
+    (toolbar_view, setup_status)
 }
 
+// ── main page ─────────────────────────────────────────────────────────────────
+
+// ViewSwitcherTitle is deprecated in libadwaita 1.4 in favour of Breakpoint-
+// based reveal.  The replacement requires GValue setters that aren't yet
+// ergonomic in the 0.7 Rust bindings; migrate when bindings catch up.
+#[allow(deprecated)]
 #[allow(clippy::type_complexity)]
 fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
-) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label, gtk::Label,
-      gtk::ScrolledWindow, gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
-    let root_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+) -> (
+    adw::ToolbarView,
+    gtk::Label, gtk::Label,
+    adw::ViewStackPage, gtk::Label,
+    gtk::Label,
+    gtk::ScrolledWindow,
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button,
+) {
+    let toolbar_view = adw::ToolbarView::new();
 
-    // ── chart panel ───────────────────────────────────────────────────────────
-    let chart_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    chart_box.set_css_classes(&["chart-panel"]);
-    chart_box.set_width_request(340);
+    // ── view stack ────────────────────────────────────────────────────────────
+    let view_stack = adw::ViewStack::new();
 
-    let chart_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    chart_header.set_css_classes(&["panel-header"]);
-    let chart_title = section_title("Your Chart");
-    chart_title.set_hexpand(true);
-    let node_id_label = gtk::Label::new(Some("Node ···----"));
-    node_id_label.set_css_classes(&["node-id"]);
-    chart_header.append(&chart_title);
-    chart_header.append(&node_id_label);
-    chart_box.append(&chart_header);
+    // Chart tab — natal aspects
+    let chart_scroll = gtk::ScrolledWindow::new();
+    chart_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    let chart_clamp = adw::Clamp::new();
+    chart_clamp.set_maximum_size(720);
+    let natal_label = monospace_label(&model.natal_text);
+    chart_clamp.set_child(Some(&natal_label));
+    chart_scroll.set_child(Some(&chart_clamp));
+    let chart_page = view_stack.add_titled(&chart_scroll, Some("chart"), "Chart");
+    chart_page.set_icon_name(Some("weather-clear-symbolic"));
 
-    chart_box.append(&section_label("Natal Aspects"));
+    // Sky tab — current transits
+    let sky_scroll = gtk::ScrolledWindow::new();
+    sky_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    let sky_clamp = adw::Clamp::new();
+    sky_clamp.set_maximum_size(720);
+    let transit_label = monospace_label(&model.transit_text);
+    sky_clamp.set_child(Some(&transit_label));
+    sky_scroll.set_child(Some(&sky_clamp));
+    let sky_page = view_stack.add_titled(&sky_scroll, Some("sky"), "Sky");
+    sky_page.set_icon_name(Some("night-light-symbolic"));
 
-    let natal_scroll = scrolled();
-    let natal_label = aspect_label(&model.natal_text);
-    natal_scroll.set_child(Some(&natal_label));
-    chart_box.append(&natal_scroll);
+    // Peers tab
+    let peers_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
-    chart_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    chart_box.append(&section_label("Current Transits"));
-
-    let transit_scroll = scrolled();
-    let transit_label = aspect_label(&model.transit_text);
-    transit_scroll.set_child(Some(&transit_label));
-    chart_box.append(&transit_scroll);
-
-    root_box.append(&chart_box);
-    root_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-
-    // ── peers panel ───────────────────────────────────────────────────────────
-    let peers_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    peers_box.set_css_classes(&["peers-panel"]);
-    peers_box.set_hexpand(true);
-
-    let peers_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    peers_header.set_css_classes(&["panel-header"]);
-    let peers_title = section_title("Online Peers");
-    peers_title.set_hexpand(true);
     let peer_count_label = gtk::Label::new(Some("Scanning for peers…"));
-    peer_count_label.set_css_classes(&["peer-count"]);
-    peers_header.append(&peers_title);
-    peers_header.append(&peer_count_label);
-    peers_box.append(&peers_header);
+    peer_count_label.add_css_class("dim-label");
+    peer_count_label.add_css_class("caption");
+    peer_count_label.set_halign(gtk::Align::Start);
+    peer_count_label.set_margin_start(12);
+    peer_count_label.set_margin_end(12);
+    peer_count_label.set_margin_top(10);
+    peer_count_label.set_margin_bottom(4);
+    peers_container.append(&peer_count_label);
 
     let hint = gtk::Label::new(Some(
         "All online Zodia peers appear below.\n\
          Aspect glyphs show their ☉ resonance with your natal chart.",
     ));
-    hint.set_css_classes(&["hint-label"]);
+    hint.add_css_class("caption");
+    hint.add_css_class("dim-label");
     hint.set_wrap(true);
     hint.set_halign(gtk::Align::Start);
-    hint.set_margin_start(14);
-    hint.set_margin_end(14);
-    hint.set_margin_top(10);
-    hint.set_margin_bottom(10);
-    peers_box.append(&hint);
+    hint.set_margin_start(12);
+    hint.set_margin_end(12);
+    hint.set_margin_bottom(8);
+    peers_container.append(&hint);
 
     let peers_scrolled = gtk::ScrolledWindow::new();
     peers_scrolled.set_vexpand(true);
-    peers_scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    peers_box.append(&peers_scrolled);
+    peers_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+    peers_container.append(&peers_scrolled);
 
-    root_box.append(&peers_box);
+    let peers_page = view_stack.add_titled(&peers_container, Some("peers"), "Peers");
+    peers_page.set_icon_name(Some("system-users-symbolic"));
 
-    // ── call bar (overlay at bottom of peers panel) ───────────────────────────
+    toolbar_view.set_content(Some(&view_stack));
+
+    // ── header bar with adaptive ViewSwitcherTitle ────────────────────────────
+    let switcher_title = adw::ViewSwitcherTitle::new();
+    switcher_title.set_stack(Some(&view_stack));
+    switcher_title.set_title("Zodia");
+
+    let node_id_label = gtk::Label::new(Some("Node ···----"));
+    node_id_label.add_css_class("node-id");
+    node_id_label.add_css_class("dim-label");
+
+    let header_bar = adw::HeaderBar::new();
+    header_bar.set_title_widget(Some(&switcher_title));
+    header_bar.pack_end(&node_id_label);
+    toolbar_view.add_top_bar(&header_bar);
+
+    // ── bottom bars ───────────────────────────────────────────────────────────
+    //
+    // Order matters: first add_bottom_bar → very bottom of window.
+    // Second add_bottom_bar → above it.  So switcher goes last (bottom-most).
+
+    // Call bar (above the switcher, hidden when idle)
     let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    call_bar.set_css_classes(&["call-bar"]);
-    call_bar.set_margin_start(14);
-    call_bar.set_margin_end(14);
-    call_bar.set_margin_top(8);
-    call_bar.set_margin_bottom(8);
+    call_bar.add_css_class("toolbar");
+    call_bar.set_margin_start(8);
+    call_bar.set_margin_end(8);
     call_bar.set_visible(false);
 
     let call_status = gtk::Label::new(None);
-    call_status.set_css_classes(&["call-status"]);
     call_status.set_hexpand(true);
     call_status.set_halign(gtk::Align::Start);
     call_bar.append(&call_status);
 
     let accept_btn = gtk::Button::with_label("Accept  ✓");
-    accept_btn.set_css_classes(&["suggested-action"]);
+    accept_btn.add_css_class("suggested-action");
+    accept_btn.add_css_class("pill");
     accept_btn.set_visible(false);
     let s = sender.clone();
     accept_btn.connect_clicked(move |_| { s.input(AppMsg::AcceptCall); });
+    call_bar.append(&accept_btn);
 
     let hangup_btn = gtk::Button::with_label("Hang up  ✕");
-    hangup_btn.set_css_classes(&["destructive-action"]);
+    hangup_btn.add_css_class("destructive-action");
+    hangup_btn.add_css_class("pill");
     let s = sender.clone();
     hangup_btn.connect_clicked(move |_| { s.input(AppMsg::HangUp); });
-
-    call_bar.append(&accept_btn);
     call_bar.append(&hangup_btn);
-    peers_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    peers_box.append(&call_bar);
 
-    (root_box, natal_label, transit_label, peer_count_label, node_id_label,
-     peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
+    // Adaptive ViewSwitcherBar — added first so it sits at the window bottom
+    // edge; the call bar is added second and appears above it.
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_stack(Some(&view_stack));
+    switcher_title
+        .bind_property("title-visible", &switcher_bar, "reveal")
+        .sync_create()
+        .build();
+    toolbar_view.add_bottom_bar(&switcher_bar);
+
+    toolbar_view.add_bottom_bar(&call_bar);
+
+    // Drop the unreachable sky_page — kept alive via view_stack ownership.
+    let _ = sky_page;
+
+    (toolbar_view, natal_label, transit_label, peers_page, peer_count_label,
+     node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
 }
 
-// ── small widget builders ─────────────────────────────────────────────────────
+// ── small helpers ─────────────────────────────────────────────────────────────
 
-fn spin(min: f64, max: f64, val: f64) -> gtk::SpinButton {
-    let s = gtk::SpinButton::with_range(min, max, 1.0);
-    s.set_value(val);
-    s.set_digits(0);
-    s.set_css_classes(&["spin-field"]);
-    s
-}
-
-fn entry(placeholder: &str) -> gtk::Entry {
-    let e = gtk::Entry::new();
-    e.set_placeholder_text(Some(placeholder));
-    e.set_input_purpose(gtk::InputPurpose::Number);
-    e.set_width_chars(16);
-    e
-}
-
-fn section_title(t: &str) -> gtk::Label {
-    let l = gtk::Label::new(Some(t));
-    l.set_css_classes(&["panel-title"]);
-    l.set_halign(gtk::Align::Start);
-    l
-}
-
-fn section_label(t: &str) -> gtk::Label {
-    let l = gtk::Label::new(Some(t));
-    l.set_css_classes(&["section-label"]);
-    l.set_halign(gtk::Align::Start);
-    l.set_margin_start(14);
-    l.set_margin_top(12);
-    l
-}
-
-fn scrolled() -> gtk::ScrolledWindow {
-    let s = gtk::ScrolledWindow::new();
-    s.set_vexpand(true);
-    s.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    s
-}
-
-fn aspect_label(text: &str) -> gtk::Label {
+fn monospace_label(text: &str) -> gtk::Label {
     let l = gtk::Label::new(Some(text));
-    l.set_css_classes(&["aspect-list"]);
+    l.add_css_class("aspect-list");
     l.set_halign(gtk::Align::Start);
     l.set_valign(gtk::Align::Start);
     l.set_margin_start(14);
     l.set_margin_end(14);
-    l.set_margin_top(6);
-    l.set_margin_bottom(6);
+    l.set_margin_top(12);
+    l.set_margin_bottom(12);
     l.set_selectable(true);
     l
 }
 
-// ── text builders ─────────────────────────────────────────────────────────────
+// ── session ID ────────────────────────────────────────────────────────────────
 
-/// Generate a unique session ID from the peer's key + current nanosecond time.
-/// Uses BLAKE3 so the output is well-distributed even with low-entropy inputs.
 fn new_session_id(peer_id: &PeerId) -> [u8; 32] {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
@@ -819,6 +798,8 @@ fn new_session_id(peer_id: &PeerId) -> [u8; 32] {
     hasher.update(&ts.to_le_bytes());
     *hasher.finalize().as_bytes()
 }
+
+// ── text builders ─────────────────────────────────────────────────────────────
 
 fn build_natal_text(chart: &Chart, store: &ZodiaStore) -> String {
     let aspects = chart.natal_aspects();

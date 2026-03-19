@@ -17,8 +17,9 @@ zodia-config.workspace = true
 zodia-store.workspace = true
 zodia-av.workspace = true
 blake3.workspace = true
-relm4 = { version = "0.9", features = ["macros"] }
+relm4 = { version = "0.9", features = ["macros", "libadwaita"] }
 gtk4 = "0.9"
+libadwaita = { version = "0.7", features = ["v1_4"] }
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
