@@ -6,7 +6,7 @@ pub use channel::{ChannelMsg, DirectChannel};
 pub use network::{NetworkConfig, NetworkError, ZodiaNetwork};
 
 use serde::{Deserialize, Serialize};
-use zodia_core::{BirthData, TopicKey};
+use zodia_core::BirthData;
 
 // ── wire types ────────────────────────────────────────────────────────────────
 
@@ -88,21 +88,3 @@ pub enum ZodiaNetEvent {
     CallHungUp { from: PeerId },
 }
 
-// ── topic helpers ─────────────────────────────────────────────────────────────
-
-/// The single global gossip topic all Zodia peers subscribe to.
-pub struct SwarmTopics {
-    pub global: TopicKey,
-}
-
-impl SwarmTopics {
-    pub fn new() -> Self {
-        Self { global: zodia_core::topic_key_global() }
-    }
-
-    /// `birth` parameter kept for call-site compatibility; topics are no longer
-    /// derived from birth data so all peers share the same topic.
-    pub fn from_birth(_birth: &BirthData) -> Self {
-        Self::new()
-    }
-}

@@ -19,6 +19,6 @@ pub use ephemeris::{EphemerisError, compute_positions};
 pub use houses::{HouseError, HouseKind, HouseSystem};
 pub use interp::{InterpKey, InterpKind};
 pub use planet::{Planet, PlanetPositions};
-pub use topic::{TopicKey, solar_longitude, solar_month, topic_key_global};
+pub use topic::{TopicKey, solar_longitude, solar_month, topic_key_global, topic_keys_for_chart};
 pub use transit::{HouseTransit, TransitAspect, TransitSet, build_transit_set,
                   compute_transit_aspects};

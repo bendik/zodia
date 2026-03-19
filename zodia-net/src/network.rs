@@ -10,8 +10,11 @@
 //!
 //! The app receives all domain events via a `tokio::sync::mpsc::Receiver<ZodiaNetEvent>`.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use crate::channel::{ChannelMsg, DirectChannel};
-use crate::{PeerId, SwarmTopics, Tier0Blob, ZodiaNetEvent};
+use crate::{PeerId, Tier0Blob, ZodiaNetEvent};
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
 use p2panda_core::PrivateKey as PandaKey;
@@ -21,7 +24,7 @@ use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
-use zodia_core::BirthData;
+use zodia_core::{BirthData, compute_positions, topic_key_global, topic_keys_for_chart};
 
 /// Zodia's network identifier — all nodes sharing this ID form one logical
 /// overlay; peers on different IDs are invisible to each other.
@@ -58,8 +61,8 @@ pub struct ZodiaNetwork {
     // Kept alive for the interpretation index sync (LogSync wiring — coming in zodia-sync)
     #[allow(dead_code)]
     gossip: Gossip,
-    /// Single global gossip channel — all Zodia peers share one topic.
-    global_handle: GossipHandle,
+    /// One handle per degree-bucket topic derived from the peer's natal chart.
+    topic_handles: Vec<GossipHandle>,
     endpoint: Endpoint,
     /// Pre-constructed, signed announce blob for this peer.
     my_blob: Tier0Blob,
@@ -115,21 +118,44 @@ impl ZodiaNetwork {
             .map_err(|e| NetworkError::Gossip(e.to_string()))?;
         debug!("gossip engine ready");
 
-        // All peers share one global topic — synastry filtering is the app's job.
-        let global_handle = gossip
-            .stream(SwarmTopics::new().global.0)
-            .await
-            .map_err(|e| NetworkError::Gossip(e.to_string()))?;
-        info!("subscribed to global gossip topic");
+        // Always include the global topic so peers are discoverable even when
+        // the network is small and no aspect-bucket overlap exists yet.
+        // Aspect-derived topics layer on top for meaningful synastry matching
+        // as the network grows.
+        let mut topic_keys = vec![topic_key_global()];
+        match compute_positions(birth.jdn) {
+            Ok(positions) => {
+                let aspect_keys = topic_keys_for_chart(&positions);
+                info!(global = 1, aspect = aspect_keys.len(), "subscribing to topics");
+                topic_keys.extend(aspect_keys);
+            }
+            Err(e) => {
+                warn!("ephemeris error, skipping aspect topics: {e}");
+            }
+        };
+
+        let mut topic_handles = Vec::with_capacity(topic_keys.len());
+        for key in &topic_keys {
+            let handle = gossip
+                .stream(key.0)
+                .await
+                .map_err(|e| NetworkError::Gossip(e.to_string()))?;
+            topic_handles.push(handle);
+        }
 
         let my_blob = Tier0Blob::sign(birth, &config.signing_key);
         let (event_tx, event_rx) = mpsc::channel(256);
 
-        spawn_gossip_listener(global_handle.subscribe(), event_tx.clone());
+        // Dedup set shared across all topic listeners — a peer may be
+        // discoverable via several shared topics and we only want one event.
+        let seen_peers: Arc<Mutex<HashSet<[u8; 32]>>> = Arc::new(Mutex::new(HashSet::new()));
+        for handle in &topic_handles {
+            spawn_gossip_listener(handle.subscribe(), event_tx.clone(), Arc::clone(&seen_peers));
+        }
 
         let net = ZodiaNetwork {
             gossip,
-            global_handle,
+            topic_handles,
             endpoint,
             my_blob,
             event_tx,
@@ -148,11 +174,13 @@ impl ZodiaNetwork {
     #[instrument(skip(self))]
     pub async fn publish_announce(&self) -> Result<(), NetworkError> {
         let bytes = self.my_blob.to_cbor();
-        self.global_handle
-            .publish(bytes)
-            .await
-            .map_err(|_| NetworkError::Publish)?;
-        info!("tier-0 announce published");
+        for handle in &self.topic_handles {
+            handle
+                .publish(bytes.clone())
+                .await
+                .map_err(|_| NetworkError::Publish)?;
+        }
+        info!(topics = self.topic_handles.len(), "tier-0 announce published");
         Ok(())
     }
 
@@ -236,12 +264,18 @@ pub(crate) fn spawn_channel_listener(
 fn spawn_gossip_listener(
     mut sub: GossipSubscription,
     tx: mpsc::Sender<ZodiaNetEvent>,
+    seen: Arc<Mutex<HashSet<[u8; 32]>>>,
 ) {
     tokio::spawn(async move {
         while let Some(result) = sub.next().await {
             match result {
                 Ok(bytes) => match Tier0Blob::from_cbor(&bytes) {
                     Ok(blob) if blob.verify().is_ok() => {
+                        // Dedup: a peer may appear on several shared topics.
+                        let is_new = seen.lock().map(|mut s| s.insert(blob.pubkey)).unwrap_or(true);
+                        if !is_new {
+                            continue;
+                        }
                         let peer_id = PeerId(blob.pubkey);
                         debug!(
                             peer = %hex::encode_upper(&peer_id.0[..4]),
