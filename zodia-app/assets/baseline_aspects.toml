@@ -9,81 +9,445 @@
 # Community contributions displace them the moment they arrive.
 
 [natal]
+
+# ── Sun aspects ───────────────────────────────────────────────────────────────
 "moon_conjunction_sun" = "The light and the feeling nature are born together. Who you are and how you feel move as one — the world reads you as settled, even when you aren't."
+"moon_sextile_sun" = "Emotion and will have a cooperative relationship. You can usually feel your way into what you want without the two pulling apart."
 "moon_square_sun" = "Inner life and outer self pull against each other. Emotion tends to complicate identity rather than clarify it."
 "moon_trine_sun" = "Feeling and will flow in the same direction. There's a quietness to it — not absence of conflict, but the ability to return to yourself."
 "moon_opposition_sun" = "The emotional self and the willed self face each other across a distance. Intimacy asks which one speaks first."
 
+"mercury_conjunction_sun" = "Mind and identity are fused. Thinking is self-expression; the risk is confusing a position for the person holding it."
+"mercury_sextile_sun" = "Thought and will are easy companions. Communication comes naturally, and ideas tend to find the right moment."
+"mercury_square_sun" = "The mind has opinions the ego doesn't always want to hear. Restlessness is the texture of the intellect."
+"mercury_trine_sun" = "Thought and will speak the same language. Communication is an extension of self rather than a translation of it."
+"mercury_opposition_sun" = "The mind wants to examine what the self takes for granted. Others often serve as mirrors for ideas you haven't finished forming."
+
+"venus_conjunction_sun" = "Charm and identity are closely bound. Beauty, pleasure, and affection feel like natural expressions of who you are."
+"venus_sextile_sun" = "Warmth and self-expression find each other easily. A capacity for making people feel welcomed."
+"venus_square_sun" = "What you desire and who you are trying to be don't always agree. Relationships become a place where identity gets tested."
+"venus_trine_sun" = "Ease in social and aesthetic domains. You tend to make a pleasant impression without laboring at it."
+"venus_opposition_sun" = "Self and other are in productive tension. Who you are becomes clearer through what you attract and what you repel."
+
 "mars_conjunction_sun" = "Drive and identity are fused. High output, tendency to lead with force, difficulty pacing. The engine is the self."
+"mars_sextile_sun" = "Initiative and identity work together. Action feels available without needing a crisis to provoke it."
 "mars_square_sun" = "Will and desire frequently cross each other. The friction is generative but expensive."
 "mars_trine_sun" = "Action feels like self-expression rather than effort. Forward movement arrives without needing permission."
-
-"saturn_conjunction_sun" = "Identity is shaped by discipline and the long build. Recognition arrives late and through real work — rarely frivolous."
-"saturn_square_sun" = "The world doesn't simply hand it over. What you build is tested thoroughly before it's allowed to stand."
-"saturn_trine_sun" = "Structure and ambition are quiet allies. You tend to earn rather than claim."
+"mars_opposition_sun" = "Others often activate your drive — for better and worse. Competition can be a gift; it can also be a distraction."
 
 "jupiter_conjunction_sun" = "Confidence and scale feel native. The risk is overreach — the gift is genuine expansion."
-"jupiter_trine_sun" = "What you put forward finds purchase. A natural current of good timing, when used well."
+"jupiter_sextile_sun" = "Opportunity arrives with a knock rather than a crash. Optimism is a working tool here, not just a mood."
 "jupiter_square_sun" = "Optimism runs ahead of capacity. The lesson is learning where growth actually leads."
+"jupiter_trine_sun" = "What you put forward finds purchase. A natural current of good timing, when used well."
+"jupiter_opposition_sun" = "The world offers scale; whether you can actually use it is the recurring question."
 
-"moon_trine_venus" = "Warmth is given easily. Home and beauty feel like the same thing. Comfort is offered before it's asked for."
-"moon_square_venus" = "What feels safe and what feels desirable are sometimes at odds. Relationships ask you to choose between them."
-"moon_conjunction_venus" = "Emotion and affection move together. Care is almost involuntary — you feel things into warmth."
-"moon_trine_saturn" = "Feelings are quietly reliable. You tend to stay when others leave, and this is mostly a gift."
-"moon_square_saturn" = "Emotional security feels hard-won. Early conditions may have asked you to need less than you did."
-"moon_conjunction_saturn" = "Feeling is accompanied by weight. Depth arrives naturally; lightness takes more work."
+"saturn_conjunction_sun" = "Identity is shaped by discipline and the long build. Recognition arrives late and through real work — rarely frivolous."
+"saturn_sextile_sun" = "Structure supports rather than constrains. You can work within limits without feeling caged by them."
+"saturn_square_sun" = "The world doesn't simply hand it over. What you build is tested thoroughly before it's allowed to stand."
+"saturn_trine_sun" = "Structure and ambition are quiet allies. You tend to earn rather than claim."
+"saturn_opposition_sun" = "External authority and internal authority are in ongoing negotiation. The tension usually resolves into real self-knowledge."
 
-"mars_conjunction_venus" = "Desire and aesthetics are tangled together. Attraction is immediate, declarations come before plans."
-"mars_square_venus" = "What you want and how you want to feel about it rarely align on the first pass."
-"mars_trine_venus" = "Attraction expresses naturally. Desire feels more gift than conflict."
+"uranus_conjunction_sun" = "Individuality is non-negotiable — sometimes at the cost of belonging. Originality is a reflex, not a choice."
+"uranus_square_sun" = "The pull toward disruption and the need for coherent identity are in friction. Reinvention comes in bursts."
+"uranus_trine_sun" = "Independence and originality feel natural rather than rebellious. Creative deviation tends to be well-received."
+"uranus_opposition_sun" = "Freedom and commitment are in ongoing tension. What the world calls unconventional, you call honest."
 
-"jupiter_trine_venus" = "Pleasure arrives with relative ease. Relationships tend toward generosity on both sides."
-"jupiter_square_venus" = "The appetite for connection can outrun good judgment. Abundance and excess travel together."
-"jupiter_square_saturn" = "Expansion and consolidation are perennial opponents. Each win costs something; each loss teaches something real."
-"jupiter_trine_saturn" = "Growth and discipline work together rather than against each other. What you build tends to last."
+"neptune_conjunction_sun" = "Identity is porous and imaginative. Art, intuition, and empathy feel like the self's native mode — boundaries take conscious work."
+"neptune_square_sun" = "Who you are and who you imagine yourself to be don't always match. Disillusionment is part of how you find the real."
+"neptune_trine_sun" = "Imagination and idealism enhance rather than undermine identity. A capacity for art, vision, and compassionate perception."
+"neptune_opposition_sun" = "Others may project onto you, or you onto them. The work is staying visible to yourself while remaining genuinely open."
 
-"mercury_trine_sun" = "Thought and will speak the same language. Communication is an extension of self rather than a translation of it."
-"mercury_square_sun" = "The mind has opinions the ego doesn't always want to hear. Restlessness is the texture of the intellect."
+"pluto_conjunction_sun" = "Power and identity are deeply entangled. Life tends to involve profound transformations — not always chosen, usually necessary."
+"pluto_square_sun" = "Something structural is being demolished. The reconstruction won't look like the original — that's the point."
+"pluto_trine_sun" = "Intensity and depth are available without requiring destruction. Transformation can be purposeful rather than forced."
+"pluto_opposition_sun" = "Power struggles — internal and external — become teachers. What you cannot control ends up mattering most."
+
+# ── Moon aspects ──────────────────────────────────────────────────────────────
+"mercury_conjunction_moon" = "The mind and the feeling nature are closely woven. You think about what you feel and feel your way through thinking."
+"mercury_sextile_moon" = "Emotional intelligence finds easy expression in words. You tend to articulate the inner life before it becomes stuck."
 "mercury_square_moon" = "The mind tends to loop on feelings. Sleep can be complicated; insight arrives sideways."
 "mercury_trine_moon" = "Emotional intelligence and verbal ability move together. You can name what you feel before it overflows."
+"mercury_opposition_moon" = "Head and heart take turns running the conversation. Each has something the other genuinely needs."
 
-"saturn_square_venus" = "Love arrives with conditions — sometimes from others, sometimes from yourself. Worth examining which."
-"saturn_trine_venus" = "Commitment is comfortable rather than constraining. Relationships built here tend to be durable."
-"saturn_conjunction_venus" = "Affection is taken seriously, sometimes too seriously. Depth over breadth, almost always."
+"venus_conjunction_moon" = "Emotion and affection move together. Care is almost involuntary — you feel things into warmth."
+"venus_sextile_moon" = "Comfort and pleasure are easy to offer and receive. A natural hospitality of spirit."
+"venus_square_moon" = "What feels safe and what feels desirable are sometimes at odds. Relationships ask you to choose between them."
+"venus_trine_moon" = "Warmth is given easily. Home and beauty feel like the same thing. Comfort is offered before it's asked for."
+"venus_opposition_moon" = "The need for connection and the need for independence in relationships are in honest tension."
 
-[transit]
-"jupiter_conjunction_sun" = "Expansion arrives in person. Visibility increases, confidence is accessible. A year to act on what you believe rather than only plan for it."
-"jupiter_trine_sun" = "A season of good timing. What you put forward finds an easier path than usual. Use it — it's not permanent."
-"jupiter_square_sun" = "Growth is available but the direction needs checking. Enthusiasm is high; discrimination is the work."
-"jupiter_conjunction_moon" = "Emotional life opens. Generosity feels available in ways it usually doesn't. Home, family, belonging — these expand."
-"jupiter_trine_moon" = "Feeling good comes with less effort than usual. Nourishment feels accessible. A good season for care."
+"mars_conjunction_moon" = "Emotion and action are tightly coupled. Feelings become impulses quickly; energy is available but can be poorly timed."
+"mars_sextile_moon" = "Emotional energy converts into action without too much loss. You tend to act on what matters to you."
+"mars_square_moon" = "Feeling and doing get crossed — action can arrive before understanding, or be blocked by it."
+"mars_trine_moon" = "Emotional honesty translates naturally into decisive movement. Instinct and action are allied."
+"mars_opposition_moon" = "Others tend to trigger reactions you weren't prepared to have. The gift is learning what actually matters."
 
-"saturn_conjunction_sun" = "A biographical reckoning — with what you've been building toward and whether the structure still fits. Slower, heavier, more honest."
-"saturn_square_sun" = "What doesn't hold is being shown. The scaffolding is stress-tested. Frustration is information."
-"saturn_trine_sun" = "Effort pays off with unusual clarity. A quiet season of productive work and earned recognition."
-"saturn_conjunction_moon" = "Emotional needs feel crowded out by responsibility. Loneliness is more informative than permanent."
-"saturn_square_moon" = "The gap between what you need and what you're allowing yourself to receive is visible. The question is what to do with that."
-"saturn_trine_moon" = "Emotional steadiness arrives without drama. A good season for doing the quiet work of repair."
+"jupiter_conjunction_moon" = "Emotional life is expansive and generous. A natural inclination toward care — sometimes past what's comfortable to give."
+"jupiter_sextile_moon" = "Emotional well-being comes with a certain ease. Optimism and feeling support each other."
+"jupiter_square_moon" = "Emotional generosity can outpace resources. The lesson is distinguishing abundance from avoidance."
+"jupiter_trine_moon" = "Emotional life is buoyed by a general sense of rightness. Care, belonging, and optimism reinforce each other."
+"jupiter_opposition_moon" = "The need for emotional security and the need for expansiveness pull against each other. Both are real — the question is sequence."
 
-"uranus_conjunction_sun" = "Disruption is coming from inside the house. The upheaval is biographical — who you've been doesn't quite fit what's arriving."
-"uranus_square_sun" = "The life you've built is being revised whether you asked for it or not. Resistance is costly; curiosity is cheaper."
-"uranus_conjunction_moon" = "The emotional ground shifts. Unexpected change in home, family, or inner life. Instability and freedom arrive together."
+"saturn_conjunction_moon" = "Feeling is accompanied by weight. Depth arrives naturally; lightness takes more work."
+"saturn_sextile_moon" = "Emotional reliability is a quiet strength. You don't emote easily, but when you do it means something."
+"saturn_square_moon" = "Emotional security feels hard-won. Early conditions may have asked you to need less than you did."
+"saturn_trine_moon" = "Feelings are quietly reliable. You tend to stay when others leave, and this is mostly a gift."
+"saturn_opposition_moon" = "Responsibility and emotional need are in tension. The learning is that having needs is not the same as being needy."
+
+"uranus_conjunction_moon" = "Emotional life is unpredictable and original. Freedom and belonging are in ongoing negotiation."
+"uranus_square_moon" = "The need for stability and the drive for independence destabilise each other. Home is complicated."
+"uranus_trine_moon" = "Emotional originality is a gift. You can hold unconventional feelings without needing them to be conventional."
+"uranus_opposition_moon" = "What you need emotionally and what liberates you are in productive friction. Others may find you inconsistent; you may call it alive."
 
 "neptune_conjunction_moon" = "Boundaries between self and feeling soften. Intuition is up; groundedness requires active attention."
-"neptune_square_sun" = "Identity feels less solid than usual. Disorientation and creativity share the same territory here."
+"neptune_sextile_moon" = "Sensitivity and imagination are resources. Empathy arrives without effort."
+"neptune_square_moon" = "Emotional clarity requires work — feelings can be diffuse, the source hard to locate."
+"neptune_trine_moon" = "Intuition, empathy, and feeling are woven together gracefully. The inner life has a richness that words rarely fully carry."
+"neptune_opposition_moon" = "The line between your feelings and others' is permeable. This is sometimes a gift, sometimes a source of confusion."
 
-"pluto_square_sun" = "Something structural is being demolished. The reconstruction won't look like the original — that's the point."
 "pluto_conjunction_moon" = "The emotional foundations are being remade. Intensity is high; what survives will be more honestly yours."
+"pluto_square_moon" = "Deep emotional material surfaces under pressure. Transformation is less optional than it appears."
+"pluto_trine_moon" = "Emotional depth is a strength. You can go into difficult feeling and come back with something real."
+"pluto_opposition_moon" = "Others can access your depths in ways that feel exposing. The gift is that what's touched is also what's healed."
+
+# ── Mercury aspects ───────────────────────────────────────────────────────────
+"venus_conjunction_mercury" = "Aesthetic sensibility and thought are entwined. You tend to find the pleasing form of an idea before you find its argument."
+"venus_sextile_mercury" = "Communication has a natural grace. Words come out warmer than intended — usually a gift."
+"venus_square_mercury" = "What you think and what you want to say are not always the same. Diplomacy takes effort."
+"venus_trine_mercury" = "Conversation and beauty reinforce each other. You tend to make ideas feel welcoming."
+"venus_opposition_mercury" = "Head and heart approach communication differently. The gap between thinking and feeling is worth crossing."
+
+"mars_conjunction_mercury" = "Thinking is quick, assertive, and sometimes combative. The mind moves fast and expects others to keep up."
+"mars_sextile_mercury" = "Direct communication feels natural. You can say difficult things without weaponizing them."
+"mars_square_mercury" = "Words and impulse are in competition. Things said quickly are sometimes regretted slowly."
+"mars_trine_mercury" = "Decisive thinking. When the mind is made up, action follows without drama."
+"mars_opposition_mercury" = "Other people's thinking provokes yours — productively and otherwise. Debate is a mode of discovery."
+
+"jupiter_conjunction_mercury" = "The mind is expansive and philosophical. You tend to think in large patterns and can miss the particular."
+"jupiter_sextile_mercury" = "Ideas arrive with a sense of possibility attached. Learning feels like a gift rather than a task."
+"jupiter_square_mercury" = "Thinking big is a strength and a liability. The gap between the idea and the execution is where the work lives."
+"jupiter_trine_mercury" = "Broad, confident thinking. Teaching, writing, and reasoning come with a natural fluency."
+"jupiter_opposition_mercury" = "The grand vision and the precise detail are in tension. Both matter; neither should devour the other."
+
+"saturn_conjunction_mercury" = "The mind is careful, methodical, and slow to commit to a position. Depth over breadth, almost always."
+"saturn_sextile_mercury" = "Disciplined thinking is a resource. You can sustain an argument long enough to finish it."
+"saturn_square_mercury" = "Self-criticism can block expression. The inner editor is thorough, sometimes to excess."
+"saturn_trine_mercury" = "Precision and patience make for a formidable intellect. Conclusions are earned rather than assumed."
+"saturn_opposition_mercury" = "The mind is tested by the world's demands for certainty. Doubt becomes a tool rather than a handicap."
+
+"uranus_conjunction_mercury" = "The mind is fast, original, and prone to disruption — of others' thinking and its own."
+"uranus_trine_mercury" = "Original thinking comes naturally. You can hold unusual ideas without needing them validated."
+"uranus_square_mercury" = "Thinking is discontinuous and electric. Insights arrive in gaps — the challenge is assembling them."
+
+"neptune_conjunction_mercury" = "The mind blends logic and intuition. Imagination is an intellectual resource; precision requires effort."
+"neptune_trine_mercury" = "Poetic, intuitive thinking. You can move between literal and figurative without getting lost."
+"neptune_square_mercury" = "Thinking can be impressionistic when clarity is needed. The imagination is vivid; the ground occasionally slips."
+
+"pluto_conjunction_mercury" = "Thinking is penetrating and persistent. You don't stop at the surface; you want the mechanism."
+"pluto_trine_mercury" = "Research, psychology, and any form of deep inquiry are natural domains. You can hold difficult knowledge."
+"pluto_square_mercury" = "The mind can become obsessive on problems it hasn't cracked. Depth is real; exhaustion is the price."
+
+# ── Venus aspects ─────────────────────────────────────────────────────────────
+"mars_conjunction_venus" = "Desire and aesthetics are tangled together. Attraction is immediate, declarations come before plans."
+"mars_sextile_venus" = "Affection and desire find each other without too much friction. Relationships feel energised."
+"mars_square_venus" = "What you want and how you want to feel about it rarely align on the first pass."
+"mars_trine_venus" = "Attraction expresses naturally. Desire feels more gift than conflict."
+"mars_opposition_venus" = "The push and pull of desire and receptivity play out in relationships directly. The creative tension is real."
+
+"jupiter_conjunction_venus" = "The appetite for beauty, pleasure, and connection is generous — sometimes past what's wise."
+"jupiter_sextile_venus" = "Good feeling and good fortune move together with more ease than most. Generosity tends to return."
+"jupiter_square_venus" = "The appetite for connection can outrun good judgment. Abundance and excess travel together."
+"jupiter_trine_venus" = "Pleasure arrives with relative ease. Relationships tend toward generosity on both sides."
+"jupiter_opposition_venus" = "Between what satisfies and what expands lies the recurring question. Sometimes you have to give up comfort to grow."
+
+"saturn_conjunction_venus" = "Affection is taken seriously, sometimes too seriously. Depth over breadth, almost always."
+"saturn_sextile_venus" = "Loyalty and consistency are available without feeling like sacrifice. Reliable affection, offered steadily."
+"saturn_square_venus" = "Love arrives with conditions — sometimes from others, sometimes from yourself. Worth examining which."
+"saturn_trine_venus" = "Commitment is comfortable rather than constraining. Relationships built here tend to be durable."
+"saturn_opposition_venus" = "Desire and responsibility are in honest tension. The question is whether love can survive the weight it's being asked to carry."
+
+"uranus_conjunction_venus" = "Love and freedom are simultaneous requirements. Conventional arrangements feel stifling; unconventional ones are the only ones that last."
+"uranus_square_venus" = "Attraction is unpredictable and the relationships that form can be volatile. Freedom and closeness resist compromise."
+"uranus_trine_venus" = "Originality in relationships is a gift. You can love in unusual ways without it needing to look conventional."
+
+"neptune_conjunction_venus" = "Love is idealistic, sometimes to a fault. The beauty you see in others is real — and sometimes ahead of what's actually there."
+"neptune_square_venus" = "Romantic idealism is a gift that can become a liability when the real person differs from the imagined one."
+"neptune_trine_venus" = "A poetic, compassionate approach to love. Devotion arrives softly; the aesthetic sense is refined."
+
+"pluto_conjunction_venus" = "Love is transformative rather than comfortable. Relationships reach into the deep structure of identity."
+"pluto_square_venus" = "Desire can become obsessive. What draws you also changes you — whether you asked for it or not."
+"pluto_trine_venus" = "Depth in love is a natural resource. You can hold intensity without it becoming destruction."
+
+# ── Mars aspects ──────────────────────────────────────────────────────────────
+"jupiter_conjunction_mars" = "Energy and ambition reinforce each other. The risk is overextension; the gift is genuine momentum."
+"jupiter_sextile_mars" = "Effort and opportunity find each other more reliably than average. Initiative tends to be rewarded."
+"jupiter_square_mars" = "Drive and excess compete. Action is available; direction is the work."
+"jupiter_trine_mars" = "Energy and optimism work in tandem. You tend to act at the right moment with enough behind it."
+"jupiter_opposition_mars" = "Others either amplify your drive or challenge it directly. Both serve a purpose."
+
+"saturn_conjunction_mars" = "Energy is disciplined by default or frustrated by circumstance. Either way, patience is built into the body."
+"saturn_sextile_mars" = "Effort is sustained and purposeful. You can work hard without burning out as quickly as most."
+"saturn_square_mars" = "Drive meets resistance — internal or external. The friction is productive when there's something worth the friction for."
+"saturn_trine_mars" = "Effort and structure are natural allies. Long projects are completed; promises are kept."
+"saturn_opposition_mars" = "Action and caution are in negotiation. The lesson is discerning when to push and when the limit is real."
+
+"uranus_conjunction_mars" = "Action is sudden, original, and sometimes reckless. Energy arrives in bolts and needs channels."
+"uranus_square_mars" = "Impulse and disruption are in friction. The instinct to act can arrive before the ground is ready."
+"uranus_trine_mars" = "Original, independent action feels natural. You can move in unexpected directions without losing momentum."
+
+"neptune_conjunction_mars" = "Drive is mixed with imagination and sometimes diffused by it. Action is most effective when in service of something larger."
+"neptune_square_mars" = "Motivation can become confused or undermined by idealism. The will is real; the direction occasionally isn't."
+"neptune_trine_mars" = "Inspired action. When the work has meaning, the energy is extraordinary."
+
+"pluto_conjunction_mars" = "Power and drive are fused. The capacity for sustained, intense effort is enormous — so is the potential for compulsion."
+"pluto_square_mars" = "Will and power clash internally or externally. Control and force are recurring themes."
+"pluto_trine_mars" = "The ability to direct intense energy is a real strength. Transformation through action rather than suffering."
+
+# ── Jupiter aspects ───────────────────────────────────────────────────────────
+"jupiter_conjunction_saturn" = "Expansion and consolidation are in direct dialogue. The question is how to build something that lasts without it becoming a cage."
+"jupiter_sextile_saturn" = "Growth and discipline find a workable balance. You can dream and plan without either cancelling the other."
+"jupiter_square_saturn" = "Expansion and consolidation are perennial opponents. Each win costs something; each loss teaches something real."
+"jupiter_trine_saturn" = "Growth and discipline work together rather than against each other. What you build tends to last."
+"jupiter_opposition_saturn" = "The need for security and the need for expansion are in honest tension. Neither wins permanently — both are necessary."
+
+"jupiter_conjunction_uranus" = "Freedom and possibility feel native. Change is sought rather than feared, sometimes past the point of stability."
+"jupiter_trine_uranus" = "Innovation and growth reinforce each other. Original ideas find room to become real."
+"jupiter_square_uranus" = "The drive for change and the need for coherent expansion collide. Breakthroughs arrive with disruption attached."
+
+"jupiter_conjunction_neptune" = "Vision and expansion are amplified. The capacity for spiritual or imaginative experience is large — discrimination is the discipline."
+"jupiter_trine_neptune" = "Idealism and optimism work together. A natural capacity for faith, vision, and creative generosity."
+"jupiter_square_neptune" = "Belief and reality are in tension. The gifts are large; so is the potential for self-deception."
+
+"jupiter_conjunction_pluto" = "Ambition and power are amplified. Transformation at scale is possible — and so is the abuse of it."
+"jupiter_trine_pluto" = "The capacity for meaningful transformation is real. What you build has staying power."
+"jupiter_square_pluto" = "The drive for power and the drive for growth are in friction. Force and wisdom are both available."
+
+# ── Saturn aspects ────────────────────────────────────────────────────────────
+"saturn_conjunction_uranus" = "Tradition and disruption are fused in the personality. Constraint and freedom are both internalized — and in ongoing conflict."
+"saturn_square_uranus" = "The desire to break the rules and the need to maintain structure are at war. The creative tension is real if exhausting."
+"saturn_trine_uranus" = "Original thinking works within structures rather than against them. Reform rather than revolution."
+
+"saturn_conjunction_neptune" = "The imagination and the sense of duty are tightly bound. Vision requires concrete form; structure is spiritualised."
+"saturn_square_neptune" = "Reality and illusion are in uncomfortable proximity. The discipline required to distinguish them is the ongoing practice."
+"saturn_trine_neptune" = "The spiritual and the practical support each other. Visions can be built; structures can carry meaning."
+
+"saturn_conjunction_pluto" = "Power and limitation are fused. Enormous capacity for endurance — and for control that outlasts its usefulness."
+"saturn_square_pluto" = "Survival and structure are in grinding tension. What gets built under this is tested thoroughly."
+"saturn_trine_pluto" = "Depth and discipline work together. The capacity to sustain transformation without being destroyed by it."
+
+# ── Outer planet aspects ──────────────────────────────────────────────────────
+"uranus_conjunction_neptune" = "A generational signature: the dissolution of old orders and the visioning of new ones. Personally, identity can be elusive and the call to something larger is persistent."
+"uranus_trine_neptune" = "Originality and vision are in flow. Creative and spiritual departures feel available."
+"uranus_square_neptune" = "Disruption and dissolution arrive together. What's being broken may not be ready to be replaced."
+
+"uranus_conjunction_pluto" = "A generational signature of radical, forced transformation. Personally, the will to overturn is strong — and costly."
+"uranus_trine_pluto" = "Transformation and liberation reinforce each other. Change is purposeful rather than random."
+"uranus_square_pluto" = "The drive for freedom and the demand for power are in direct friction. The pressure produces change; the direction needs minding."
+
+"neptune_conjunction_pluto" = "A deep generational signature — spiritual and structural transformation over decades. Personally, the sense of being part of something vast and uncontrollable."
+"neptune_trine_pluto" = "Depth and transcendence work in concert. A capacity for profound insight and compassionate understanding."
+"neptune_square_pluto" = "The idealized and the powerful are in tension. What needs to be released resists — and then eventually yields."
+
+[transit]
+
+# ── Jupiter transits ──────────────────────────────────────────────────────────
+"jupiter_conjunction_sun" = "Expansion arrives in person. Visibility increases, confidence is accessible. A year to act on what you believe rather than only plan for it."
+"jupiter_sextile_sun" = "A season of moderate good luck. What you initiate tends to find support. Don't wait for perfect conditions."
+"jupiter_square_sun" = "Growth is available but the direction needs checking. Enthusiasm is high; discrimination is the work."
+"jupiter_trine_sun" = "A season of good timing. What you put forward finds an easier path than usual. Use it — it's not permanent."
+"jupiter_opposition_sun" = "Others are offering — or demanding — something that expands you. Relationship is the site of growth this season."
+
+"jupiter_conjunction_moon" = "Emotional life opens. Generosity feels available in ways it usually doesn't. Home, family, belonging — these expand."
+"jupiter_sextile_moon" = "Emotional ease arrives without needing to be earned. A good season for nourishment and quiet pleasure."
+"jupiter_square_moon" = "Emotional excess is possible. The appetite for comfort or connection runs ahead of what's actually good for you."
+"jupiter_trine_moon" = "Feeling good comes with less effort than usual. Nourishment feels accessible. A good season for care."
+"jupiter_opposition_moon" = "Others are reflecting your emotional needs back to you — generously or otherwise. What you need is visible."
+
+"jupiter_conjunction_mercury" = "The mind expands. Big ideas, new studies, a return to learning. Don't let scope replace completion."
+"jupiter_trine_mercury" = "Communication flows with unusual fluency. A good season for writing, teaching, or making a case."
+"jupiter_square_mercury" = "Big thinking and scattered follow-through are in tension. Ambition without editing."
+
+"jupiter_conjunction_venus" = "Pleasure and connection expand. Romance, beauty, and generosity are all in season — overindulgence is the only caution."
+"jupiter_trine_venus" = "Affection flows easily. Relationships begun or deepened now have a warmth that tends to last."
+"jupiter_square_venus" = "Excess in pleasure or relationship is possible. What feels generous may be avoidance of the harder thing."
+
+"jupiter_conjunction_mars" = "Drive and opportunity coincide. Energy is high and the door is open — use both before one fades."
+"jupiter_trine_mars" = "Effort is rewarded. A season for sustained action toward something worth sustaining."
+"jupiter_square_mars" = "Force and ambition run hot. Much can be accomplished; much can be wasted. Aim matters."
+
+"jupiter_conjunction_saturn" = "A genuine turning point between consolidation and expansion. What you've built is ready to be offered more widely."
+"jupiter_trine_saturn" = "Effort and opportunity are aligned. A productive season for long-term projects and measured ambition."
+"jupiter_square_saturn" = "Growth meets resistance. The structure needs revising before it can hold what you're trying to add."
+"jupiter_opposition_saturn" = "What has been built is being evaluated — by you and by the world. Consolidation and expansion are both asking to be heard."
+
+"jupiter_conjunction_uranus" = "Freedom and opportunity coincide. An unexpected opening — not necessarily comfortable, always instructive."
+"jupiter_trine_uranus" = "Creative departures land well. A season for originality and the experiment you've been putting off."
+
+"jupiter_conjunction_neptune" = "Vision expands to fill available space. Inspiration is high; grounding is the practice."
+"jupiter_trine_neptune" = "Spiritual and creative life opens. Beauty, meaning, and faith feel available in ways they don't always."
+
+"jupiter_conjunction_pluto" = "Power and ambition are amplified. What you're building has real scope — and real stakes."
+"jupiter_trine_pluto" = "Transformation is available without requiring destruction. A season for meaningful change on your own terms."
+
+# ── Saturn transits ───────────────────────────────────────────────────────────
+"saturn_conjunction_sun" = "A biographical reckoning — with what you've been building toward and whether the structure still fits. Slower, heavier, more honest."
+"saturn_sextile_sun" = "Steady effort is rewarded. A season for taking the long view and doing the unglamorous work."
+"saturn_square_sun" = "What doesn't hold is being shown. The scaffolding is stress-tested. Frustration is information."
+"saturn_trine_sun" = "Effort pays off with unusual clarity. A quiet season of productive work and earned recognition."
+"saturn_opposition_sun" = "The world is requiring an accounting. External pressure and internal authority are in direct conversation."
+
+"saturn_conjunction_moon" = "Emotional needs feel crowded out by responsibility. Loneliness is more informative than permanent."
+"saturn_sextile_moon" = "Emotional steadiness without drama. A season for quiet repair and reliable care."
+"saturn_square_moon" = "The gap between what you need and what you're allowing yourself to receive is visible. The question is what to do with that."
+"saturn_trine_moon" = "Emotional steadiness arrives without drama. A good season for doing the quiet work of repair."
+"saturn_opposition_moon" = "Responsibility and emotional need are in direct tension. Something is being asked that doesn't come easily."
+
+"saturn_conjunction_mercury" = "The mind is slowed and deepened. Serious thinking, serious writing, serious commitments of attention."
+"saturn_trine_mercury" = "Disciplined communication pays off. A season for precision, editing, and completing what you've been drafting."
+"saturn_square_mercury" = "The inner critic is loud. Use its attention to improve the work rather than delay it."
+
+"saturn_conjunction_venus" = "Relationships and pleasure are brought under scrutiny. What's real becomes clear; what was comfortable but untrue doesn't survive."
+"saturn_trine_venus" = "Commitment and affection reinforce each other. Relationships tested here tend to be genuine."
+"saturn_square_venus" = "Love is being asked to carry more weight than usual. The question is whether it can — and whether you want it to."
+"saturn_opposition_venus" = "The relationship between desire and responsibility reaches a critical juncture. Something real is being asked of you."
+
+"saturn_conjunction_mars" = "Drive is slowed, tested, and eventually strengthened. Patience is not optional — it's the lesson."
+"saturn_trine_mars" = "Sustained, disciplined effort. The long project moves forward; promises are kept."
+"saturn_square_mars" = "Frustration and blocked energy. What you're pushing against is showing you where the actual obstacle lives."
+
+"saturn_conjunction_jupiter" = "A long cycle completes. What was growing is being assessed; what was promised is being delivered or released."
+"saturn_trine_jupiter" = "Ambition and patience are aligned. Long-term investments in work or growth show real returns."
+"saturn_square_jupiter" = "Expansion is being constrained. Not permanently — but the structure needs to catch up to the vision."
+
+"saturn_conjunction_uranus" = "Freedom and structure are in direct collision. Something must give; what remains will be more honest."
+"saturn_square_uranus" = "The desire to break free and the requirement to maintain form are in painful friction. The breakthrough takes time."
+
+"saturn_conjunction_neptune" = "Illusions are being dissolved by reality — not cruelly, but clearly. What's left is what's actually true."
+"saturn_square_neptune" = "Vision and practicality are in tension. The dream needs to meet the ground or it will stay a dream."
+
+"saturn_conjunction_pluto" = "Power structures — internal and external — are being tested at their foundations. A season for serious reckoning."
+"saturn_square_pluto" = "Force meets obstruction. The grinding quality of this is real; so is the structural change it produces."
+
+# ── Uranus transits ───────────────────────────────────────────────────────────
+"uranus_conjunction_sun" = "Disruption is coming from inside the house. The upheaval is biographical — who you've been doesn't quite fit what's arriving."
+"uranus_sextile_sun" = "Opportunity for genuine change arrives without requiring destruction. A season for chosen departures."
+"uranus_square_sun" = "The life you've built is being revised whether you asked for it or not. Resistance is costly; curiosity is cheaper."
+"uranus_trine_sun" = "Change feels available and productive. A good season to act on what's been waiting for permission."
+"uranus_opposition_sun" = "A biographical midpoint — freedom and reinvention are demanded by the structure of time itself."
+
+"uranus_conjunction_moon" = "The emotional ground shifts. Unexpected change in home, family, or inner life. Instability and freedom arrive together."
+"uranus_square_moon" = "Security and freedom are in sharp tension. What changes may not be what you planned."
+"uranus_trine_moon" = "Emotional liberation is available. A season for releasing what's been held out of habit."
+
+"uranus_conjunction_mercury" = "The mind is rewired. Discontinuous insight, unusual connections, sudden clarity after long confusion."
+"uranus_conjunction_venus" = "Love and freedom collide. Attraction is sudden; what forms may be unconventional and real."
+"uranus_conjunction_mars" = "Drive is electrified. Action is sudden, potentially reckless — and sometimes exactly what was needed."
+"uranus_conjunction_jupiter" = "Freedom and expansion arrive simultaneously. Something long wished for becomes suddenly possible."
+"uranus_conjunction_saturn" = "The structures you've built are being disrupted. Not necessarily destroyed — but definitely changed."
+
+# ── Neptune transits ──────────────────────────────────────────────────────────
+"neptune_conjunction_sun" = "Identity becomes fluid. Art, compassion, and spiritual experience expand — groundedness requires effort."
+"neptune_sextile_sun" = "Imagination and intuition are available resources this season. Creative and spiritual life open quietly."
+"neptune_square_sun" = "Identity feels less solid than usual. Disorientation and creativity share the same territory here."
+"neptune_trine_sun" = "A season of unusual beauty and spiritual opening. The imagination is a working instrument."
+"neptune_opposition_sun" = "The life you've built is being seen through. What's real and what was a story become clearer — painfully or gracefully."
+
+"neptune_conjunction_moon" = "Emotional and imaginative life merge. Boundary work is necessary; the reward is deep intuition."
+"neptune_square_moon" = "Emotional clarity requires real effort. The source of feelings is hard to locate; empathy is high."
+"neptune_trine_moon" = "Intuition and empathy flow. A season for creative emotional work and inner life."
+
+"neptune_conjunction_mercury" = "The mind becomes poetic and porous. Logic and intuition blur; inspiration is available, precision less so."
+"neptune_conjunction_venus" = "Love is idealized and beautiful. The person in front of you and the person you're seeing may differ."
+"neptune_conjunction_mars" = "Drive is spiritualized or diffused. When aligned with meaning, energy is extraordinary."
+"neptune_conjunction_jupiter" = "Expansion is visionary. The scale of what's imagined is large; the discernment needed is equally large."
+"neptune_conjunction_saturn" = "Structure is being dissolved. What built security may be revealed as convention."
+
+# ── Pluto transits ────────────────────────────────────────────────────────────
+"pluto_conjunction_sun" = "The self is being rebuilt from the foundation. The person who emerges will share DNA with who you were, but not the exact same shape."
+"pluto_sextile_sun" = "Transformation is available on your own terms. A season for purposeful change rather than forced revision."
+"pluto_square_sun" = "Something structural is being demolished. The reconstruction won't look like the original — that's the point."
+"pluto_trine_sun" = "Deep change is available and productive. What you're building now has real staying power."
+"pluto_opposition_sun" = "Power — yours and others' — is the subject. What you've accumulated is being asked to prove it's real."
+
+"pluto_conjunction_moon" = "The emotional foundations are being remade. Intensity is high; what survives will be more honestly yours."
+"pluto_square_moon" = "Deep emotional material surfaces. The transformation is real even when it's unwelcome."
+"pluto_trine_moon" = "Emotional depth is a productive resource. A season for serious inner work with visible results."
+
+"pluto_conjunction_mercury" = "The mind goes deep and doesn't come back the same. Research, therapy, any form of serious investigation."
+"pluto_conjunction_venus" = "Love and desire are being transformed. Intensity, obsession, and the real thing may be hard to tell apart."
+"pluto_conjunction_mars" = "Drive and power are amplified to an extreme. What you do with force now matters more than usual."
+"pluto_conjunction_jupiter" = "Ambition and power are operating at maximum. The scope of what you're attempting — and its consequences — is real."
+"pluto_conjunction_saturn" = "Power and structure reach a reckoning. What was built to last is being tested on exactly that claim."
+"pluto_conjunction_uranus" = "Radical transformation and freedom arrive together. Disruption is complete rather than partial."
+"pluto_conjunction_neptune" = "The deepest structures of belief and imagination are being revised. A rare and slow reorientation."
 
 [house_transit]
+
+# ── Saturn through houses ─────────────────────────────────────────────────────
 "saturn:1" = "The body and immediate presence feel under scrutiny — your own and others'. A season for intentional projection."
 "saturn:2" = "Resources and security are being renegotiated. What you actually have and what you actually need become clearer."
+"saturn:3" = "Communication and thinking are being held to a higher standard. Serious study, difficult conversations, concrete writing."
 "saturn:4" = "Home life or psychological foundations are being restructured. What doesn't belong to you anymore becomes visible."
+"saturn:5" = "Creativity and pleasure are being asked to justify themselves. Play that survives this season is the real kind."
+"saturn:6" = "Work, health, and daily structure are being overhauled. Discipline is both the demand and the reward."
 "saturn:7" = "Relationships are being held to account. Commitment becomes concrete; casual arrangements resolve one way or another."
+"saturn:8" = "Shared resources, intimacy, and mortality are the subject. What you owe and what you're owed becomes explicit."
+"saturn:9" = "Beliefs and worldview are under review. What you've taken as true is being asked to prove it."
 "saturn:10" = "Career and public role are being tested. Reputation is being built or dismantled — often both at once."
+"saturn:11" = "Friendships and affiliations are being evaluated. Who is actually there and who was just convenient becomes clear."
 "saturn:12" = "A season of withdrawal and inner work. Isolation is productive when chosen; crushing when imposed."
 
+# ── Jupiter through houses ────────────────────────────────────────────────────
 "jupiter:1" = "Physical vitality and confidence are expansive. A good season to begin things, make asks, and occupy space."
-"jupiter:7" = "Partnership is favored. Alliances formed now tend to hold. A good season for collaboration over solo effort."
-"jupiter:10" = "Career visibility opens. Recognition arrives more easily than usual. What you've built is being seen."
+"jupiter:2" = "Resources and income tend to expand. Generosity in financial matters is possible — so is excess."
+"jupiter:3" = "Communication, learning, and short travel are favored. A season for ideas, connections, and useful conversation."
 "jupiter:4" = "Home life expands. Family, belonging, or a sense of roots is available in ways it hasn't been."
+"jupiter:5" = "Creativity, romance, and play are open. A good season to make things, pursue pleasure, and take risks that matter."
+"jupiter:6" = "Health and work improve. A good season to address what's been deferred in the body or daily routine."
+"jupiter:7" = "Partnership is favored. Alliances formed now tend to hold. A good season for collaboration over solo effort."
+"jupiter:8" = "Shared resources and intimate life open. Support from others is available; transformation through trust."
+"jupiter:9" = "Philosophy, travel, and education expand. A season for the large question and the long journey."
+"jupiter:10" = "Career visibility opens. Recognition arrives more easily than usual. What you've built is being seen."
+"jupiter:11" = "Community, friendship, and collective purpose are available. A good season for the group project and the genuine alliance."
+"jupiter:12" = "Inner life expands quietly. Solitude is productive. Healing and spiritual work proceed without announcement."
+
+# ── Uranus through houses ─────────────────────────────────────────────────────
+"uranus:1" = "Identity is up for revision — voluntarily or otherwise. The self you've been presenting no longer fits."
+"uranus:2" = "Security structures are disrupted. Income and resources may shift suddenly; values are being overhauled."
+"uranus:3" = "Thinking and communication become rapid, scattered, and original. Ideas arrive faster than they can be organized."
+"uranus:4" = "Home and foundations shift. Moves, family disruptions, or a fundamental change in the inner life."
+"uranus:5" = "Creative and romantic life becomes electric and unpredictable. What forms now is genuine — and possibly unexpected."
+"uranus:6" = "Work and health require flexibility. Routines break down; new practices form from the rubble."
+"uranus:7" = "Relationships undergo radical change. What's been stable may not remain so; what forms is more honest."
+"uranus:8" = "The structures of shared life — intimacy, inheritance, power — are overturned and rebuilt."
+"uranus:9" = "Beliefs and philosophies are disrupted. What you thought you knew about the world is being revised."
+"uranus:10" = "Career and public role undergo sudden change. What looked established may not be; what was unexpected arrives."
+"uranus:11" = "Community and friendship networks reorganize. Who belongs and who was just circumstance becomes clear."
+"uranus:12" = "The unconscious is being stirred. Old patterns surface and dissolve. Spiritual disruption that eventually frees."
+
+# ── Neptune through houses ────────────────────────────────────────────────────
+"neptune:1" = "Identity softens and becomes more porous. Empathy and imagination are heightened; a clear sense of self requires effort."
+"neptune:2" = "The relationship with material security becomes idealized or confused. Value and worth are being redefined."
+"neptune:3" = "Communication and thinking become more intuitive and less precise. Poetry is available; facts are harder."
+"neptune:4" = "Home and inner life are spiritualized or dissolved. What constitutes belonging is being reimagined."
+"neptune:5" = "Creativity and romance are infused with longing and beauty. What forms may be transcendent — or illusory."
+"neptune:6" = "Work and health become sources of spiritual meaning — or sites of confusion and depletion."
+"neptune:7" = "Relationships are idealized. The line between real connection and projection requires active tending."
+"neptune:8" = "Intimate and shared life is spiritualized. Deep resources — emotional and material — become harder to assess clearly."
+"neptune:9" = "Belief and philosophy dissolve into something larger and less defined. Faith and confusion are close neighbors."
+"neptune:10" = "Career and public role become sites of idealization or dissolution. What you're building may be less solid than it looks."
+"neptune:11" = "Community and collective life is infused with vision and longing. Idealized groups require discernment."
+"neptune:12" = "Solitude and inner life are deeply receptive. Dreams, art, and spiritual experience are unusually available."
+
+# ── Pluto through houses ──────────────────────────────────────────────────────
+"pluto:1" = "Identity is being fundamentally remade. What you thought was permanent about yourself is the material of transformation."
+"pluto:2" = "Security and value structures are being overhauled. What you own and what owns you become difficult to separate."
+"pluto:3" = "Thinking and communication go deep. The casual is replaced by the serious; the mind becomes an instrument of investigation."
+"pluto:4" = "Foundations — psychological and literal — are being transformed. Family patterns, ancestral material, the deep past."
+"pluto:5" = "Creativity and self-expression are being remade at their root. What you make now carries real weight."
+"pluto:6" = "Work and health undergo fundamental revision. The body and the daily life are being rebuilt."
+"pluto:7" = "Relationships are transformed — sometimes by power struggles, sometimes by depth that wouldn't have been possible before."
+"pluto:8" = "The territory of shared life, intimacy, and mortality is being mapped in full. There is no avoiding the deep material here."
+"pluto:9" = "Belief systems are demolished and rebuilt. The worldview that emerges will be earned rather than inherited."
+"pluto:10" = "Career and public life undergo transformative change. What you become professionally may not resemble where you started."
+"pluto:11" = "Community and collective life are being transformed. Old alliances dissolve; new ones form around what's actually true."
+"pluto:12" = "The deepest unconscious material is surfacing to be transformed. This is slow, invisible work with permanent effects."
