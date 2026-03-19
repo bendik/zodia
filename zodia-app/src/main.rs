@@ -16,10 +16,19 @@ const BASELINE_TOML: &str = include_str!("../assets/baseline_aspects.toml");
 
 fn main() {
     // ── tracing ───────────────────────────────────────────────────────────────
+    // Suppress noisy iroh/p2panda internals (NAT traversal warnings, DHT
+    // discovery timeouts) unless the caller explicitly sets ZODIA_LOG.
+    // The overrideable default keeps our own crates at info and everything
+    // else quiet enough for daily use.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("zodia=debug,info")),
+            tracing_subscriber::EnvFilter::try_from_env("ZODIA_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
+                    "iroh_quinn_proto=error,\
+                     iroh=warn,\
+                     p2panda_net=error,\
+                     info"
+                )),
         )
         .init();
 
@@ -193,5 +202,28 @@ window {
 .connect-btn:hover {
     background-color: #3a3860;
     color: #c0b0e8;
+}
+.call-btn {
+    font-size: 14px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background-color: #1e2840;
+    color: #7090d0;
+    border: 1px solid #2a3858;
+}
+.call-btn:hover {
+    background-color: #2a3860;
+    color: #90b0f0;
+}
+
+/* ── call bar ────────────────────────────────────────────────────────────── */
+.call-bar {
+    background-color: #12111c;
+    border-top: 1px solid #2a2835;
+    padding: 6px 0;
+}
+.call-status {
+    font-size: 13px;
+    color: #a090d0;
 }
 "#;

@@ -12,32 +12,26 @@ impl TopicKey {
     }
 }
 
-/// Broad topic key: ~600 km geohash prefix + solar month (0–11).
+/// Global discovery topic — every Zodia peer subscribes to this.
 ///
-/// Peers born in broadly similar times and places cluster here.
-/// Safe to derive from Tier-0 announce data.
-pub fn topic_key_broad(birth: &BirthData) -> TopicKey {
-    let prefix = truncated(&birth.geohash, 3);
-    let month = solar_month(birth.jdn);
-    hash_topic(&format!("zodia:broad:{}:{}", prefix, month))
+/// All Tier-0 announce blobs flow through one shared gossip channel so that
+/// any peer can discover any other peer regardless of birth time or location.
+/// Synastry filtering happens at the app layer after discovery, not here.
+///
+/// The Tier-0 blob itself reveals only geohash prefix + solar month + pubkey,
+/// which is no more sensitive than being on the network at all.
+pub fn topic_key_global() -> TopicKey {
+    hash_topic("zodia:v1:global")
 }
 
-/// Narrow topic key: ~5 km geohash prefix + exact solar degree (0–359).
-///
-/// A much smaller neighbourhood — only peers with nearly identical solar
-/// placement in the same city. Used for the second swarm subscription.
-pub fn topic_key_narrow(birth: &BirthData) -> TopicKey {
-    let prefix = truncated(&birth.geohash, 5);
-    let deg = solar_longitude(birth.jdn) as u32;
-    hash_topic(&format!("zodia:narrow:{}:{}", prefix, deg))
-}
+/// Kept for compatibility — both redirect to the global topic.
+#[deprecated(note = "use topic_key_global(); per-birth topics were too restrictive")]
+pub fn topic_key_broad(_birth: &BirthData) -> TopicKey { topic_key_global() }
+#[deprecated(note = "use topic_key_global(); per-birth topics were too restrictive")]
+pub fn topic_key_narrow(_birth: &BirthData) -> TopicKey { topic_key_global() }
 
 fn hash_topic(input: &str) -> TopicKey {
     TopicKey(*blake3::hash(input.as_bytes()).as_bytes())
-}
-
-fn truncated(s: &str, n: usize) -> &str {
-    &s[..n.min(s.len())]
 }
 
 // ── solar position ───────────────────────────────────────────────────────────

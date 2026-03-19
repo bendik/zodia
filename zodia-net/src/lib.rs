@@ -90,17 +90,19 @@ pub enum ZodiaNetEvent {
 
 // ── topic helpers ─────────────────────────────────────────────────────────────
 
-/// The two gossip topics derived from the user's natal chart.
+/// The single global gossip topic all Zodia peers subscribe to.
 pub struct SwarmTopics {
-    pub broad: TopicKey,
-    pub narrow: TopicKey,
+    pub global: TopicKey,
 }
 
 impl SwarmTopics {
-    pub fn from_birth(birth: &BirthData) -> Self {
-        Self {
-            broad:  zodia_core::topic_key_broad(birth),
-            narrow: zodia_core::topic_key_narrow(birth),
-        }
+    pub fn new() -> Self {
+        Self { global: zodia_core::topic_key_global() }
+    }
+
+    /// `birth` parameter kept for call-site compatibility; topics are no longer
+    /// derived from birth data so all peers share the same topic.
+    pub fn from_birth(_birth: &BirthData) -> Self {
+        Self::new()
     }
 }

@@ -687,7 +687,7 @@ fn build_main_page(
 
     let peers_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     peers_header.set_css_classes(&["panel-header"]);
-    let peers_title = section_title("Nearby Peers");
+    let peers_title = section_title("Online Peers");
     peers_title.set_hexpand(true);
     let peer_count_label = gtk::Label::new(Some("Scanning for peers…"));
     peer_count_label.set_css_classes(&["peer-count"]);
@@ -696,8 +696,8 @@ fn build_main_page(
     peers_box.append(&peers_header);
 
     let hint = gtk::Label::new(Some(
-        "Peers sharing your astrological neighbourhood appear below.\n\
-         Aspect glyphs show their approximate ☉ resonance with your natal chart.",
+        "All online Zodia peers appear below.\n\
+         Aspect glyphs show their ☉ resonance with your natal chart.",
     ));
     hint.set_css_classes(&["hint-label"]);
     hint.set_wrap(true);

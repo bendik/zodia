@@ -58,8 +58,8 @@ pub struct ZodiaNetwork {
     // Kept alive for the interpretation index sync (LogSync wiring — coming in zodia-sync)
     #[allow(dead_code)]
     gossip: Gossip,
-    broad_handle: GossipHandle,
-    narrow_handle: GossipHandle,
+    /// Single global gossip channel — all Zodia peers share one topic.
+    global_handle: GossipHandle,
     endpoint: Endpoint,
     /// Pre-constructed, signed announce blob for this peer.
     my_blob: Tier0Blob,
@@ -115,29 +115,21 @@ impl ZodiaNetwork {
             .map_err(|e| NetworkError::Gossip(e.to_string()))?;
         debug!("gossip engine ready");
 
-        // Subscribe to both astrological neighbourhood topics.
-        let topics = SwarmTopics::from_birth(birth);
-        let broad_handle = gossip
-            .stream(topics.broad.0)
+        // All peers share one global topic — synastry filtering is the app's job.
+        let global_handle = gossip
+            .stream(SwarmTopics::new().global.0)
             .await
             .map_err(|e| NetworkError::Gossip(e.to_string()))?;
-        let narrow_handle = gossip
-            .stream(topics.narrow.0)
-            .await
-            .map_err(|e| NetworkError::Gossip(e.to_string()))?;
-        info!("subscribed to broad + narrow gossip topics");
+        info!("subscribed to global gossip topic");
 
         let my_blob = Tier0Blob::sign(birth, &config.signing_key);
         let (event_tx, event_rx) = mpsc::channel(256);
 
-        // Background tasks: relay gossip messages as ZodiaNetEvents.
-        spawn_gossip_listener(broad_handle.subscribe(), event_tx.clone());
-        spawn_gossip_listener(narrow_handle.subscribe(), event_tx.clone());
+        spawn_gossip_listener(global_handle.subscribe(), event_tx.clone());
 
         let net = ZodiaNetwork {
             gossip,
-            broad_handle,
-            narrow_handle,
+            global_handle,
             endpoint,
             my_blob,
             event_tx,
@@ -156,15 +148,11 @@ impl ZodiaNetwork {
     #[instrument(skip(self))]
     pub async fn publish_announce(&self) -> Result<(), NetworkError> {
         let bytes = self.my_blob.to_cbor();
-        self.broad_handle
-            .publish(bytes.clone())
-            .await
-            .map_err(|_| NetworkError::Publish)?;
-        self.narrow_handle
+        self.global_handle
             .publish(bytes)
             .await
             .map_err(|_| NetworkError::Publish)?;
-        info!("tier-0 announce published to both topics");
+        info!("tier-0 announce published");
         Ok(())
     }
 
