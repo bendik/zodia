@@ -1,11 +1,11 @@
 //! Connected-peer navigation page.
 //!
 //! Pushed onto the app's `adw::NavigationView` when a Tier-1 exchange
-//! completes.  Shows:
-//!   - A header bar with the peer's solar sign glyph, truncated node ID,
-//!     and a call button.
-//!   - An `AspectView` (adaptive NavigationSplitView) populated with
-//!     cross-chart synastry aspects computed from the peer's exact birth data.
+//! completes.  Shows two tabs:
+//!   - **Their Chart** — peer's planet placements + their natal aspects.
+//!   - **Synastry**    — cross-chart aspects between the two of you.
+//!
+//! A call button lives in the shared HeaderBar.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -14,19 +14,19 @@ use libadwaita as adw;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
 use relm4::AsyncComponentSender;
-use zodia_core::{compute_positions, compute_synastry, Chart};
+use zodia_core::{Chart, compute_positions, compute_synastry};
 use zodia_net::{PeerId, Tier1Blob};
 use zodia_store::ZodiaStore;
 
 use crate::app::{AppModel, AppMsg};
-use crate::aspect_list::synastry_items;
+use crate::aspect_list::{natal_items, synastry_items};
 use crate::aspect_view::AspectView;
 use crate::util::sign_glyph;
 
 /// Build the `adw::NavigationPage` for a connected peer.
 ///
-/// Synastry is computed here from `their_blob.birth` and `our_chart.positions`.
-/// If ephemeris fails for the peer's JDN, an empty aspect list is shown.
+/// Contains two `AspectView` tabs: their natal chart and your synastry.
+#[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_peer_page(
     peer_id: &PeerId,
     their_blob: &Tier1Blob,
@@ -37,7 +37,9 @@ pub fn build_peer_page(
 ) -> adw::NavigationPage {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
-    // ── synastry computation ──────────────────────────────────────────────────
+    // ── compute their chart + synastry ────────────────────────────────────────
+
+    let their_chart = Chart::compute(their_blob.birth.clone()).ok();
 
     let synastry = match compute_positions(their_blob.birth.jdn) {
         Ok(their_pos) => compute_synastry(&our_chart.positions, &their_pos),
@@ -46,9 +48,35 @@ pub fn build_peer_page(
             vec![]
         }
     };
-    let items = synastry_items(&synastry);
 
-    // ── layout ────────────────────────────────────────────────────────────────
+    // ── view stack ────────────────────────────────────────────────────────────
+
+    let view_stack = adw::ViewStack::new();
+    view_stack.set_vexpand(true);
+
+    // Their Chart tab
+    let their_av = match &their_chart {
+        Some(chart) => AspectView::natal(
+            natal_items(&chart.natal_aspects()),
+            chart,
+            Rc::clone(&store),
+            author_pk,
+        ),
+        None => AspectView::new(vec![], Rc::clone(&store), author_pk),
+    };
+    their_av.widget().set_vexpand(true);
+    let their_page = view_stack.add_titled(their_av.widget(), Some("their"), "Their Chart");
+    their_page.set_icon_name(Some("weather-clear-symbolic"));
+
+    // Synastry tab
+    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), author_pk);
+    syn_av.widget().set_vexpand(true);
+    let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
+    syn_page.set_icon_name(Some("people-meet-symbolic"));
+
+    let _ = (their_page, syn_page);
+
+    // ── toolbar view ──────────────────────────────────────────────────────────
 
     let toolbar_view = adw::ToolbarView::new();
 
@@ -59,9 +87,11 @@ pub fn build_peer_page(
 
     let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
     let glyph = sign_glyph(their_solar_month);
-    let title_lbl = gtk::Label::new(Some(&format!("{glyph}  ···{peer_hex}")));
-    title_lbl.add_css_class("title");
-    header.set_title_widget(Some(&title_lbl));
+
+    let switcher_title = adw::ViewSwitcherTitle::new();
+    switcher_title.set_stack(Some(&view_stack));
+    switcher_title.set_title(&format!("{glyph}  ···{peer_hex}"));
+    header.set_title_widget(Some(&switcher_title));
 
     let call_btn = gtk::Button::from_icon_name("call-start-symbolic");
     call_btn.add_css_class("suggested-action");
@@ -74,11 +104,16 @@ pub fn build_peer_page(
     header.pack_end(&call_btn);
 
     toolbar_view.add_top_bar(&header);
+    toolbar_view.set_content(Some(&view_stack));
 
-    // Synastry aspect view
-    let av = AspectView::new(items, store, author_pk);
-    av.widget().set_vexpand(true);
-    toolbar_view.set_content(Some(av.widget()));
+    // Bottom switcher bar (appears when window is too narrow for header tabs)
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_stack(Some(&view_stack));
+    switcher_title
+        .bind_property("title-visible", &switcher_bar, "reveal")
+        .sync_create()
+        .build();
+    toolbar_view.add_bottom_bar(&switcher_bar);
 
     adw::NavigationPage::new(&toolbar_view, &format!("···{peer_hex}"))
 }

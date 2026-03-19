@@ -83,14 +83,13 @@ fn list_page(
     clamp.set_margin_start(12);
     clamp.set_margin_end(12);
 
-    let list = gtk::ListBox::new();
-    list.add_css_class("boxed-list");
-    list.set_selection_mode(gtk::SelectionMode::None);
+    let aspect_group = adw::PreferencesGroup::new();
+    aspect_group.set_title("Aspects");
 
     if items.is_empty() {
         let row = adw::ActionRow::new();
         row.set_title("No aspects within default orbs");
-        list.append(&row);
+        aspect_group.add(&row);
     } else {
         for item in items {
             let top_body = store
@@ -123,18 +122,16 @@ fn list_page(
                 nav_c.push(&detail_page(&key, Rc::clone(&store_c), author_pk));
             });
 
-            list.append(&row);
+            aspect_group.add(&row);
         }
     }
 
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
     if let Some(w) = preamble {
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
         content.append(&w);
-        content.append(&list);
-        clamp.set_child(Some(&content));
-    } else {
-        clamp.set_child(Some(&list));
     }
+    content.append(&aspect_group);
+    clamp.set_child(Some(&content));
     scroll.set_child(Some(&clamp));
     adw::NavigationPage::new(&scroll, "Aspects")
 }

@@ -132,8 +132,8 @@ fn ascendant(jdn: f64, lat: f64, lon: f64) -> f64 {
     let eps = obliquity(jdn).to_radians();
     let lat_rad = lat.to_radians();
 
-    let y = -lst_rad.cos();
-    let x = eps.sin() * lat_rad.tan() + eps.cos() * lst_rad.sin();
+    let y = lst_rad.cos();
+    let x = -(eps.sin() * lat_rad.tan() + eps.cos() * lst_rad.sin());
     y.atan2(x).to_degrees().rem_euclid(360.0)
 }
 
