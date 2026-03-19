@@ -53,7 +53,7 @@ pub enum ChannelMsg {
 /// A framed duplex channel over an iroh QUIC connection.
 ///
 /// Clone is cheap — `Connection` is internally reference-counted.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DirectChannel {
     conn: Connection,
 }

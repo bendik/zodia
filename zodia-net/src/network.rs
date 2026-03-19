@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::channel::{ChannelMsg, DirectChannel};
 use crate::{PeerId, Tier0Blob, ZodiaNetEvent};
+use iroh::protocol::{AcceptError, ProtocolHandler};
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
 use p2panda_core::PrivateKey as PandaKey;
@@ -146,6 +147,15 @@ impl ZodiaNetwork {
         let my_blob = Tier0Blob::sign(birth, &config.signing_key);
         let (event_tx, event_rx) = mpsc::channel(256);
 
+        // Register the Tier-1 ALPN so incoming connections are accepted.
+        // Without this registration iroh refuses the TLS handshake with
+        // "error 120: peer doesn't support any known protocol".
+        endpoint
+            .accept(TIER1_PROTOCOL, Tier1Handler { event_tx: event_tx.clone() })
+            .await
+            .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
+        debug!("tier-1 ALPN registered");
+
         // Dedup set shared across all topic listeners — a peer may be
         // discoverable via several shared topics and we only want one event.
         let seen_peers: Arc<Mutex<HashSet<[u8; 32]>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -222,6 +232,24 @@ impl ZodiaNetwork {
     /// handled in one place.
     pub fn accept_channel(&self, peer_id: PeerId, channel: DirectChannel) {
         spawn_channel_listener(peer_id, channel, self.event_tx.clone());
+    }
+}
+
+// ── tier-1 protocol handler ───────────────────────────────────────────────────
+
+/// Accepts incoming `TIER1_PROTOCOL` QUIC connections and emits an
+/// `IncomingChannel` event so the app layer can register the channel.
+#[derive(Debug, Clone)]
+struct Tier1Handler {
+    event_tx: mpsc::Sender<ZodiaNetEvent>,
+}
+
+impl ProtocolHandler for Tier1Handler {
+    async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+        let peer_id = PeerId(*conn.remote_id().as_bytes());
+        let channel = DirectChannel::from_connection(conn);
+        let _ = self.event_tx.send(ZodiaNetEvent::IncomingChannel { peer_id, channel }).await;
+        Ok(())
     }
 }
 

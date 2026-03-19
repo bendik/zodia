@@ -86,5 +86,7 @@ pub enum ZodiaNetEvent {
     CallRejected { from: PeerId },
     /// The remote peer ended an active call.
     CallHungUp { from: PeerId },
+    /// An incoming Tier-1 QUIC connection was accepted from a remote peer.
+    IncomingChannel { peer_id: PeerId, channel: DirectChannel },
 }
 

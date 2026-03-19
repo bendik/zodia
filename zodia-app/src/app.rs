@@ -365,6 +365,13 @@ impl AsyncComponent for AppModel {
                 self.active_audio = None;
                 self.call_state = CallState::Idle;
             }
+            ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
+                if let Some(net) = &self.network {
+                    info!(peer = %hex::encode_upper(&peer_id.0[..4]), "incoming tier-1 channel");
+                    net.accept_channel(peer_id.clone(), channel.clone());
+                    self.connected_channels.insert(peer_id, channel);
+                }
+            }
             _ => {}
         }
     }
