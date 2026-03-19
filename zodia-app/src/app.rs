@@ -7,7 +7,9 @@
 //!   3. Network events   — `CommandOutput = ZodiaNetEvent` keeps the peer
 //!                         list reactive without blocking the GTK thread
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use libadwaita as adw;
 use libadwaita::prelude::*; // also re-exports gtk::prelude
@@ -21,8 +23,9 @@ use zodia_core::{birth_from_coords, current_jdn, gregorian_to_jdn, Chart};
 use zodia_net::{ChannelMsg, DirectChannel, NetworkConfig, PeerId, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::ZodiaStore;
 
+use crate::aspect_list;
 use crate::peer_list::{PeerEntry, PeerInit, PeerOutput};
-use crate::util::{approximate_aspects, format_aspect_card, format_transit_card, format_house_transit_card};
+use crate::util::approximate_aspects;
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
@@ -37,11 +40,8 @@ pub struct AppInit {
 pub enum CallState {
     #[default]
     Idle,
-    /// We sent a CallOffer and are waiting for the remote to accept.
     Calling { peer_id: PeerId },
-    /// The remote sent us a CallOffer; user needs to accept or reject.
     Ringing { peer_id: PeerId, session_id: [u8; 32] },
-    /// Audio is flowing.
     Active  { peer_id: PeerId },
 }
 
@@ -82,16 +82,21 @@ pub enum AppMsg {
 
 pub struct AppModel {
     on_setup_page: bool,
-    natal_text: String,
-    transit_text: String,
     chart: Option<Chart>,
-    store: ZodiaStore,
+
+    // Shared store — wrapped so signal handlers in aspect rows can access it.
+    store: Rc<RefCell<ZodiaStore>>,
+
     network: Option<ZodiaNetwork>,
     peer_count: usize,
     node_id_text: String,
     peers: FactoryVecDeque<PeerEntry>,
     config: LocalConfig,
     setup_error: String,
+
+    /// ed25519 public key used as author identity for interpretations.
+    author_pk: [u8; 32],
+
     call_state: CallState,
     connected_channels: HashMap<PeerId, DirectChannel>,
     active_audio: Option<AudioSession>,
@@ -103,15 +108,22 @@ pub struct AppModel {
 pub struct AppWidgets {
     outer_stack: gtk::Stack,
     setup_status: gtk::Label,
-    natal_label: gtk::Label,
-    transit_label: gtk::Label,
+
+    // ListBox widgets for the chart / sky tabs (lazily populated).
+    natal_list: gtk::ListBox,
+    transit_list: gtk::ListBox,
+
     peers_page: adw::ViewStackPage,
     peer_count_label: gtk::Label,
     node_id_label: gtk::Label,
+
     call_bar: gtk::Box,
     call_status: gtk::Label,
     accept_btn: gtk::Button,
     hangup_btn: gtk::Button,
+
+    // Root window reference — needed by update_view to pass to dialog builder.
+    window: adw::ApplicationWindow,
 }
 
 // ── async component ───────────────────────────────────────────────────────────
@@ -140,19 +152,21 @@ impl AsyncComponent for AppModel {
                 PeerOutput::Call(id)    => AppMsg::CallPeer(id),
             });
 
+        let author_pk = init.config.identity.signing_key().verifying_key().to_bytes();
         let has_birth = init.config.birth.is_some();
+        let store = Rc::new(RefCell::new(init.store));
+
         let mut model = AppModel {
             on_setup_page: !has_birth,
-            natal_text: String::new(),
-            transit_text: String::new(),
             chart: None,
-            store: init.store,
+            store,
             network: None,
             peer_count: 0,
             node_id_text: String::new(),
             peers,
             config: init.config,
             setup_error: String::new(),
+            author_pk,
             call_state: CallState::Idle,
             connected_channels: HashMap::new(),
             active_audio: None,
@@ -160,9 +174,6 @@ impl AsyncComponent for AppModel {
 
         if let Some(birth) = model.config.birth.clone() {
             if let Ok(chart) = Chart::compute(birth.clone()) {
-                let jdn = current_jdn();
-                model.natal_text   = build_natal_text(&chart, &model.store);
-                model.transit_text = build_transit_text(&chart, jdn, &model.store);
                 model.chart = Some(chart);
             }
         }
@@ -211,12 +222,7 @@ impl AsyncComponent for AppModel {
                 }
 
                 match Chart::compute(birth.clone()) {
-                    Ok(chart) => {
-                        let now = current_jdn();
-                        self.natal_text   = build_natal_text(&chart, &self.store);
-                        self.transit_text = build_transit_text(&chart, now, &self.store);
-                        self.chart = Some(chart);
-                    }
+                    Ok(chart) => { self.chart = Some(chart); }
                     Err(e) => {
                         sender.input(AppMsg::SetupError(e.to_string()));
                         return;
@@ -369,17 +375,68 @@ impl AsyncComponent for AppModel {
         } else {
             widgets.outer_stack.set_visible_child_name("main");
         }
-
         widgets.setup_status.set_text(&self.setup_error);
-        widgets.natal_label.set_text(&self.natal_text);
-        widgets.transit_label.set_text(&self.transit_text);
 
-        let count_text = if self.peer_count == 0 {
+        // Lazily populate aspect lists the first time the main page is shown.
+        // `first_child().is_none()` means the list has never been populated.
+        if !self.on_setup_page && widgets.natal_list.first_child().is_none() {
+            if let Some(chart) = &self.chart {
+                // Natal aspects
+                let nat = aspect_list::natal_items(&chart.natal_aspects());
+                let nat_list = aspect_list::build_list(
+                    nat,
+                    Rc::clone(&self.store),
+                    self.author_pk,
+                    &widgets.window,
+                );
+                // Swap the placeholder list for the populated one.
+                // We built natal_list as an empty ListBox; populate it in-place.
+                for item in nat_list
+                    .observe_children()
+                    .into_iter()
+                    .flat_map(|o| o.ok())
+                    .flat_map(|o| o.downcast::<gtk::Widget>().ok())
+                {
+                    nat_list.remove(&item);
+                    widgets.natal_list.append(&item);
+                }
+
+                // Transit aspects
+                if let Ok(ts) = chart.transits_at(current_jdn()) {
+                    let tr = aspect_list::transit_items(
+                        &ts.transit_aspects,
+                        &ts.house_transits,
+                    );
+                    let tr_list = aspect_list::build_list(
+                        tr,
+                        Rc::clone(&self.store),
+                        self.author_pk,
+                        &widgets.window,
+                    );
+                    for item in tr_list
+                        .observe_children()
+                        .into_iter()
+                        .flat_map(|o| o.ok())
+                        .flat_map(|o| o.downcast::<gtk::Widget>().ok())
+                    {
+                        tr_list.remove(&item);
+                        widgets.transit_list.append(&item);
+                    }
+                }
+            }
+        }
+
+        // Peer count + badge
+        let peer_text = if self.peer_count == 0 {
             "Scanning for peers…".to_string()
         } else {
-            format!("{} peer{} online", self.peer_count, if self.peer_count == 1 { "" } else { "s" })
+            format!(
+                "{} peer{} online",
+                self.peer_count,
+                if self.peer_count == 1 { "" } else { "s" }
+            )
         };
-        widgets.peer_count_label.set_text(&count_text);
+        widgets.peer_count_label.set_text(&peer_text);
         widgets.peers_page.set_needs_attention(self.peer_count > 0);
 
         if !self.node_id_text.is_empty() {
@@ -461,17 +518,39 @@ fn build_widgets(
     outer_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     outer_stack.set_transition_duration(200);
 
-    // ── setup page ────────────────────────────────────────────────────────────
     let (setup_page, setup_status) = build_setup_page(sender);
     outer_stack.add_named(&setup_page, Some("setup"));
 
-    // ── main page ─────────────────────────────────────────────────────────────
-    let (main_page, natal_label, transit_label, peers_page, peer_count_label,
+    let (main_page, natal_list, transit_list, peers_page, peer_count_label,
          node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn) =
         build_main_page(model, sender);
     outer_stack.add_named(&main_page, Some("main"));
 
     peers_scrolled.set_child(Some(model.peers.widget()));
+
+    // If chart is already available (returning user), populate the lists now
+    // so they appear immediately without waiting for a model mutation.
+    if let Some(chart) = &model.chart {
+        let nat = aspect_list::natal_items(&chart.natal_aspects());
+        let nat_list = aspect_list::build_list(
+            nat,
+            Rc::clone(&model.store),
+            model.author_pk,
+            root,
+        );
+        reparent_children(&nat_list, &natal_list);
+
+        if let Ok(ts) = chart.transits_at(current_jdn()) {
+            let tr = aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits);
+            let tr_list = aspect_list::build_list(
+                tr,
+                Rc::clone(&model.store),
+                model.author_pk,
+                root,
+            );
+            reparent_children(&tr_list, &transit_list);
+        }
+    }
 
     if model.on_setup_page {
         outer_stack.set_visible_child_name("setup");
@@ -484,8 +563,8 @@ fn build_widgets(
     AppWidgets {
         outer_stack,
         setup_status,
-        natal_label,
-        transit_label,
+        natal_list,
+        transit_list,
         peers_page,
         peer_count_label,
         node_id_label,
@@ -493,6 +572,19 @@ fn build_widgets(
         call_status,
         accept_btn,
         hangup_btn,
+        window: root.clone(),
+    }
+}
+
+/// Move all children from `src` list into `dst` list.
+///
+/// `build_list` returns a freshly constructed `gtk::ListBox`.  Since GTK
+/// widgets can only have one parent, we detach each row from `src` and
+/// append it to `dst` (the list that lives inside our widget hierarchy).
+fn reparent_children(src: &gtk::ListBox, dst: &gtk::ListBox) {
+    while let Some(child) = src.first_child() {
+        src.remove(&child);
+        dst.append(&child);
     }
 }
 
@@ -591,7 +683,6 @@ fn build_setup_page(
     btn.set_halign(gtk::Align::Center);
     content.append(&btn);
 
-    // Wire the button
     let s = sender.clone();
     let (yr, mr, dr, hr, minr, latr, lonr) = (
         year_row.clone(), month_row.clone(), day_row.clone(),
@@ -626,50 +717,64 @@ fn build_setup_page(
 
 // ── main page ─────────────────────────────────────────────────────────────────
 
-// ViewSwitcherTitle is deprecated in libadwaita 1.4 in favour of Breakpoint-
-// based reveal.  The replacement requires GValue setters that aren't yet
-// ergonomic in the 0.7 Rust bindings; migrate when bindings catch up.
-#[allow(deprecated)]
+#[allow(deprecated)] // ViewSwitcherTitle — see note in aspect_list.rs
 #[allow(clippy::type_complexity)]
 fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
     adw::ToolbarView,
-    gtk::Label, gtk::Label,
+    gtk::ListBox, gtk::ListBox,
     adw::ViewStackPage, gtk::Label,
     gtk::Label,
     gtk::ScrolledWindow,
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,
 ) {
     let toolbar_view = adw::ToolbarView::new();
-
-    // ── view stack ────────────────────────────────────────────────────────────
     let view_stack = adw::ViewStack::new();
 
-    // Chart tab — natal aspects
+    // ── Chart tab ─────────────────────────────────────────────────────────────
     let chart_scroll = gtk::ScrolledWindow::new();
     chart_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     let chart_clamp = adw::Clamp::new();
     chart_clamp.set_maximum_size(720);
-    let natal_label = monospace_label(&model.natal_text);
-    chart_clamp.set_child(Some(&natal_label));
+    chart_clamp.set_margin_top(16);
+    chart_clamp.set_margin_bottom(16);
+    chart_clamp.set_margin_start(12);
+    chart_clamp.set_margin_end(12);
+
+    // Placeholder list — populated lazily (or immediately if chart is known).
+    let natal_list = gtk::ListBox::new();
+    natal_list.add_css_class("boxed-list");
+    natal_list.set_selection_mode(gtk::SelectionMode::None);
+    chart_clamp.set_child(Some(&natal_list));
     chart_scroll.set_child(Some(&chart_clamp));
+
     let chart_page = view_stack.add_titled(&chart_scroll, Some("chart"), "Chart");
     chart_page.set_icon_name(Some("weather-clear-symbolic"));
+    let _ = chart_page;
 
-    // Sky tab — current transits
+    // ── Sky tab ───────────────────────────────────────────────────────────────
     let sky_scroll = gtk::ScrolledWindow::new();
     sky_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     let sky_clamp = adw::Clamp::new();
     sky_clamp.set_maximum_size(720);
-    let transit_label = monospace_label(&model.transit_text);
-    sky_clamp.set_child(Some(&transit_label));
+    sky_clamp.set_margin_top(16);
+    sky_clamp.set_margin_bottom(16);
+    sky_clamp.set_margin_start(12);
+    sky_clamp.set_margin_end(12);
+
+    let transit_list = gtk::ListBox::new();
+    transit_list.add_css_class("boxed-list");
+    transit_list.set_selection_mode(gtk::SelectionMode::None);
+    sky_clamp.set_child(Some(&transit_list));
     sky_scroll.set_child(Some(&sky_clamp));
+
     let sky_page = view_stack.add_titled(&sky_scroll, Some("sky"), "Sky");
     sky_page.set_icon_name(Some("night-light-symbolic"));
+    let _ = sky_page;
 
-    // Peers tab
+    // ── Peers tab ─────────────────────────────────────────────────────────────
     let peers_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     let peer_count_label = gtk::Label::new(Some("Scanning for peers…"));
@@ -705,7 +810,7 @@ fn build_main_page(
 
     toolbar_view.set_content(Some(&view_stack));
 
-    // ── header bar with adaptive ViewSwitcherTitle ────────────────────────────
+    // ── Header bar ────────────────────────────────────────────────────────────
     let switcher_title = adw::ViewSwitcherTitle::new();
     switcher_title.set_stack(Some(&view_stack));
     switcher_title.set_title("Zodia");
@@ -719,12 +824,16 @@ fn build_main_page(
     header_bar.pack_end(&node_id_label);
     toolbar_view.add_top_bar(&header_bar);
 
-    // ── bottom bars ───────────────────────────────────────────────────────────
-    //
-    // Order matters: first add_bottom_bar → very bottom of window.
-    // Second add_bottom_bar → above it.  So switcher goes last (bottom-most).
+    // ── Bottom bars ───────────────────────────────────────────────────────────
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_stack(Some(&view_stack));
+    switcher_title
+        .bind_property("title-visible", &switcher_bar, "reveal")
+        .sync_create()
+        .build();
+    toolbar_view.add_bottom_bar(&switcher_bar);
 
-    // Call bar (above the switcher, hidden when idle)
+    // Call bar (above switcher — added after so it sits closer to content)
     let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     call_bar.add_css_class("toolbar");
     call_bar.set_margin_start(8);
@@ -751,38 +860,13 @@ fn build_main_page(
     hangup_btn.connect_clicked(move |_| { s.input(AppMsg::HangUp); });
     call_bar.append(&hangup_btn);
 
-    // Adaptive ViewSwitcherBar — added first so it sits at the window bottom
-    // edge; the call bar is added second and appears above it.
-    let switcher_bar = adw::ViewSwitcherBar::new();
-    switcher_bar.set_stack(Some(&view_stack));
-    switcher_title
-        .bind_property("title-visible", &switcher_bar, "reveal")
-        .sync_create()
-        .build();
-    toolbar_view.add_bottom_bar(&switcher_bar);
-
     toolbar_view.add_bottom_bar(&call_bar);
 
-    // Drop the unreachable sky_page — kept alive via view_stack ownership.
-    let _ = sky_page;
+    // Ignore unused model reference (kept for possible future use).
+    let _ = model;
 
-    (toolbar_view, natal_label, transit_label, peers_page, peer_count_label,
+    (toolbar_view, natal_list, transit_list, peers_page, peer_count_label,
      node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
-}
-
-// ── small helpers ─────────────────────────────────────────────────────────────
-
-fn monospace_label(text: &str) -> gtk::Label {
-    let l = gtk::Label::new(Some(text));
-    l.add_css_class("aspect-list");
-    l.set_halign(gtk::Align::Start);
-    l.set_valign(gtk::Align::Start);
-    l.set_margin_start(14);
-    l.set_margin_end(14);
-    l.set_margin_top(12);
-    l.set_margin_bottom(12);
-    l.set_selectable(true);
-    l
 }
 
 // ── session ID ────────────────────────────────────────────────────────────────
@@ -797,37 +881,4 @@ fn new_session_id(peer_id: &PeerId) -> [u8; 32] {
     hasher.update(&peer_id.0);
     hasher.update(&ts.to_le_bytes());
     *hasher.finalize().as_bytes()
-}
-
-// ── text builders ─────────────────────────────────────────────────────────────
-
-fn build_natal_text(chart: &Chart, store: &ZodiaStore) -> String {
-    let aspects = chart.natal_aspects();
-    if aspects.is_empty() {
-        return "(none within default orbs)".to_string();
-    }
-    aspects.iter().map(|a| format_aspect_card(a, store)).collect::<Vec<_>>().join("\n\n")
-}
-
-fn build_transit_text(chart: &Chart, jdn: f64, store: &ZodiaStore) -> String {
-    match chart.transits_at(jdn) {
-        Err(e) => format!("(transit error: {e})"),
-        Ok(ts) => {
-            let mut lines: Vec<String> = ts.transit_aspects.iter()
-                .map(|ta| format_transit_card(ta, store))
-                .collect();
-            if !ts.house_transits.is_empty() {
-                lines.push(String::new());
-                lines.push("― house ingresses ―".to_string());
-                for ht in &ts.house_transits {
-                    lines.push(format_house_transit_card(ht, store));
-                }
-            }
-            if lines.is_empty() {
-                "(no close transits today)".to_string()
-            } else {
-                lines.join("\n")
-            }
-        }
-    }
 }

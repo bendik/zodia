@@ -18,7 +18,8 @@ pub fn sign_glyph(solar_month: u8) -> &'static str {
 
 // ── aspect card formatters ────────────────────────────────────────────────────
 
-/// Multi-line card for a natal aspect.
+/// Multi-line card for a natal aspect — kept for future synastry/export views.
+#[allow(dead_code)]
 ///
 /// ```text
 /// Moon trine Venus  ·  ☽△♀  orb 2.3°
@@ -37,6 +38,7 @@ pub fn format_aspect_card(a: &Aspect, store: &ZodiaStore) -> String {
     }
 }
 
+#[allow(dead_code)]
 /// Multi-line card for a transit aspect.
 ///
 /// ```text
@@ -56,6 +58,7 @@ pub fn format_transit_card(ta: &TransitAspect, store: &ZodiaStore) -> String {
     }
 }
 
+#[allow(dead_code)]
 /// Single line for a house transit (less to say; house ingresses are context not drama).
 ///
 /// ```text

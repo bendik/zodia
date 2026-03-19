@@ -4,6 +4,7 @@
 //! control to the Relm4 application loop.
 
 mod app;
+mod aspect_list;
 mod peer_list;
 mod util;
 
