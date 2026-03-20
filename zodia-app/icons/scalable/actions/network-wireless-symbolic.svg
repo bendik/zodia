@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Network / peer connectivity status indicator -->
+<!-- WiFi / network status — pure fills, no stroke. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
   <!-- centre dot -->
-  <circle cx="8" cy="13" r="1.5" fill="currentColor"/>
-  <!-- inner arc -->
-  <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-    d="M 4.8 9.8 A 4.5 4.5 0 0 1 11.2 9.8"/>
-  <!-- outer arc -->
-  <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-    d="M 2 7 A 8 8 0 0 1 14 7"/>
+  <circle cx="8" cy="13.5" r="1.5" fill="currentColor"/>
+  <!-- inner arc: filled annular wedge via evenodd -->
+  <path fill="currentColor" fill-rule="evenodd"
+    d="M 4.5 10.2 A 4.5 4.5 0 0 1 11.5 10.2
+       L 10.1 11.6 A 2.5 2.5 0 0 0 5.9 11.6 Z"/>
+  <!-- outer arc: filled annular wedge -->
+  <path fill="currentColor" fill-rule="evenodd"
+    d="M 1.5 7.2 A 9 9 0 0 1 14.5 7.2
+       L 12.8 8.9 A 6.5 6.5 0 0 0 3.2 8.9 Z"/>
 </svg>

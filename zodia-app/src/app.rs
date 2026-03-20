@@ -688,12 +688,14 @@ fn rebuild_peer_list(
     group.set_title("Online");
 
     if online.is_empty() && model.connected_peers.is_empty() {
-        let row = adw::ActionRow::new();
-        row.set_title("Scanning for peers…");
-        row.set_subtitle(
-            "Other Zodia users in your astrological neighbourhood will appear here."
-        );
-        group.add(&row);
+        let status = adw::StatusPage::new();
+        status.set_icon_name(Some("system-users-symbolic"));
+        status.set_title("No peers nearby");
+        status.set_description(Some(
+            "Other Zodia users in your astrological neighbourhood will appear here as they come online.",
+        ));
+        widgets.peers_content.append(&status);
+        return;
     } else if online.is_empty() {
         let row = adw::ActionRow::new();
         row.set_title("No other peers visible right now");
