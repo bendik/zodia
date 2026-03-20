@@ -41,7 +41,17 @@ jobs:
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install gtk4 libadwaita opus pkg-config
+          brew install gtk4 libadwaita pango opus pkg-config
+
+      - name: Export brew paths for build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BREW="$(brew --prefix)"
+          echo "PKG_CONFIG_PATH=${BREW}/lib/pkgconfig:${BREW}/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=${BREW}/lib"                                       >> "$GITHUB_ENV"
+          echo "CPATH=${BREW}/include"                                          >> "$GITHUB_ENV"
+          # Tell the linker where to find dylibs at link time
+          echo "RUSTFLAGS=-L ${BREW}/lib"                                       >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -110,11 +120,13 @@ jobs:
 
           # Bundle shared libraries so the .app is self-contained
           brew install dylibbundler
+          BREW="$(brew --prefix)"
           dylibbundler \
             --bundle-deps \
             --fix-file "$APP/Contents/MacOS/zodia-bin" \
             --dest-dir "$APP/Contents/libs" \
             --install-path "@executable_path/../libs" \
+            --search-path "${BREW}/lib" \
             --overwrite-dir
 
           # Copy Adwaita icon theme so symbolic icons render
@@ -129,11 +141,14 @@ jobs:
           fi
 
           # Launcher wrapper — sets XDG_DATA_DIRS so GTK finds our bundled icons
-          cat > "$APP/Contents/MacOS/zodia" <<'SH'
+          # Also exports GDK_PIXBUF_MODULE_FILE so pixbuf loaders are found.
+          BREW="$(brew --prefix)"
+          cat > "$APP/Contents/MacOS/zodia" <<SH
           #!/bin/sh
-          BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
-          export XDG_DATA_DIRS="$BUNDLE/Contents/Resources/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-          exec "$BUNDLE/Contents/MacOS/zodia-bin" "$@"
+          BUNDLE="\$(cd "\$(dirname "\$0")/../.." && pwd)"
+          export XDG_DATA_DIRS="\$BUNDLE/Contents/Resources/share:${BREW}/share"
+          export GDK_PIXBUF_MODULE_FILE="${BREW}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+          exec "\$BUNDLE/Contents/MacOS/zodia-bin" "\$@"
           SH
           chmod +x "$APP/Contents/MacOS/zodia"
 
