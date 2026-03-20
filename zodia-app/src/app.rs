@@ -83,6 +83,8 @@ pub enum AppMsg {
     SendChat { peer_id: PeerId, text: String },
     /// User set or updated a nickname for a connected peer.
     SetNickname { peer_id: PeerId, name: String },
+    /// Sent internally after the network starts to force an initial update_view.
+    NetworkReady,
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -234,6 +236,7 @@ impl AsyncComponent for AppModel {
                 let _ = net.publish_announce().await;
                 model.network = Some(net);
                 start_network_command(&sender, rx);
+                sender.input(AppMsg::NetworkReady);
             }
         }
 
@@ -277,6 +280,7 @@ impl AsyncComponent for AppModel {
                     let _ = net.publish_announce().await;
                     self.network = Some(net);
                     start_network_command(&sender, rx);
+                    sender.input(AppMsg::NetworkReady);
                 }
                 self.setup_error.clear();
                 self.on_setup_page = false;
@@ -285,6 +289,8 @@ impl AsyncComponent for AppModel {
             AppMsg::SetupError(msg) => {
                 self.setup_error = msg;
             }
+
+            AppMsg::NetworkReady => {}
 
             AppMsg::SetNickname { peer_id, name } => {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
