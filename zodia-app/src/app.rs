@@ -157,10 +157,6 @@ pub struct AppWidgets {
     net_status_btn: gtk::MenuButton,
     /// Label inside the network status popover — updated with peer/sync counts.
     net_popover_label: gtk::Label,
-    /// Icon inside the network status button — changes between online/offline states.
-    net_icon: gtk::Image,
-    /// Short status label inside the button, always visible in the header.
-    net_btn_label: gtk::Label,
     /// Bell button — only visible when there are unread messages.
     notif_btn: gtk::MenuButton,
     /// Label inside the notification popover — lists unread counts.
@@ -463,6 +459,10 @@ impl AsyncComponent for AppModel {
                 *self.unread_messages.entry(tag).or_insert(0) += 1;
                 self.chat_logs.entry(from).or_default().push((false, text));
             }
+            ZodiaNetEvent::PeerChannelClosed { peer_id } => {
+                self.connected_channels.remove(&peer_id);
+                self.peer_list_generation += 1;
+            }
             _ => {}
         }
     }
@@ -557,31 +557,18 @@ impl AsyncComponent for AppModel {
             let connected = self.connected_peers.len();
             let online    = self.connected_channels.len();
 
-            let (icon_name, btn_text, popover_text) = if self.node_id_text.is_empty() {
-                (
-                    "network-offline-symbolic",
-                    "···".to_string(),
-                    "Starting up…".to_string(),
-                )
+            let (icon_name, popover_text) = if self.node_id_text.is_empty() {
+                ("network-offline-symbolic", "Starting up…".to_string())
             } else if connected == 0 {
-                (
-                    "network-wireless-symbolic",
-                    "Scanning…".to_string(),
-                    format!("Node ···{}\nLooking for peers…", self.node_id_text),
-                )
+                ("network-wireless-symbolic",
+                 format!("Node ···{}\nLooking for peers…", self.node_id_text))
             } else {
-                (
-                    "network-wireless-symbolic",
-                    format!("{connected} peer{}", if connected == 1 { "" } else { "s" }),
-                    format!(
-                        "Node ···{}\n{connected} peer{} connected  ·  {online} online",
-                        self.node_id_text,
-                        if connected == 1 { "" } else { "s" },
-                    ),
-                )
+                ("network-wireless-symbolic",
+                 format!("Node ···{}\n{connected} peer{} connected  ·  {online} online",
+                         self.node_id_text,
+                         if connected == 1 { "" } else { "s" }))
             };
-            widgets.net_icon.set_icon_name(Some(icon_name));
-            widgets.net_btn_label.set_text(&btn_text);
+            widgets.net_status_btn.set_icon_name(icon_name);
             widgets.net_popover_label.set_text(&popover_text);
         }
 
@@ -891,7 +878,7 @@ fn build_widgets(
         chart_container, sky_container,
         peers_nav, peers_content,
         peers_page,
-        net_status_btn, net_popover_label, net_icon, net_btn_label,
+        net_status_btn, net_popover_label,
         notif_btn, notif_label,
         call_bar, call_status, accept_btn, hangup_btn,
     ) = build_main_page(model, sender);
@@ -937,8 +924,6 @@ fn build_widgets(
         peers_page,
         net_status_btn,
         net_popover_label,
-        net_icon,
-        net_btn_label,
         notif_btn,
         notif_label,
         call_bar,
@@ -1085,7 +1070,7 @@ fn build_main_page(
     gtk::Box, gtk::Box,                              // chart_container, sky_container
     adw::NavigationView, gtk::Box,                   // peers_nav, peers_content
     adw::ViewStackPage,                              // peers_page (for badge)
-    gtk::MenuButton, gtk::Label, gtk::Image, gtk::Label, // net_status_btn, net_popover_label, net_icon, net_btn_label
+    gtk::MenuButton, gtk::Label,                         // net_status_btn, net_popover_label
     gtk::MenuButton, gtk::Label,                     // notif_btn, notif_label
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,  // call bar
 ) {
@@ -1140,9 +1125,8 @@ fn build_main_page(
     switcher_title.set_stack(Some(&view_stack));
     switcher_title.set_title("Zodia");
 
-    // Network status button — always-visible icon+label in the header bar,
-    // plus a popover with full detail on click.
-    let net_popover_label = gtk::Label::new(None);
+    // Network status button — icon in the header bar, popover with detail on click.
+    let net_popover_label = gtk::Label::new(Some("Starting up…"));
     net_popover_label.set_margin_top(8);
     net_popover_label.set_margin_bottom(8);
     net_popover_label.set_margin_start(12);
@@ -1151,18 +1135,11 @@ fn build_main_page(
     let net_popover = gtk::Popover::new();
     net_popover.set_child(Some(&net_popover_label));
 
-    // The button child: small icon + short status label side by side.
-    let net_icon = gtk::Image::from_icon_name("network-offline-symbolic");
-    let net_btn_label = gtk::Label::new(Some("···"));
-    net_btn_label.add_css_class("caption");
-    net_btn_label.add_css_class("dim-label");
-    let net_btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    net_btn_box.append(&net_icon);
-    net_btn_box.append(&net_btn_label);
-
     let net_status_btn = gtk::MenuButton::new();
-    net_status_btn.set_child(Some(&net_btn_box));
+    net_status_btn.set_icon_name("network-offline-symbolic");
+    net_status_btn.set_always_show_arrow(false);
     net_status_btn.set_popover(Some(&net_popover));
+    net_status_btn.set_tooltip_text(Some("Network status"));
 
     // Notification bell — only visible when there are unread messages.
     let notif_label = gtk::Label::new(None);
@@ -1228,7 +1205,7 @@ fn build_main_page(
         chart_container, sky_container,
         peers_nav, peers_content,
         peers_page,
-        net_status_btn, net_popover_label, net_icon, net_btn_label,
+        net_status_btn, net_popover_label,
         notif_btn, notif_label,
         call_bar, call_status, accept_btn, hangup_btn,
     )

@@ -90,5 +90,7 @@ pub enum ZodiaNetEvent {
     IncomingChannel { peer_id: PeerId, channel: DirectChannel },
     /// A plain-text chat message received from a connected peer.
     ChatReceived { from: PeerId, text: String },
+    /// The direct channel to a connected peer has closed (peer went offline).
+    PeerChannelClosed { peer_id: PeerId },
 }
 
