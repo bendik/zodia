@@ -88,5 +88,7 @@ pub enum ZodiaNetEvent {
     CallHungUp { from: PeerId },
     /// An incoming Tier-1 QUIC connection was accepted from a remote peer.
     IncomingChannel { peer_id: PeerId, channel: DirectChannel },
+    /// A plain-text chat message received from a connected peer.
+    ChatReceived { from: PeerId, text: String },
 }
 

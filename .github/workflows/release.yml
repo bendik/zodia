@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.*.*'
+      - 'v[0-9]*'
 
 permissions:
   contents: write
@@ -20,17 +20,28 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: zodia
 
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: zodia
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev \
+            libadwaita-1-dev \
             libopus-dev \
             libasound2-dev \
             pkg-config
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install gtk4 libadwaita opus pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,14 +61,94 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin zodia --target ${{ matrix.target }}
 
-      - name: Prepare artifact
+      - name: Prepare Linux artifact
+        if: runner.os == 'Linux'
         run: |
           BIN=target/${{ matrix.target }}/release/${{ matrix.artifact }}
           strip "$BIN"
           cp "$BIN" zodia-${{ matrix.target }}
 
-      - name: Upload to GitHub Release
+      - name: Create macOS .app bundle
+        if: runner.os == 'macOS'
+        run: |
+          APP=Zodia.app
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} \
+             "$APP/Contents/MacOS/zodia-bin"
+
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Zodia</string>
+            <key>CFBundleDisplayName</key>
+            <string>Zodia</string>
+            <key>CFBundleIdentifier</key>
+            <string>app.zodia.Zodia</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.ref_name }}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ github.ref_name }}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleExecutable</key>
+            <string>zodia</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>13.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSHumanReadableCopyright</key>
+            <string>AGPL-3.0-or-later</string>
+          </dict>
+          </plist>
+          PLIST
+
+          # Bundle shared libraries so the .app is self-contained
+          brew install dylibbundler
+          dylibbundler \
+            --bundle-deps \
+            --fix-file "$APP/Contents/MacOS/zodia-bin" \
+            --dest-dir "$APP/Contents/libs" \
+            --install-path "@executable_path/../libs" \
+            --overwrite-dir
+
+          # Copy Adwaita icon theme so symbolic icons render
+          ICONS_SRC="$(brew --prefix)/share/icons"
+          if [ -d "$ICONS_SRC/hicolor" ]; then
+            mkdir -p "$APP/Contents/Resources/share/icons"
+            cp -r "$ICONS_SRC/hicolor" "$APP/Contents/Resources/share/icons/"
+          fi
+          if [ -d "$ICONS_SRC/Adwaita" ]; then
+            mkdir -p "$APP/Contents/Resources/share/icons"
+            cp -r "$ICONS_SRC/Adwaita" "$APP/Contents/Resources/share/icons/"
+          fi
+
+          # Launcher wrapper — sets XDG_DATA_DIRS so GTK finds our bundled icons
+          cat > "$APP/Contents/MacOS/zodia" <<'SH'
+          #!/bin/sh
+          BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
+          export XDG_DATA_DIRS="$BUNDLE/Contents/Resources/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+          exec "$BUNDLE/Contents/MacOS/zodia-bin" "$@"
+          SH
+          chmod +x "$APP/Contents/MacOS/zodia"
+
+          zip -r "zodia-${{ matrix.target }}.zip" "$APP"
+
+      - name: Upload Linux artifact to GitHub Release
+        if: runner.os == 'Linux'
         uses: softprops/action-gh-release@v2
         with:
           files: zodia-${{ matrix.target }}
           generate_release_notes: true
+
+      - name: Upload macOS artifact to GitHub Release
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zodia-${{ matrix.target }}.zip
+          generate_release_notes: false

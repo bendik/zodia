@@ -64,6 +64,8 @@ pub enum ChannelMsg {
     CallReject { session_id: [u8; 32] },
     /// Either party ends an active session.
     CallHangup { session_id: [u8; 32] },
+    /// Plain-text chat message from the remote peer.
+    ChatMsg { text: String },
 }
 
 // ── channel ───────────────────────────────────────────────────────────────────

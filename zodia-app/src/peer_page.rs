@@ -1,11 +1,13 @@
 //! Connected-peer navigation page.
 //!
-//! Pushed onto the app's `adw::NavigationView` when a Tier-1 exchange
-//! completes.  Shows two tabs:
+//! Pushed onto the Peers tab's `adw::NavigationView` when a Tier-1 exchange
+//! completes.  Shows three tabs:
 //!   - **Their Chart** — peer's planet placements + their natal aspects.
 //!   - **Synastry**    — cross-chart aspects between the two of you.
+//!   - **Messages**    — live text chat over the Tier-1 QUIC channel.
 //!
-//! A call button lives in the shared HeaderBar.
+//! Returns `(NavigationPage, gtk::ListBox)` — the caller appends chat rows
+//! to the `ListBox` whenever new messages arrive.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,7 +28,8 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::NavigationPage` for a connected peer.
 ///
-/// Contains two `AspectView` tabs: their natal chart and your synastry.
+/// Returns `(page, msg_list)` where `msg_list` is the `gtk::ListBox`
+/// the app uses to append incoming/outgoing chat rows.
 #[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_peer_page(
     peer_id: &PeerId,
@@ -35,7 +38,7 @@ pub fn build_peer_page(
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
-) -> adw::NavigationPage {
+) -> (adw::NavigationPage, gtk::ListBox) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -73,9 +76,15 @@ pub fn build_peer_page(
     let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity));
     syn_av.widget().set_vexpand(true);
     let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
-    syn_page.set_icon_name(Some("people-meet-symbolic"));
+    syn_page.set_icon_name(Some("system-users-symbolic"));
 
-    let _ = (their_page, syn_page);
+    // Messages tab
+    let (messages_widget, msg_list) = build_messages_tab(peer_id, sender);
+    messages_widget.set_vexpand(true);
+    let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
+    msg_page.set_icon_name(Some("mail-unread-symbolic"));
+
+    let _ = (their_page, syn_page, msg_page);
 
     // ── toolbar view ──────────────────────────────────────────────────────────
 
@@ -116,5 +125,102 @@ pub fn build_peer_page(
         .build();
     toolbar_view.add_bottom_bar(&switcher_bar);
 
-    adw::NavigationPage::new(&toolbar_view, &format!("···{peer_hex}"))
+    let page = adw::NavigationPage::new(&toolbar_view, &format!("···{peer_hex}"));
+    (page, msg_list)
+}
+
+// ── messages tab ──────────────────────────────────────────────────────────────
+
+/// Build the Messages tab content.
+///
+/// Returns `(container_widget, msg_list)` — the `msg_list` is the `gtk::ListBox`
+/// the app layer appends rows to when new messages arrive.
+fn build_messages_tab(
+    peer_id: &PeerId,
+    sender: &AsyncComponentSender<AppModel>,
+) -> (gtk::Box, gtk::ListBox) {
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+    // Scrollable message list
+    let msg_list = gtk::ListBox::new();
+    msg_list.set_selection_mode(gtk::SelectionMode::None);
+    msg_list.add_css_class("boxed-list");
+    msg_list.set_vexpand(true);
+
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_vexpand(true);
+    scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scrolled.set_child(Some(&msg_list));
+    vbox.append(&scrolled);
+
+    // Input row at the bottom
+    let input_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    input_row.set_margin_start(12);
+    input_row.set_margin_end(12);
+    input_row.set_margin_top(8);
+    input_row.set_margin_bottom(12);
+
+    let entry = gtk::Entry::new();
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some("Message…"));
+    input_row.append(&entry);
+
+    let send_btn = gtk::Button::from_icon_name("mail-send-symbolic");
+    send_btn.add_css_class("suggested-action");
+    send_btn.add_css_class("circular");
+    send_btn.set_tooltip_text(Some("Send"));
+    input_row.append(&send_btn);
+
+    vbox.append(&input_row);
+
+    // Wire send button + Enter key
+    let pid = peer_id.clone();
+    let s = sender.clone();
+    let entry_c = entry.clone();
+    let send = move || {
+        let text = entry_c.text().trim().to_string();
+        if !text.is_empty() {
+            s.input(AppMsg::SendChat { peer_id: pid.clone(), text });
+            entry_c.set_text("");
+        }
+    };
+
+    let send_c = send.clone();
+    send_btn.connect_clicked(move |_| send_c());
+    entry.connect_activate(move |_| send());
+
+    (vbox, msg_list)
+}
+
+/// Append a single chat row to a message list.
+///
+/// `from_us = true`  → right-aligned "you" bubble style.
+/// `from_us = false` → left-aligned "them" bubble style.
+pub fn append_chat_row(list: &gtk::ListBox, text: &str, from_us: bool) {
+    let row = gtk::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_activatable(false);
+
+    let label = gtk::Label::new(Some(text));
+    label.set_wrap(true);
+    label.set_xalign(if from_us { 1.0 } else { 0.0 });
+    label.set_margin_start(12);
+    label.set_margin_end(12);
+    label.set_margin_top(6);
+    label.set_margin_bottom(6);
+
+    if from_us {
+        label.add_css_class("caption");
+    }
+
+    row.set_child(Some(&label));
+    list.append(&row);
+
+    // Scroll to bottom after appending
+    if let Some(adj) = list.parent()
+        .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
+        .map(|sw| sw.vadjustment())
+    {
+        adj.set_value(adj.upper() - adj.page_size());
+    }
 }

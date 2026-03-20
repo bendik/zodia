@@ -30,7 +30,7 @@ use zodia_store::{StoreError, ZodiaStore};
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
 use crate::peer_list::DiscoveredPeer;
-use crate::peer_page;
+use crate::peer_page::{self, append_chat_row};
 use crate::util::{approximate_aspects, sign_glyph};
 
 // ── init ──────────────────────────────────────────────────────────────────────
@@ -79,6 +79,8 @@ pub enum AppMsg {
     AcceptCall,
     RejectCall,
     HangUp,
+    /// User sent a chat message to a connected peer.
+    SendChat { peer_id: PeerId, text: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -114,6 +116,9 @@ pub struct AppModel {
 
     call_state: CallState,
     active_audio: Option<AudioSession>,
+
+    /// Chat history per peer: `(from_us, text)`.
+    chat_logs: HashMap<PeerId, Vec<(bool, String)>>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -133,6 +138,11 @@ pub struct AppWidgets {
     peers_content: gtk::Box,
     /// Generation of the peer list we last rendered.
     peer_list_shown_gen: u64,
+
+    /// Message list widget per peer (keyed by 4-byte hex tag).
+    peer_msg_lists: HashMap<String, gtk::ListBox>,
+    /// How many messages from `chat_logs` have already been appended to each list.
+    peer_chat_shown: HashMap<String, usize>,
 
     peers_page: adw::ViewStackPage,
     node_id_label: gtk::Label,
@@ -182,6 +192,7 @@ impl AsyncComponent for AppModel {
             identity,
             call_state: CallState::Idle,
             active_audio: None,
+            chat_logs: HashMap::new(),
         };
 
         if let Some(birth) = model.config.birth.clone() {
@@ -345,6 +356,14 @@ impl AsyncComponent for AppModel {
                 self.call_state = CallState::Idle;
                 info!("hung up");
             }
+
+            AppMsg::SendChat { peer_id, text } => {
+                if let Some(channel) = self.connected_channels.get(&peer_id) {
+                    if channel.send_msg(&ChannelMsg::ChatMsg { text: text.clone() }).await.is_ok() {
+                        self.chat_logs.entry(peer_id).or_default().push((true, text));
+                    }
+                }
+            }
         }
     }
 
@@ -402,6 +421,9 @@ impl AsyncComponent for AppModel {
                 self.active_audio = None;
                 self.call_state = CallState::Idle;
             }
+            ZodiaNetEvent::ChatReceived { from, text } => {
+                self.chat_logs.entry(from).or_default().push((false, text));
+            }
             _ => {}
         }
     }
@@ -456,7 +478,7 @@ impl AsyncComponent for AppModel {
                 // Only push if not already on the navigation stack.
                 if widgets.peers_nav.find_page(&tag).is_none() {
                     if let Some(chart) = &self.chart {
-                        let page = peer_page::build_peer_page(
+                        let (page, msg_list) = peer_page::build_peer_page(
                             &peer_id, their_blob, chart,
                             Rc::clone(&self.store),
                             Rc::clone(&self.identity),
@@ -464,11 +486,27 @@ impl AsyncComponent for AppModel {
                         );
                         page.set_tag(Some(&tag));
                         widgets.peers_nav.push(&page);
+                        widgets.peer_msg_lists.insert(tag, msg_list);
                     }
                 }
             } else {
                 // Not connected yet — re-queue, will be retried on next update.
                 self.pending_push_queue.borrow_mut().push(peer_id);
+            }
+        }
+
+        // ── append new chat messages to peer message lists ────────────────────
+
+        for (peer_id, messages) in &self.chat_logs {
+            let tag = hex::encode_upper(&peer_id.0[..4]);
+            let shown = widgets.peer_chat_shown.get(&tag).copied().unwrap_or(0);
+            if messages.len() > shown {
+                if let Some(list) = widgets.peer_msg_lists.get(&tag) {
+                    for (from_us, text) in &messages[shown..] {
+                        append_chat_row(list, text, *from_us);
+                    }
+                    widgets.peer_chat_shown.insert(tag, messages.len());
+                }
             }
         }
 
@@ -791,6 +829,8 @@ fn build_widgets(
         peers_nav,
         peers_content,
         peer_list_shown_gen: u64::MAX, // force initial build
+        peer_msg_lists: HashMap::new(),
+        peer_chat_shown: HashMap::new(),
         peers_page,
         node_id_label,
         call_bar,

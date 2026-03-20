@@ -9,9 +9,14 @@ use zodia_store::ZodiaStore;
 // ── zodiac signs ──────────────────────────────────────────────────────────────
 
 /// Zodiac sign glyph from a solar month index (0 = Aries … 11 = Pisces).
+///
+/// Each glyph is followed by U+FE0E (variation selector-15) to force text
+/// presentation on platforms (macOS) that would otherwise render them as emoji.
 pub fn sign_glyph(solar_month: u8) -> &'static str {
     const SIGNS: [&str; 12] = [
-        "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓",
+        "♈\u{FE0E}", "♉\u{FE0E}", "♊\u{FE0E}", "♋\u{FE0E}",
+        "♌\u{FE0E}", "♍\u{FE0E}", "♎\u{FE0E}", "♏\u{FE0E}",
+        "♐\u{FE0E}", "♑\u{FE0E}", "♒\u{FE0E}", "♓\u{FE0E}",
     ];
     SIGNS.get(solar_month as usize % 12).copied().unwrap_or("?")
 }
