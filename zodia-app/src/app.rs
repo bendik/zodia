@@ -552,15 +552,17 @@ impl AsyncComponent for AppModel {
         {
             let connected = self.connected_peers.len();
             let online    = self.connected_channels.len();
-            let node_line = if self.node_id_text.is_empty() {
-                "Not connected".to_string()
+            let text = if self.node_id_text.is_empty() {
+                "Starting up…".to_string()
+            } else if connected == 0 {
+                format!("Node ···{}  ·  Looking for peers…", self.node_id_text)
             } else {
-                format!("Node ···{}", self.node_id_text)
+                format!(
+                    "Node ···{}\n{connected} peer{} connected  ·  {online} online",
+                    self.node_id_text,
+                    if connected == 1 { "" } else { "s" },
+                )
             };
-            let text = format!(
-                "{node_line}\n{connected} peer{} connected  ·  {online} online",
-                if connected == 1 { "" } else { "s" },
-            );
             widgets.net_popover_label.set_text(&text);
             let connected_any = !self.node_id_text.is_empty();
             widgets.net_status_btn.set_icon_name("network-wireless-symbolic");
