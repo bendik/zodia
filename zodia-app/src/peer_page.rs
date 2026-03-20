@@ -38,6 +38,7 @@ pub fn build_peer_page(
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
+    nickname: Option<&str>,
 ) -> (adw::NavigationPage, gtk::ListBox) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
@@ -100,7 +101,11 @@ pub fn build_peer_page(
 
     let switcher_title = adw::ViewSwitcherTitle::new();
     switcher_title.set_stack(Some(&view_stack));
-    switcher_title.set_title(&format!("{glyph}  ···{peer_hex}"));
+    let title_text = nickname
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("{glyph}  {n}"))
+        .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
+    switcher_title.set_title(&title_text);
     header.set_title_widget(Some(&switcher_title));
 
     let call_btn = gtk::Button::from_icon_name("call-start-symbolic");
@@ -114,7 +119,36 @@ pub fn build_peer_page(
     header.pack_end(&call_btn);
 
     toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&view_stack));
+
+    // ── nickname bar ──────────────────────────────────────────────────────────
+    // A thin row below the header bar for setting/editing a display name.
+    let nick_entry = adw::EntryRow::new();
+    nick_entry.set_title("Nickname");
+    if let Some(n) = nickname.filter(|n| !n.is_empty()) {
+        nick_entry.set_text(n);
+    }
+    nick_entry.set_show_apply_button(true);
+
+    let nick_group = adw::PreferencesGroup::new();
+    nick_group.set_margin_start(12);
+    nick_group.set_margin_end(12);
+    nick_group.set_margin_top(8);
+    nick_group.add(&nick_entry);
+
+    let pid_n = peer_id.clone();
+    let s_n = sender.clone();
+    let ne_c = nick_entry.clone();
+    nick_entry.connect_apply(move |_| {
+        s_n.input(AppMsg::SetNickname {
+            peer_id: pid_n.clone(),
+            name: ne_c.text().to_string(),
+        });
+    });
+
+    let content_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content_box.append(&nick_group);
+    content_box.append(&view_stack);
+    toolbar_view.set_content(Some(&content_box));
 
     // Bottom switcher bar (appears when window is too narrow for header tabs)
     let switcher_bar = adw::ViewSwitcherBar::new();
@@ -125,7 +159,11 @@ pub fn build_peer_page(
         .build();
     toolbar_view.add_bottom_bar(&switcher_bar);
 
-    let page = adw::NavigationPage::new(&toolbar_view, &format!("···{peer_hex}"));
+    let nav_title = nickname
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("{glyph}  {n}"))
+        .unwrap_or_else(|| format!("···{peer_hex}"));
+    let page = adw::NavigationPage::new(&toolbar_view, &nav_title);
     (page, msg_list)
 }
 

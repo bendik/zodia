@@ -81,6 +81,8 @@ pub enum AppMsg {
     HangUp,
     /// User sent a chat message to a connected peer.
     SendChat { peer_id: PeerId, text: String },
+    /// User set or updated a nickname for a connected peer.
+    SetNickname { peer_id: PeerId, name: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -119,6 +121,11 @@ pub struct AppModel {
 
     /// Chat history per peer: `(from_us, text)`.
     chat_logs: HashMap<PeerId, Vec<(bool, String)>>,
+
+    /// User-assigned nicknames, keyed by 4-byte upper-hex peer tag.
+    peer_nicknames: HashMap<String, String>,
+    /// Unread message counts per peer (cleared when their page is opened).
+    unread_messages: HashMap<String, usize>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -145,7 +152,15 @@ pub struct AppWidgets {
     peer_chat_shown: HashMap<String, usize>,
 
     peers_page: adw::ViewStackPage,
-    node_id_label: gtk::Label,
+
+    /// Network status button (header bar, end side) — click for node info popover.
+    net_status_btn: gtk::MenuButton,
+    /// Label inside the network status popover — updated with peer/sync counts.
+    net_popover_label: gtk::Label,
+    /// Bell button — only visible when there are unread messages.
+    notif_btn: gtk::MenuButton,
+    /// Label inside the notification popover — lists unread counts.
+    notif_label: gtk::Label,
 
     call_bar: gtk::Box,
     call_status: gtk::Label,
@@ -176,6 +191,8 @@ impl AsyncComponent for AppModel {
         let has_birth = init.config.birth.is_some();
         let store = Rc::new(RefCell::new(init.store));
 
+        let peer_nicknames = load_nicknames(init.config.data_dir());
+
         let mut model = AppModel {
             on_setup_page: !has_birth,
             chart: None,
@@ -193,6 +210,8 @@ impl AsyncComponent for AppModel {
             call_state: CallState::Idle,
             active_audio: None,
             chat_logs: HashMap::new(),
+            peer_nicknames,
+            unread_messages: HashMap::new(),
         };
 
         if let Some(birth) = model.config.birth.clone() {
@@ -265,7 +284,21 @@ impl AsyncComponent for AppModel {
                 self.setup_error = msg;
             }
 
+            AppMsg::SetNickname { peer_id, name } => {
+                let tag = hex::encode_upper(&peer_id.0[..4]);
+                if name.trim().is_empty() {
+                    self.peer_nicknames.remove(&tag);
+                } else {
+                    self.peer_nicknames.insert(tag, name.trim().to_string());
+                }
+                save_nicknames(self.config.data_dir(), &self.peer_nicknames);
+                self.peer_list_generation += 1;
+            }
+
             AppMsg::OpenPeer(peer_id) => {
+                // Clear unread count when opening a peer's page.
+                let tag = hex::encode_upper(&peer_id.0[..4]);
+                self.unread_messages.remove(&tag);
                 // Queue a navigation push — fulfilled in update_view once connected.
                 self.pending_push_queue.borrow_mut().push(peer_id.clone());
 
@@ -422,6 +455,8 @@ impl AsyncComponent for AppModel {
                 self.call_state = CallState::Idle;
             }
             ZodiaNetEvent::ChatReceived { from, text } => {
+                let tag = hex::encode_upper(&from.0[..4]);
+                *self.unread_messages.entry(tag).or_insert(0) += 1;
                 self.chat_logs.entry(from).or_default().push((false, text));
             }
             _ => {}
@@ -478,11 +513,13 @@ impl AsyncComponent for AppModel {
                 // Only push if not already on the navigation stack.
                 if widgets.peers_nav.find_page(&tag).is_none() {
                     if let Some(chart) = &self.chart {
+                        let nickname = self.peer_nicknames.get(&tag).map(|s| s.as_str());
                         let (page, msg_list) = peer_page::build_peer_page(
                             &peer_id, their_blob, chart,
                             Rc::clone(&self.store),
                             Rc::clone(&self.identity),
                             &sender,
+                            nickname,
                         );
                         page.set_tag(Some(&tag));
                         widgets.peers_nav.push(&page);
@@ -510,10 +547,48 @@ impl AsyncComponent for AppModel {
             }
         }
 
-        // ── node ID label ─────────────────────────────────────────────────────
+        // ── network status button ─────────────────────────────────────────────
 
-        if !self.node_id_text.is_empty() {
-            widgets.node_id_label.set_text(&format!("Node ···{}", self.node_id_text));
+        {
+            let connected = self.connected_peers.len();
+            let online    = self.connected_channels.len();
+            let node_line = if self.node_id_text.is_empty() {
+                "Not connected".to_string()
+            } else {
+                format!("Node ···{}", self.node_id_text)
+            };
+            let text = format!(
+                "{node_line}\n{connected} peer{} connected  ·  {online} online",
+                if connected == 1 { "" } else { "s" },
+            );
+            widgets.net_popover_label.set_text(&text);
+            let connected_any = !self.node_id_text.is_empty();
+            widgets.net_status_btn.set_icon_name("network-wireless-symbolic");
+            if connected_any {
+                widgets.net_status_btn.remove_css_class("dim-label");
+            } else {
+                widgets.net_status_btn.add_css_class("dim-label");
+            }
+        }
+
+        // ── notification bell ─────────────────────────────────────────────────
+
+        {
+            let total_unread: usize = self.unread_messages.values().sum();
+            widgets.notif_btn.set_visible(total_unread > 0);
+            if total_unread > 0 {
+                let lines: String = self.unread_messages.iter()
+                    .filter(|(_, &n)| n > 0)
+                    .map(|(tag, n)| {
+                        let name = self.peer_nicknames.get(tag)
+                            .cloned()
+                            .unwrap_or_else(|| format!("···{tag}"));
+                        format!("{name}  ·  {n} unread")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                widgets.notif_label.set_text(&lines);
+            }
         }
 
         // ── call bar ─────────────────────────────────────────────────────────
@@ -578,10 +653,20 @@ fn rebuild_peer_list(
             let solar_month = zodia_core::solar_month(their_blob.birth.jdn);
             let glyph = sign_glyph(solar_month);
             let online = model.connected_channels.contains_key(peer_id);
+            let display_name = model.peer_nicknames.get(&peer_hex)
+                .cloned()
+                .unwrap_or_else(|| format!("···{peer_hex}"));
+            let unread = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
 
             let row = adw::ActionRow::new();
-            row.set_title(&format!("{glyph}  ···{peer_hex}"));
+            row.set_title(&format!("{glyph}  {display_name}"));
             row.set_subtitle(if online { "● Online" } else { "○ Last seen" });
+            if unread > 0 {
+                let badge = gtk::Label::new(Some(&unread.to_string()));
+                badge.add_css_class("badge");
+                badge.add_css_class("accent");
+                row.add_suffix(&badge);
+            }
             row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
             row.set_activatable(true);
 
@@ -789,7 +874,9 @@ fn build_widgets(
         main_view,
         chart_container, sky_container,
         peers_nav, peers_content,
-        peers_page, node_id_label,
+        peers_page,
+        net_status_btn, net_popover_label,
+        notif_btn, notif_label,
         call_bar, call_status, accept_btn, hangup_btn,
     ) = build_main_page(model, sender);
     outer_stack.add_named(&main_view, Some("main"));
@@ -832,7 +919,10 @@ fn build_widgets(
         peer_msg_lists: HashMap::new(),
         peer_chat_shown: HashMap::new(),
         peers_page,
-        node_id_label,
+        net_status_btn,
+        net_popover_label,
+        notif_btn,
+        notif_label,
         call_bar,
         call_status,
         accept_btn,
@@ -974,11 +1064,12 @@ fn build_main_page(
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
     adw::ToolbarView,
-    gtk::Box, gtk::Box,                     // chart_container, sky_container
-    adw::NavigationView, gtk::Box,          // peers_nav, peers_content
-    adw::ViewStackPage,                     // peers_page (for badge)
-    gtk::Label,                             // node_id_label
-    gtk::Box, gtk::Label, gtk::Button, gtk::Button, // call bar
+    gtk::Box, gtk::Box,                              // chart_container, sky_container
+    adw::NavigationView, gtk::Box,                   // peers_nav, peers_content
+    adw::ViewStackPage,                              // peers_page (for badge)
+    gtk::MenuButton, gtk::Label,                     // net_status_btn, net_popover_label
+    gtk::MenuButton, gtk::Label,                     // notif_btn, notif_label
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button,  // call bar
 ) {
     let toolbar_view = adw::ToolbarView::new();
     let view_stack = adw::ViewStack::new();
@@ -1031,13 +1122,38 @@ fn build_main_page(
     switcher_title.set_stack(Some(&view_stack));
     switcher_title.set_title("Zodia");
 
-    let node_id_label = gtk::Label::new(Some("Node ···----"));
-    node_id_label.add_css_class("node-id");
-    node_id_label.add_css_class("dim-label");
+    // Network status button — popover with node ID + peer counts.
+    let net_popover_label = gtk::Label::new(Some("Not connected"));
+    net_popover_label.set_margin_top(8);
+    net_popover_label.set_margin_bottom(8);
+    net_popover_label.set_margin_start(12);
+    net_popover_label.set_margin_end(12);
+    net_popover_label.add_css_class("dim-label");
+    let net_popover = gtk::Popover::new();
+    net_popover.set_child(Some(&net_popover_label));
+    let net_status_btn = gtk::MenuButton::new();
+    net_status_btn.set_icon_name("network-wireless-symbolic");
+    net_status_btn.set_popover(Some(&net_popover));
+    net_status_btn.set_tooltip_text(Some("Network status"));
+
+    // Notification bell — only visible when there are unread messages.
+    let notif_label = gtk::Label::new(None);
+    notif_label.set_margin_top(8);
+    notif_label.set_margin_bottom(8);
+    notif_label.set_margin_start(12);
+    notif_label.set_margin_end(12);
+    let notif_popover = gtk::Popover::new();
+    notif_popover.set_child(Some(&notif_label));
+    let notif_btn = gtk::MenuButton::new();
+    notif_btn.set_icon_name("notification-symbolic");
+    notif_btn.set_popover(Some(&notif_popover));
+    notif_btn.set_tooltip_text(Some("Notifications"));
+    notif_btn.set_visible(false);
 
     let header_bar = adw::HeaderBar::new();
     header_bar.set_title_widget(Some(&switcher_title));
-    header_bar.pack_end(&node_id_label);
+    header_bar.pack_end(&net_status_btn);
+    header_bar.pack_end(&notif_btn);
     toolbar_view.add_top_bar(&header_bar);
 
     // ── Bottom bars ───────────────────────────────────────────────────────────
@@ -1083,7 +1199,33 @@ fn build_main_page(
         toolbar_view,
         chart_container, sky_container,
         peers_nav, peers_content,
-        peers_page, node_id_label,
+        peers_page,
+        net_status_btn, net_popover_label,
+        notif_btn, notif_label,
         call_bar, call_status, accept_btn, hangup_btn,
     )
+}
+
+// ── nickname persistence ──────────────────────────────────────────────────────
+
+fn load_nicknames(data_dir: &std::path::Path) -> HashMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(data_dir.join("nicknames.tsv")) else {
+        return HashMap::new();
+    };
+    content.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let k = parts.next()?.to_string();
+            let v = parts.next()?.to_string();
+            Some((k, v))
+        })
+        .collect()
+}
+
+fn save_nicknames(data_dir: &std::path::Path, nicknames: &HashMap<String, String>) {
+    let content: String = nicknames.iter()
+        .filter(|(_, v)| !v.trim().is_empty())
+        .map(|(k, v)| format!("{k}\t{v}\n"))
+        .collect();
+    let _ = std::fs::write(data_dir.join("nicknames.tsv"), content);
 }

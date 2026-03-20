@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Two overlapping circles representing two astrological wheels compared -->
+<!-- Two interlinked rings representing synastry / two charts in relationship.
+     Uses fill + evenodd so GTK symbolic recoloring works correctly. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <circle cx="5.5" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
-  <circle cx="10.5" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path fill="currentColor" fill-rule="evenodd"
+    d="M 5 3.5 A 4.5 4.5 0 1 0 5 12.5 A 4.5 4.5 0 1 0 5 3.5 Z
+       M 5 5.5 A 2.5 2.5 0 1 0 5 10.5 A 2.5 2.5 0 1 0 5 5.5 Z
+       M 11 3.5 A 4.5 4.5 0 1 0 11 12.5 A 4.5 4.5 0 1 0 11 3.5 Z
+       M 11 5.5 A 2.5 2.5 0 1 0 11 10.5 A 2.5 2.5 0 1 0 11 5.5 Z"/>
 </svg>

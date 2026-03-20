@@ -10,5 +10,7 @@
     <file>scalable/actions/call-start-symbolic.svg</file>
     <file>scalable/actions/mail-send-symbolic.svg</file>
     <file>scalable/actions/emblem-favorite-symbolic.svg</file>
+    <file>scalable/actions/network-wireless-symbolic.svg</file>
+    <file>scalable/actions/notification-symbolic.svg</file>
   </gresource>
 </gresources>
