@@ -155,6 +155,8 @@ pub struct AppWidgets {
 
     /// Network status button (header bar, end side) — click for node info popover.
     net_status_btn: gtk::MenuButton,
+    /// Stable image child of net_status_btn — update icon here, never via set_icon_name on the button.
+    net_icon: gtk::Image,
     /// Label inside the network status popover — updated with peer/sync counts.
     net_popover_label: gtk::Label,
     /// Bell button — only visible when there are unread messages.
@@ -557,18 +559,25 @@ impl AsyncComponent for AppModel {
             let connected = self.connected_peers.len();
             let online    = self.connected_channels.len();
 
-            let (icon_name, popover_text) = if self.node_id_text.is_empty() {
-                ("network-offline-symbolic", "Starting up…".to_string())
+            let (icon_name, tooltip, popover_text) = if self.node_id_text.is_empty() {
+                ("network-offline-symbolic",
+                 "Starting up…".to_string(),
+                 "Starting up…".to_string())
             } else if connected == 0 {
                 ("network-wireless-symbolic",
+                 "Looking for peers…".to_string(),
                  format!("Node ···{}\nLooking for peers…", self.node_id_text))
             } else {
+                let s = format!("{connected} peer{} connected  ·  {online} online",
+                                if connected == 1 { "" } else { "s" });
                 ("network-wireless-symbolic",
-                 format!("Node ···{}\n{connected} peer{} connected  ·  {online} online",
-                         self.node_id_text,
-                         if connected == 1 { "" } else { "s" }))
+                 s.clone(),
+                 format!("Node ···{}\n{s}", self.node_id_text))
             };
-            widgets.net_status_btn.set_icon_name(icon_name);
+            // Update the stable Image child — never call set_icon_name on the
+            // MenuButton itself while a popover may be open.
+            widgets.net_icon.set_icon_name(Some(icon_name));
+            widgets.net_status_btn.set_tooltip_text(Some(&tooltip));
             widgets.net_popover_label.set_text(&popover_text);
         }
 
@@ -878,7 +887,7 @@ fn build_widgets(
         chart_container, sky_container,
         peers_nav, peers_content,
         peers_page,
-        net_status_btn, net_popover_label,
+        net_status_btn, net_icon, net_popover_label,
         notif_btn, notif_label,
         call_bar, call_status, accept_btn, hangup_btn,
     ) = build_main_page(model, sender);
@@ -923,6 +932,7 @@ fn build_widgets(
         peer_chat_shown: HashMap::new(),
         peers_page,
         net_status_btn,
+        net_icon,
         net_popover_label,
         notif_btn,
         notif_label,
@@ -1070,7 +1080,7 @@ fn build_main_page(
     gtk::Box, gtk::Box,                              // chart_container, sky_container
     adw::NavigationView, gtk::Box,                   // peers_nav, peers_content
     adw::ViewStackPage,                              // peers_page (for badge)
-    gtk::MenuButton, gtk::Label,                         // net_status_btn, net_popover_label
+    gtk::MenuButton, gtk::Image, gtk::Label,             // net_status_btn, net_icon, net_popover_label
     gtk::MenuButton, gtk::Label,                     // notif_btn, notif_label
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,  // call bar
 ) {
@@ -1135,11 +1145,14 @@ fn build_main_page(
     let net_popover = gtk::Popover::new();
     net_popover.set_child(Some(&net_popover_label));
 
+    // Use a persistent Image child so update_view can swap the icon without
+    // replacing the button's child widget (which re-anchors the open popover
+    // and blocks GTK layout).
+    let net_icon = gtk::Image::from_icon_name("network-offline-symbolic");
     let net_status_btn = gtk::MenuButton::new();
-    net_status_btn.set_icon_name("network-offline-symbolic");
+    net_status_btn.set_child(Some(&net_icon));
     net_status_btn.set_always_show_arrow(false);
     net_status_btn.set_popover(Some(&net_popover));
-    net_status_btn.set_tooltip_text(Some("Network status"));
 
     // Notification bell — only visible when there are unread messages.
     let notif_label = gtk::Label::new(None);
@@ -1205,7 +1218,7 @@ fn build_main_page(
         chart_container, sky_container,
         peers_nav, peers_content,
         peers_page,
-        net_status_btn, net_popover_label,
+        net_status_btn, net_icon, net_popover_label,
         notif_btn, notif_label,
         call_bar, call_status, accept_btn, hangup_btn,
     )
