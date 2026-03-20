@@ -41,7 +41,7 @@ jobs:
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install gtk4 libadwaita pango opus pkg-config
+          brew install gtk4 libadwaita pango opus pkg-config glib
 
       - name: Export brew paths for build tools (macOS)
         if: runner.os == 'macOS'

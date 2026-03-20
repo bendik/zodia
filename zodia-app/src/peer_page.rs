@@ -76,7 +76,7 @@ pub fn build_peer_page(
     let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity));
     syn_av.widget().set_vexpand(true);
     let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
-    syn_page.set_icon_name(Some("system-users-symbolic"));
+    syn_page.set_icon_name(Some("synastry-symbolic"));
 
     // Messages tab
     let (messages_widget, msg_list) = build_messages_tab(peer_id, sender);

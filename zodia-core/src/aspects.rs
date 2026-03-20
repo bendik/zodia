@@ -41,13 +41,13 @@ impl AspectKind {
 
     pub fn symbol(self) -> &'static str {
         match self {
-            Self::Conjunction => "☌",
-            Self::SemiSextile => "⚺",
-            Self::Sextile     => "⚹",
-            Self::Square      => "□",
-            Self::Trine       => "△",
-            Self::Quincunx    => "⚻",
-            Self::Opposition  => "☍",
+            Self::Conjunction => "☌\u{FE0E}",
+            Self::SemiSextile => "⚺\u{FE0E}",
+            Self::Sextile     => "⚹\u{FE0E}",
+            Self::Square      => "□\u{FE0E}",
+            Self::Trine       => "△\u{FE0E}",
+            Self::Quincunx    => "⚻\u{FE0E}",
+            Self::Opposition  => "☍\u{FE0E}",
         }
     }
 

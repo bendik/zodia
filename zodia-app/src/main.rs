@@ -54,12 +54,25 @@ fn main() {
         Err(e) => tracing::warn!("baseline parse failed: {e}"),
     }
 
+    // ── Bundled icons ─────────────────────────────────────────────────────────
+    // Register SVG icons compiled into the binary at build time so they render
+    // on all platforms (macOS has no system Adwaita icon theme).
+    gio::resources_register_include!("icons.gresource")
+        .expect("failed to register bundled icon resources");
+
     // ── GTK / ADW application ─────────────────────────────────────────────────
     let app = RelmApp::new("net.zodia.app");
 
     // Request dark colour scheme — adwaita will use the system preference as
     // fallback if the compositor ignores prefer-dark-scheme.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::PreferDark);
+
+    // Add the bundled icon resource path to the default icon theme so GTK
+    // resolves our icons on every platform including macOS.
+    if let Some(display) = gtk4::gdk::Display::default() {
+        gtk4::IconTheme::for_display(&display)
+            .add_resource_path("/net/zodia/app/icons");
+    }
 
     apply_css();
     app.run_async::<AppModel>(AppInit { config, store });

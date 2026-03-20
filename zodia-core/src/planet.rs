@@ -33,16 +33,16 @@ impl Planet {
 
     pub fn symbol(self) -> &'static str {
         match self {
-            Planet::Sun     => "☉",
-            Planet::Moon    => "☽",
-            Planet::Mercury => "☿",
-            Planet::Venus   => "♀",
-            Planet::Mars    => "♂",
-            Planet::Jupiter => "♃",
-            Planet::Saturn  => "♄",
-            Planet::Uranus  => "♅",
-            Planet::Neptune => "♆",
-            Planet::Pluto   => "♇",
+            Planet::Sun     => "☉\u{FE0E}",
+            Planet::Moon    => "☽\u{FE0E}",
+            Planet::Mercury => "☿\u{FE0E}",
+            Planet::Venus   => "♀\u{FE0E}",
+            Planet::Mars    => "♂\u{FE0E}",
+            Planet::Jupiter => "♃\u{FE0E}",
+            Planet::Saturn  => "♄\u{FE0E}",
+            Planet::Uranus  => "♅\u{FE0E}",
+            Planet::Neptune => "♆\u{FE0E}",
+            Planet::Pluto   => "♇\u{FE0E}",
         }
     }
 
