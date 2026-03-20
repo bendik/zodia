@@ -1,8 +1,8 @@
 //! Aspect + interpretation view.
 //!
 //! An `adw::NavigationView` with two pages:
-//!   1. **List page** — full-width boxed-list of aspect rows.  No split, no
-//!      sidebar — one column of text at any window width.
+//!   1. **List page** — full-width grouped list of aspect rows.  One column of
+//!      text at any window width.
 //!   2. **Detail page** — pushed on row tap; shows all interpretations with
 //!      affirm buttons and a contribute form.  Has its own HeaderBar so the
 //!      back button is always present.
@@ -14,6 +14,7 @@ use libadwaita as adw;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
 use zodia_core::InterpKey;
+use zodia_crypto::IdentityKeypair;
 use zodia_store::ZodiaStore;
 
 use crate::aspect_list::AspectItem;
@@ -25,36 +26,45 @@ pub struct AspectView {
 }
 
 impl AspectView {
-    /// Standard aspect list — no preamble.  Used for Sky (transits) and synastry.
+    /// Standard aspect list with group title "Aspects".  Used for synastry.
     pub fn new(
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
-        author_pk: [u8; 32],
+        identity: Rc<IdentityKeypair>,
     ) -> Self {
-        Self::build(items, store, author_pk, None)
+        Self::build(items, store, identity, None, "Aspects")
     }
 
-    /// Natal chart view — prepends a placements section (planets in signs/houses)
-    /// above the aspect list inside the same scroll.
+    /// Natal chart view — prepends a placements section above the aspect list.
     pub fn natal(
         items: Vec<AspectItem>,
         chart: &zodia_core::Chart,
         store: Rc<RefCell<ZodiaStore>>,
-        author_pk: [u8; 32],
+        identity: Rc<IdentityKeypair>,
     ) -> Self {
         let preamble = crate::placements::build_placements_group(chart);
-        Self::build(items, store, author_pk, Some(preamble.upcast::<gtk::Widget>()))
+        Self::build(items, store, identity, Some(preamble.upcast::<gtk::Widget>()), "Aspects")
+    }
+
+    /// Transit view — group title is "Transits".
+    pub fn transits(
+        items: Vec<AspectItem>,
+        store: Rc<RefCell<ZodiaStore>>,
+        identity: Rc<IdentityKeypair>,
+    ) -> Self {
+        Self::build(items, store, identity, None, "Transits")
     }
 
     fn build(
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
-        author_pk: [u8; 32],
+        identity: Rc<IdentityKeypair>,
         preamble: Option<gtk::Widget>,
+        group_title: &'static str,
     ) -> Self {
         let nav = adw::NavigationView::new();
         nav.set_vexpand(true);
-        nav.push(&list_page(&items, &nav, Rc::clone(&store), author_pk, preamble));
+        nav.push(&list_page(&items, &nav, Rc::clone(&store), Rc::clone(&identity), preamble, group_title));
         Self { nav }
     }
 
@@ -69,8 +79,9 @@ fn list_page(
     items: &[AspectItem],
     nav: &adw::NavigationView,
     store: Rc<RefCell<ZodiaStore>>,
-    author_pk: [u8; 32],
+    identity: Rc<IdentityKeypair>,
     preamble: Option<gtk::Widget>,
+    group_title: &'static str,
 ) -> adw::NavigationPage {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
@@ -84,7 +95,7 @@ fn list_page(
     clamp.set_margin_end(12);
 
     let aspect_group = adw::PreferencesGroup::new();
-    aspect_group.set_title("Aspects");
+    aspect_group.set_title(group_title);
 
     if items.is_empty() {
         let row = adw::ActionRow::new();
@@ -117,9 +128,10 @@ fn list_page(
 
             let nav_c = nav.clone();
             let store_c = Rc::clone(&store);
+            let identity_c = Rc::clone(&identity);
             let key = item.key.clone();
             row.connect_activated(move |_| {
-                nav_c.push(&detail_page(&key, Rc::clone(&store_c), author_pk));
+                nav_c.push(&detail_page(&key, Rc::clone(&store_c), Rc::clone(&identity_c)));
             });
 
             aspect_group.add(&row);
@@ -139,19 +151,14 @@ fn list_page(
 // ── detail page ───────────────────────────────────────────────────────────────
 
 /// Build the interpretation detail page for `key`.
-///
-/// Wrapped in a `ToolbarView` + `HeaderBar` so the auto-inserted back button
-/// is always visible when this page is on top of the navigation stack.
 pub fn detail_page(
     key: &InterpKey,
     store: Rc<RefCell<ZodiaStore>>,
-    author_pk: [u8; 32],
+    identity: Rc<IdentityKeypair>,
 ) -> adw::NavigationPage {
     let toolbar = adw::ToolbarView::new();
 
     let header = adw::HeaderBar::new();
-    // This header is inside a NavigationView, not a root window — suppress the
-    // window close/min/max buttons so they don't duplicate the outer ones.
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
     let title = gtk::Label::new(Some(&key.plain_name()));
@@ -200,9 +207,11 @@ pub fn detail_page(
             affirm_btn.set_valign(gtk::Align::Center);
 
             let store_c = Rc::clone(&store);
+            let identity_c = Rc::clone(&identity);
             let log_id = row_data.log_id;
             let row_ref = interp_row.clone();
             affirm_btn.connect_clicked(move |_| {
+                let author_pk = identity_c.public_key();
                 if let Ok(true) = store_c.borrow().affirm(&log_id, &author_pk) {
                     if let Ok(n) = store_c.borrow().affirmation_count(&log_id) {
                         row_ref.set_subtitle(&format!("{n} ♡  ·  affirmed"));
@@ -237,6 +246,7 @@ pub fn detail_page(
     submit.set_margin_top(4);
 
     let store_c = Rc::clone(&store);
+    let identity_c = Rc::clone(&identity);
     let entry_c = entry.clone();
     let key_c = key.clone();
     let group_c = interp_group.clone();
@@ -246,12 +256,10 @@ pub fn detail_page(
         if trimmed.is_empty() {
             return;
         }
-        if let Ok(_log_id) = store_c.borrow().insert_interpretation(
-            &key_c,
-            trimmed,
-            Some(&author_pk),
-            false,
-        ) {
+        let payload = ZodiaStore::signing_payload(&key_c, trimmed);
+        let author_sig = identity_c.sign(&payload);
+        let author_pk = identity_c.public_key();
+        if let Ok(_log_id) = store_c.borrow().insert_signed(&key_c, trimmed, &author_pk, &author_sig) {
             let new_row = adw::ActionRow::new();
             new_row.set_title(trimmed);
             new_row.set_subtitle("0 ♡  ·  community (just added)");

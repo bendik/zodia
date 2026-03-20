@@ -19,10 +19,12 @@ use tokio::sync::mpsc::Receiver;
 use tracing::{error, info, warn};
 use zodia_av::AudioSession;
 use zodia_config::LocalConfig;
-use zodia_core::{birth_from_coords, current_jdn, gregorian_to_jdn, Chart};
-use zodia_net::{ChannelMsg, DirectChannel, NetworkConfig, PeerId, Tier1Blob, ZodiaNetEvent,
-                ZodiaNetwork};
-use zodia_store::ZodiaStore;
+use zodia_core::{birth_from_coords, compute_synastry, current_jdn, gregorian_to_jdn,
+                 Chart, InterpKey};
+use zodia_crypto::IdentityKeypair;
+use zodia_net::{ChannelMsg, DirectChannel, InterpEntry, NetworkConfig, PeerId, Tier1Blob,
+                ZodiaNetEvent, ZodiaNetwork};
+use zodia_store::{StoreError, ZodiaStore};
 
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
@@ -97,8 +99,8 @@ pub struct AppModel {
     config: LocalConfig,
     setup_error: String,
 
-    /// ed25519 public key used as author identity for interpretations.
-    author_pk: [u8; 32],
+    /// Identity keypair — signs submitted interpretations and affirmations.
+    identity: Rc<IdentityKeypair>,
 
     call_state: CallState,
     connected_channels: HashMap<PeerId, DirectChannel>,
@@ -162,7 +164,7 @@ impl AsyncComponent for AppModel {
                 PeerOutput::Call(id)    => AppMsg::CallPeer(id),
             });
 
-        let author_pk = init.config.identity.signing_key().verifying_key().to_bytes();
+        let identity = Rc::new(IdentityKeypair::from_seed(init.config.identity.seed()));
         let has_birth = init.config.birth.is_some();
         let store = Rc::new(RefCell::new(init.store));
 
@@ -176,7 +178,7 @@ impl AsyncComponent for AppModel {
             peers,
             config: init.config,
             setup_error: String::new(),
-            author_pk,
+            identity,
             call_state: CallState::Idle,
             connected_channels: HashMap::new(),
             connected_peers: HashMap::new(),
@@ -262,16 +264,20 @@ impl AsyncComponent for AppModel {
                 if let Some(net) = &self.network {
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
-                            info!(peer = %hex::encode_upper(&peer_id.0[..4]), "tier-1 channel opened");
+                            let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                            info!(peer = %peer_hex, "tier-1 channel opened");
 
-                            // Exchange birth data before registering the channel listener
-                            // so the handshake stream is consumed by exchange_tier1, not
-                            // the generic message loop.
                             if let Some(our_blob) = make_tier1_blob(&self.config) {
                                 match channel.exchange_tier1(&our_blob).await {
                                     Ok(their_blob) => {
-                                        info!(peer = %hex::encode_upper(&peer_id.0[..4]),
-                                              "tier-1 exchange complete");
+                                        info!(peer = %peer_hex, "tier-1 exchange complete");
+                                        // Sync interpretations for their keys before
+                                        // handing the channel to the message loop.
+                                        do_interp_sync(
+                                            &channel, &their_blob,
+                                            self.chart.as_ref(), &self.store,
+                                            &self.identity, &peer_hex,
+                                        ).await;
                                         self.connected_peers.insert(peer_id.clone(), their_blob);
                                     }
                                     Err(e) => warn!("tier-1 exchange: {e}"),
@@ -379,12 +385,16 @@ impl AsyncComponent for AppModel {
             }
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 if let Some(net) = &self.network {
-                    // Exchange before registering the message loop.
+                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                     if let Some(our_blob) = make_tier1_blob(&self.config) {
                         match channel.exchange_tier1(&our_blob).await {
                             Ok(their_blob) => {
-                                info!(peer = %hex::encode_upper(&peer_id.0[..4]),
-                                      "tier-1 exchange complete (incoming)");
+                                info!(peer = %peer_hex, "tier-1 exchange complete (incoming)");
+                                do_interp_sync(
+                                    &channel, &their_blob,
+                                    self.chart.as_ref(), &self.store,
+                                    &self.identity, &peer_hex,
+                                ).await;
                                 self.connected_peers.insert(peer_id.clone(), their_blob);
                             }
                             Err(e) => warn!("tier-1 exchange (incoming): {e}"),
@@ -427,16 +437,16 @@ impl AsyncComponent for AppModel {
                     aspect_list::natal_items(&chart.natal_aspects()),
                     chart,
                     Rc::clone(&self.store),
-                    self.author_pk,
+                    Rc::clone(&self.identity),
                 );
                 nav.widget().set_vexpand(true);
                 widgets.chart_container.append(nav.widget());
 
                 if let Ok(ts) = chart.transits_at(current_jdn()) {
-                    let tav = AspectView::new(
+                    let tav = AspectView::transits(
                         aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
                         Rc::clone(&self.store),
-                        self.author_pk,
+                        Rc::clone(&self.identity),
                     );
                     tav.widget().set_vexpand(true);
                     widgets.sky_container.append(tav.widget());
@@ -453,7 +463,7 @@ impl AsyncComponent for AppModel {
                         their_blob,
                         chart,
                         Rc::clone(&self.store),
-                        self.author_pk,
+                        Rc::clone(&self.identity),
                         &sender,
                     );
                     widgets.nav_view.push(&page);
@@ -582,16 +592,16 @@ fn build_widgets(
             aspect_list::natal_items(&chart.natal_aspects()),
             chart,
             Rc::clone(&model.store),
-            model.author_pk,
+            Rc::clone(&model.identity),
         );
         nav.widget().set_vexpand(true);
         chart_container.append(nav.widget());
 
         if let Ok(ts) = chart.transits_at(current_jdn()) {
-            let tav = AspectView::new(
+            let tav = AspectView::transits(
                 aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
                 Rc::clone(&model.store),
-                model.author_pk,
+                Rc::clone(&model.identity),
             );
             tav.widget().set_vexpand(true);
             sky_container.append(tav.widget());
@@ -877,6 +887,100 @@ fn build_main_page(
 
     (nav_view, chart_container, sky_container, peers_page, peer_count_label,
      node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
+}
+
+// ── interpretation sync ───────────────────────────────────────────────────────
+
+/// Run a mutual interpretation exchange over `channel`.
+///
+/// We collect our top signed community entries for the peer's relevant keys,
+/// send them, receive theirs, and import any we haven't seen.  Must be called
+/// before `accept_channel` so the streams aren't grabbed by the message loop.
+async fn do_interp_sync(
+    channel: &DirectChannel,
+    their_blob: &Tier1Blob,
+    our_chart: Option<&Chart>,
+    store: &Rc<RefCell<ZodiaStore>>,
+    identity: &Rc<IdentityKeypair>,
+    peer_hex: &str,
+) {
+    let outgoing = collect_entries_for_peer(their_blob, our_chart, store, identity);
+    match channel.exchange_interps(&outgoing).await {
+        Ok(received) => {
+            let n = import_interps(&received, store, peer_hex);
+            if n > 0 {
+                info!(peer = %peer_hex, "imported {n} interpretations from peer");
+            }
+        }
+        Err(e) => warn!(peer = %peer_hex, "interp sync failed: {e}"),
+    }
+}
+
+/// Build the list of our signed community entries for the keys a peer cares
+/// about: their natal aspect keys plus synastry keys between our charts.
+fn collect_entries_for_peer(
+    their_blob: &Tier1Blob,
+    our_chart: Option<&Chart>,
+    store: &Rc<RefCell<ZodiaStore>>,
+    _identity: &Rc<IdentityKeypair>,
+) -> Vec<InterpEntry> {
+    let their_chart = Chart::compute(their_blob.birth.clone()).ok();
+    let mut key_sigs: Vec<String> = Vec::new();
+
+    if let Some(ref chart) = their_chart {
+        for aspect in chart.natal_aspects() {
+            key_sigs.push(InterpKey::from_natal(&aspect).to_sig());
+        }
+    }
+    if let (Some(ref their_chart), Some(ours)) = (&their_chart, our_chart) {
+        for aspect in compute_synastry(&ours.positions, &their_chart.positions) {
+            key_sigs.push(InterpKey::from_synastry(&aspect).to_sig());
+        }
+    }
+
+    let refs: Vec<&str> = key_sigs.iter().map(|s| s.as_str()).collect();
+    store
+        .borrow()
+        .community_for_keys(&refs, 100)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| InterpEntry {
+            interp_key: e.interp_key,
+            body: e.body,
+            author_pk: e.author_pk,
+            author_sig: e.author_sig.to_vec(),
+        })
+        .collect()
+}
+
+/// Verify and insert received interpretations.  Returns the number newly stored.
+fn import_interps(
+    entries: &[InterpEntry],
+    store: &Rc<RefCell<ZodiaStore>>,
+    peer_hex: &str,
+) -> usize {
+    let mut count = 0;
+    for entry in entries {
+        let Ok(sig_arr): Result<[u8; 64], _> = entry.author_sig.as_slice().try_into() else {
+            warn!(peer = %peer_hex, key = %entry.interp_key, "invalid sig length, skipping");
+            continue;
+        };
+        match store.borrow().insert_received(
+            &entry.interp_key,
+            &entry.body,
+            &entry.author_pk,
+            &sig_arr,
+        ) {
+            Ok(true)  => count += 1,
+            Ok(false) => {}
+            Err(StoreError::InvalidSignature) => {
+                warn!(peer = %peer_hex, key = %entry.interp_key,
+                      "received interpretation with invalid signature — discarded");
+            }
+            Err(e) => warn!(peer = %peer_hex, "interpretation import: {e}"),
+        }
+    }
+    count
 }
 
 // ── session ID ────────────────────────────────────────────────────────────────

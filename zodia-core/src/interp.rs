@@ -89,13 +89,11 @@ impl InterpKey {
     /// - `HouseTransit { jupiter, 7 }`      → `"Jupiter in house 7"`
     pub fn plain_name(&self) -> String {
         match self {
-            Self::Natal { aspect_sig } => parse_aspect_sig(aspect_sig),
-            Self::Synastry { aspect_sig } => {
-                format!("{} (synastry)", parse_aspect_sig(aspect_sig))
-            }
+            Self::Natal { aspect_sig }
+            | Self::Synastry { aspect_sig } => parse_aspect_sig(aspect_sig),
             Self::Transit { transiting, natal_body, kind } => {
                 format!(
-                    "{} {} {} (transit)",
+                    "{} {} {}",
                     cap(transiting.name()), kind.display_name(), cap(natal_body.name())
                 )
             }

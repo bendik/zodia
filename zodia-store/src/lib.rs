@@ -9,11 +9,15 @@
 //!   crowding out genuine peer contributions.
 //! - Affirmations are unique per (interp_log_id, author_pk) — sybil-resistant without
 //!   requiring identity disclosure beyond a pseudonymous pubkey.
+//! - Community entries carry an ed25519 `author_sig` over `log_id = BLAKE3(key||body)`.
+//!   `insert_received` verifies the signature before writing, making the store the
+//!   final gatekeeper against forged peer contributions.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use ed25519_dalek::{Signature, VerifyingKey};
+use rusqlite::{Connection, OptionalExtension, params, types::Value};
 use thiserror::Error;
 use zodia_core::InterpKey;
 
@@ -21,7 +25,7 @@ pub use seed::BaselineData;
 
 pub mod seed;
 
-// ── error ────────────────────────────────────────────────────────────────────
+// ── error ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -29,6 +33,21 @@ pub enum StoreError {
     Db(#[from] rusqlite::Error),
     #[error("seed parse error: {0}")]
     Seed(String),
+    #[error("invalid interpretation signature")]
+    InvalidSignature,
+}
+
+// ── community entry ───────────────────────────────────────────────────────────
+
+/// A signed community interpretation suitable for peer sync.
+#[derive(Debug, Clone)]
+pub struct CommunityEntry {
+    /// Canonical key string, e.g. `"natal:jupiter_trine_venus"`.
+    pub interp_key: String,
+    pub body: String,
+    pub author_pk: [u8; 32],
+    /// ed25519 signature over `signing_payload(key, body)`.
+    pub author_sig: [u8; 64],
 }
 
 // ── store ─────────────────────────────────────────────────────────────────────
@@ -57,12 +76,26 @@ impl ZodiaStore {
 
     fn init(&self) -> Result<(), StoreError> {
         self.conn.execute_batch(SCHEMA)?;
+        // Migration: add author_sig column if this is an older DB without it.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE interpretations ADD COLUMN author_sig BLOB;",
+        );
         Ok(())
+    }
+
+    // ── signing payload ───────────────────────────────────────────────────────
+
+    /// The bytes that must be ed25519-signed to produce a valid `author_sig`.
+    ///
+    /// Equal to `BLAKE3(key_sig_bytes || body_bytes)` — the same value used as
+    /// `log_id`, so signing the log_id commits to both the key and the body.
+    pub fn signing_payload(key: &InterpKey, body: &str) -> [u8; 32] {
+        derive_log_id(&key.to_sig(), body)
     }
 
     // ── interpretations ───────────────────────────────────────────────────────
 
-    /// Insert a single interpretation.  Returns the generated log_id.
+    /// Insert a baseline interpretation (no signature required).
     ///
     /// Duplicate log_ids are silently ignored (idempotent on re-seed).
     pub fn insert_interpretation(
@@ -90,6 +123,129 @@ impl ZodiaStore {
             ],
         )?;
         Ok(log_id)
+    }
+
+    /// Insert a locally authored community interpretation with its ed25519 signature.
+    ///
+    /// The caller must sign `ZodiaStore::signing_payload(key, body)` with the
+    /// author's identity key before calling this.
+    pub fn insert_signed(
+        &self,
+        key: &InterpKey,
+        body: &str,
+        author_pk: &[u8; 32],
+        author_sig: &[u8; 64],
+    ) -> Result<[u8; 32], StoreError> {
+        let sig = key.to_sig();
+        let log_id = derive_log_id(&sig, body);
+        let now = unix_secs();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO interpretations
+             (log_id, interp_key, interp_kind, body, author_pk, author_sig, received_at, is_baseline)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            params![
+                log_id.as_slice(),
+                sig,
+                kind_str(key),
+                body,
+                author_pk.as_slice(),
+                author_sig.as_slice(),
+                now as i64,
+            ],
+        )?;
+        Ok(log_id)
+    }
+
+    /// Verify and insert a community interpretation received from a peer.
+    ///
+    /// Returns `Ok(true)` if newly inserted, `Ok(false)` if already present,
+    /// `Err(StoreError::InvalidSignature)` if the signature does not verify.
+    pub fn insert_received(
+        &self,
+        interp_key: &str,
+        body: &str,
+        author_pk: &[u8; 32],
+        author_sig: &[u8; 64],
+    ) -> Result<bool, StoreError> {
+        // Verify the ed25519 signature before writing anything.
+        let payload = derive_log_id(interp_key, body);
+        let vk = VerifyingKey::from_bytes(author_pk)
+            .map_err(|_| StoreError::InvalidSignature)?;
+        let sig = Signature::from_bytes(author_sig);
+        vk.verify_strict(&payload, &sig)
+            .map_err(|_| StoreError::InvalidSignature)?;
+
+        let log_id = payload;
+        let kind = kind_from_key_str(interp_key);
+        let now = unix_secs();
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO interpretations
+             (log_id, interp_key, interp_kind, body, author_pk, author_sig, received_at, is_baseline)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            params![
+                log_id.as_slice(),
+                interp_key,
+                kind,
+                body,
+                author_pk.as_slice(),
+                author_sig.as_slice(),
+                now as i64,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Collect top non-baseline, signed community entries for the given canonical
+    /// key strings.  Returns at most `limit` rows, sorted by affirmation count.
+    ///
+    /// Only entries with a valid `author_sig` are included — unsigned baseline
+    /// entries and legacy unsigned community entries are excluded.
+    pub fn community_for_keys(
+        &self,
+        key_sigs: &[&str],
+        limit: usize,
+    ) -> Result<Vec<CommunityEntry>, StoreError> {
+        if key_sigs.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = key_sigs.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT interp_key, body, author_pk, author_sig
+             FROM interpretations
+             WHERE is_baseline = 0
+               AND author_sig IS NOT NULL
+               AND interp_key IN ({placeholders})
+             ORDER BY (
+                 SELECT COUNT(*) FROM affirmations
+                 WHERE interp_log_id = interpretations.log_id
+             ) DESC
+             LIMIT ?"
+        );
+
+        let mut params: Vec<Value> = key_sigs
+            .iter()
+            .map(|s| Value::Text(s.to_string()))
+            .collect();
+        params.push(Value::Integer(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                let pk_bytes: Vec<u8> = row.get(2)?;
+                let sig_bytes: Vec<u8> = row.get(3)?;
+                let mut author_pk = [0u8; 32];
+                let mut author_sig = [0u8; 64];
+                author_pk.copy_from_slice(&pk_bytes[..32.min(pk_bytes.len())]);
+                author_sig.copy_from_slice(&sig_bytes[..64.min(sig_bytes.len())]);
+                Ok(CommunityEntry {
+                    interp_key: row.get(0)?,
+                    body: row.get(1)?,
+                    author_pk,
+                    author_sig,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// The single best interpretation for a key — community-contributed first,
@@ -174,7 +330,6 @@ impl ZodiaStore {
         interp_log_id: &[u8; 32],
         author_pk: &[u8; 32],
     ) -> Result<bool, StoreError> {
-        // Derive a stable ID from the two byte arrays directly.
         let mut hasher = blake3::Hasher::new();
         hasher.update(interp_log_id);
         hasher.update(author_pk);
@@ -206,9 +361,6 @@ impl ZodiaStore {
     // ── seeding ───────────────────────────────────────────────────────────────
 
     /// Populate the store from baseline data if it is currently empty.
-    ///
-    /// Safe to call on every startup — if any entry exists the call returns 0
-    /// immediately without touching the DB.
     pub fn seed_if_empty(&self, data: &seed::BaselineData) -> Result<u32, StoreError> {
         if !self.is_empty()? {
             return Ok(0);
@@ -269,6 +421,7 @@ CREATE TABLE IF NOT EXISTS interpretations (
     interp_kind TEXT    NOT NULL,
     body        TEXT    NOT NULL,
     author_pk   BLOB,
+    author_sig  BLOB,
     received_at INTEGER NOT NULL,
     is_baseline INTEGER NOT NULL DEFAULT 0
 );
@@ -296,11 +449,15 @@ fn derive_log_id(a: &str, b: &str) -> [u8; 32] {
 
 fn kind_str(key: &InterpKey) -> &'static str {
     match key {
-        InterpKey::Natal { .. }       => "natal",
-        InterpKey::Synastry { .. }    => "synastry",
-        InterpKey::Transit { .. }     => "transit",
+        InterpKey::Natal { .. }        => "natal",
+        InterpKey::Synastry { .. }     => "synastry",
+        InterpKey::Transit { .. }      => "transit",
         InterpKey::HouseTransit { .. } => "house_transit",
     }
+}
+
+fn kind_from_key_str(key: &str) -> &str {
+    key.split(':').next().unwrap_or("natal")
 }
 
 fn unix_secs() -> u64 {

@@ -15,6 +15,7 @@ use libadwaita::gtk;
 use libadwaita::prelude::*;
 use relm4::AsyncComponentSender;
 use zodia_core::{Chart, compute_positions, compute_synastry};
+use zodia_crypto::IdentityKeypair;
 use zodia_net::{PeerId, Tier1Blob};
 use zodia_store::ZodiaStore;
 
@@ -32,7 +33,7 @@ pub fn build_peer_page(
     their_blob: &Tier1Blob,
     our_chart: &Chart,
     store: Rc<RefCell<ZodiaStore>>,
-    author_pk: [u8; 32],
+    identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
 ) -> adw::NavigationPage {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
@@ -60,16 +61,16 @@ pub fn build_peer_page(
             natal_items(&chart.natal_aspects()),
             chart,
             Rc::clone(&store),
-            author_pk,
+            Rc::clone(&identity),
         ),
-        None => AspectView::new(vec![], Rc::clone(&store), author_pk),
+        None => AspectView::new(vec![], Rc::clone(&store), Rc::clone(&identity)),
     };
     their_av.widget().set_vexpand(true);
     let their_page = view_stack.add_titled(their_av.widget(), Some("their"), "Their Chart");
     their_page.set_icon_name(Some("weather-clear-symbolic"));
 
     // Synastry tab
-    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), author_pk);
+    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity));
     syn_av.widget().set_vexpand(true);
     let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
     syn_page.set_icon_name(Some("people-meet-symbolic"));

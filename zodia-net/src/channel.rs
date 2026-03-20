@@ -31,6 +31,22 @@ pub enum ChannelError {
 /// Maximum single reliable message size (1 MiB).
 const MAX_MSG_BYTES: u32 = 1024 * 1024;
 
+// ── interpretation sync types ─────────────────────────────────────────────────
+
+/// A single signed community interpretation exchanged during Tier-1 sync.
+///
+/// `author_sig` is an ed25519 signature over `BLAKE3(interp_key || body)`,
+/// verifiable against `author_pk`.  The receiver must verify before storing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterpEntry {
+    /// Canonical key string, e.g. `"natal:jupiter_trine_venus"`.
+    pub interp_key: String,
+    pub body: String,
+    pub author_pk: [u8; 32],
+    /// CBOR encodes as a byte-string.  Length must be 64 on receive.
+    pub author_sig: Vec<u8>,
+}
+
 // ── signaling messages ────────────────────────────────────────────────────────
 
 /// Typed messages exchanged over reliable QUIC streams.
@@ -38,6 +54,8 @@ const MAX_MSG_BYTES: u32 = 1024 * 1024;
 pub enum ChannelMsg {
     /// Tier-1 handshake: exchange exact birth data + X25519 prekeys.
     Tier1Handshake(Tier1Blob),
+    /// Post-handshake: swap top community interpretations for each other's keys.
+    InterpShare { entries: Vec<InterpEntry> },
     /// Caller proposes a voice session.
     CallOffer  { session_id: [u8; 32] },
     /// Callee accepts.
@@ -145,6 +163,30 @@ impl DirectChannel {
             .read_datagram()
             .await
             .map_err(|e| ChannelError::Recv(e.to_string()))
+    }
+
+    // ── interpretation sync ───────────────────────────────────────────────────
+
+    /// Mutual interpretation exchange — call concurrently on both sides after
+    /// the Tier-1 handshake completes.
+    ///
+    /// Each peer sends their top signed community entries for the other's
+    /// relevant aspect keys.  Returns the entries received from the remote peer.
+    pub async fn exchange_interps(
+        &self,
+        ours: &[InterpEntry],
+    ) -> Result<Vec<InterpEntry>, ChannelError> {
+        let msg = ChannelMsg::InterpShare { entries: ours.to_vec() };
+        let encoded = cbor_encode(&msg);
+        let (send_res, recv_res) = tokio::join!(self.send_raw(&encoded), self.recv_raw());
+        send_res?;
+        let bytes = recv_res?;
+        match ciborium::from_reader(bytes.as_slice())
+            .map_err(|e| ChannelError::Decode(e.to_string()))?
+        {
+            ChannelMsg::InterpShare { entries } => Ok(entries),
+            _ => Err(ChannelError::Decode("expected InterpShare".into())),
+        }
     }
 
     // ── tier-1 handshake ──────────────────────────────────────────────────────

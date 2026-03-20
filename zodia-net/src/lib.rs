@@ -2,7 +2,7 @@ pub mod announce;
 pub mod channel;
 pub mod network;
 
-pub use channel::{ChannelMsg, DirectChannel};
+pub use channel::{ChannelMsg, DirectChannel, InterpEntry};
 pub use network::{NetworkConfig, NetworkError, ZodiaNetwork};
 
 use serde::{Deserialize, Serialize};
