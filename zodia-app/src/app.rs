@@ -2,18 +2,19 @@
 //!
 //! `AppModel` is an `AsyncComponent` that drives the full lifecycle:
 //!   1. First-run setup  — collect birth date + location, compute chart
-//!   2. Main view        — Chart / Sky / Peers tabs in an `adw::NavigationView`
-//!   3. Connected peer   — pushed `adw::NavigationPage` with synastry + call
-//!   4. Network events   — `CommandOutput = ZodiaNetEvent` keeps the peer
-//!                         list reactive without blocking the GTK thread
+//!   2. Main view        — Chart / Sky / Peers tabs in an `adw::ToolbarView`
+//!   3. Connected peer   — pushed onto the Peers tab's own `NavigationView`;
+//!                         shows synastry + call interface
+//!   4. Network events   — `CommandOutput = ZodiaNetEvent` keeps all three
+//!                         tabs reactive without blocking the GTK thread
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use libadwaita as adw;
+use libadwaita::gtk;
 use libadwaita::prelude::*;
-use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 use tokio::sync::mpsc::Receiver;
 use tracing::{error, info, warn};
@@ -28,9 +29,9 @@ use zodia_store::{StoreError, ZodiaStore};
 
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
-use crate::peer_list::{PeerEntry, PeerInit, PeerOutput};
+use crate::peer_list::DiscoveredPeer;
 use crate::peer_page;
-use crate::util::approximate_aspects;
+use crate::util::{approximate_aspects, sign_glyph};
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
@@ -45,9 +46,9 @@ pub struct AppInit {
 pub enum CallState {
     #[default]
     Idle,
-    Calling { peer_id: PeerId },
-    Ringing { peer_id: PeerId, session_id: [u8; 32] },
-    Active  { peer_id: PeerId },
+    Calling  { peer_id: PeerId },
+    Ringing  { peer_id: PeerId, session_id: [u8; 32] },
+    Active   { peer_id: PeerId },
 }
 
 impl CallState {
@@ -67,16 +68,13 @@ impl CallState {
 #[allow(dead_code)]
 pub enum AppMsg {
     ConfirmBirth {
-        year: i32,
-        month: u32,
-        day: u32,
-        hour: u32,
-        minute: u32,
-        lat: f64,
-        lon: f64,
+        year: i32, month: u32, day: u32,
+        hour: u32, minute: u32,
+        lat: f64, lon: f64,
     },
     SetupError(String),
-    ConnectPeer(PeerId),
+    /// User tapped a peer row — connect (if needed) then open their page.
+    OpenPeer(PeerId),
     CallPeer(PeerId),
     AcceptCall,
     RejectCall,
@@ -89,25 +87,32 @@ pub struct AppModel {
     on_setup_page: bool,
     chart: Option<Chart>,
 
-    /// Shared store — Rc so GTK signal closures can borrow it.
     store: Rc<RefCell<ZodiaStore>>,
 
     network: Option<ZodiaNetwork>,
-    peer_count: usize,
     node_id_text: String,
-    peers: FactoryVecDeque<PeerEntry>,
+
+    /// Peers seen on the gossip swarm (Tier-0), ordered by discovery time.
+    discovered_peers: Vec<DiscoveredPeer>,
+    /// Peers whose Tier-1 exchange has completed.
+    connected_peers: HashMap<PeerId, Tier1Blob>,
+    /// Active QUIC channels — presence means currently online.
+    connected_channels: HashMap<PeerId, DirectChannel>,
+
+    /// Incremented whenever the peer list content changes so `update_view`
+    /// knows when to rebuild the GTK rows.
+    peer_list_generation: u64,
+
+    /// Peers the user has explicitly tapped; pages pushed once Tier-1 completes.
+    /// Uses `RefCell` for interior mutability inside `update_view (&self)`.
+    pending_push_queue: RefCell<Vec<PeerId>>,
+
     config: LocalConfig,
     setup_error: String,
 
-    /// Identity keypair — signs submitted interpretations and affirmations.
     identity: Rc<IdentityKeypair>,
 
     call_state: CallState,
-    connected_channels: HashMap<PeerId, DirectChannel>,
-
-    /// Peers whose Tier-1 exchange has completed — drives peer page creation.
-    connected_peers: HashMap<PeerId, Tier1Blob>,
-
     active_audio: Option<AudioSession>,
 }
 
@@ -118,24 +123,24 @@ pub struct AppWidgets {
     outer_stack: gtk::Stack,
     setup_status: gtk::Label,
 
-    /// Container for the natal `AspectView` — lazily populated.
     chart_container: gtk::Box,
-    /// Container for the transit `AspectView` — lazily populated.
     sky_container: gtk::Box,
 
+    /// The `NavigationView` that lives *inside* the Peers tab.
+    /// Peer detail pages are pushed onto this — the tab bar always stays visible.
+    peers_nav: adw::NavigationView,
+    /// The box whose children are rebuilt whenever `peer_list_generation` changes.
+    peers_content: gtk::Box,
+    /// Generation of the peer list we last rendered.
+    peer_list_shown_gen: u64,
+
     peers_page: adw::ViewStackPage,
-    peer_count_label: gtk::Label,
     node_id_label: gtk::Label,
 
     call_bar: gtk::Box,
     call_status: gtk::Label,
     accept_btn: gtk::Button,
     hangup_btn: gtk::Button,
-
-    /// NavigationView holding the main page + pushed peer pages.
-    nav_view: adw::NavigationView,
-    /// Peers already pushed as navigation pages (avoids duplicates).
-    shown_peers: HashSet<PeerId>,
 }
 
 // ── async component ───────────────────────────────────────────────────────────
@@ -157,13 +162,6 @@ impl AsyncComponent for AppModel {
         root: Self::Root,
         sender: AsyncComponentSender<Self>,
     ) -> AsyncComponentParts<Self> {
-        let peers = FactoryVecDeque::builder()
-            .launch(gtk::ListBox::new())
-            .forward(sender.input_sender(), |msg| match msg {
-                PeerOutput::Connect(id) => AppMsg::ConnectPeer(id),
-                PeerOutput::Call(id)    => AppMsg::CallPeer(id),
-            });
-
         let identity = Rc::new(IdentityKeypair::from_seed(init.config.identity.seed()));
         let has_birth = init.config.birth.is_some();
         let store = Rc::new(RefCell::new(init.store));
@@ -173,15 +171,16 @@ impl AsyncComponent for AppModel {
             chart: None,
             store,
             network: None,
-            peer_count: 0,
             node_id_text: String::new(),
-            peers,
+            discovered_peers: Vec::new(),
+            connected_peers: HashMap::new(),
+            connected_channels: HashMap::new(),
+            peer_list_generation: 0,
+            pending_push_queue: RefCell::new(Vec::new()),
             config: init.config,
             setup_error: String::new(),
             identity,
             call_state: CallState::Idle,
-            connected_channels: HashMap::new(),
-            connected_peers: HashMap::new(),
             active_audio: None,
         };
 
@@ -223,17 +222,14 @@ impl AsyncComponent for AppModel {
                     ));
                     return;
                 }
-                let jdn = gregorian_to_jdn(
-                    year, month, day,
-                    hour as f64 + minute as f64 / 60.0,
-                );
+                let jdn = gregorian_to_jdn(year, month, day,
+                    hour as f64 + minute as f64 / 60.0);
                 let birth = birth_from_coords(jdn, lat, lon, 9);
 
                 if let Err(e) = self.config.save_birth(birth.clone()) {
                     sender.input(AppMsg::SetupError(e.to_string()));
                     return;
                 }
-
                 match Chart::compute(birth.clone()) {
                     Ok(chart) => { self.chart = Some(chart); }
                     Err(e) => {
@@ -241,7 +237,6 @@ impl AsyncComponent for AppModel {
                         return;
                     }
                 }
-
                 if let Some((net, rx)) = try_spawn_network(&self.config, &birth).await {
                     self.node_id_text = {
                         let nid = net.node_id();
@@ -251,7 +246,6 @@ impl AsyncComponent for AppModel {
                     self.network = Some(net);
                     start_network_command(&sender, rx);
                 }
-
                 self.setup_error.clear();
                 self.on_setup_page = false;
             }
@@ -260,30 +254,34 @@ impl AsyncComponent for AppModel {
                 self.setup_error = msg;
             }
 
-            AppMsg::ConnectPeer(peer_id) => {
+            AppMsg::OpenPeer(peer_id) => {
+                // Queue a navigation push — fulfilled in update_view once connected.
+                self.pending_push_queue.borrow_mut().push(peer_id.clone());
+
+                // Start connection if we don't already have one.
+                if self.connected_peers.contains_key(&peer_id) {
+                    return; // already connected, update_view will push the page
+                }
                 if let Some(net) = &self.network {
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
                             let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                             info!(peer = %peer_hex, "tier-1 channel opened");
-
                             if let Some(our_blob) = make_tier1_blob(&self.config) {
                                 match channel.exchange_tier1(&our_blob).await {
                                     Ok(their_blob) => {
                                         info!(peer = %peer_hex, "tier-1 exchange complete");
-                                        // Sync interpretations for their keys before
-                                        // handing the channel to the message loop.
                                         do_interp_sync(
                                             &channel, &their_blob,
                                             self.chart.as_ref(), &self.store,
                                             &self.identity, &peer_hex,
                                         ).await;
                                         self.connected_peers.insert(peer_id.clone(), their_blob);
+                                        self.peer_list_generation += 1;
                                     }
                                     Err(e) => warn!("tier-1 exchange: {e}"),
                                 }
                             }
-
                             net.accept_channel(peer_id.clone(), channel.clone());
                             self.connected_channels.insert(peer_id, channel);
                         }
@@ -358,30 +356,15 @@ impl AsyncComponent for AppModel {
     ) {
         match event {
             ZodiaNetEvent::PeerDiscovered { peer_id, blob } => {
-                let approx = self
-                    .chart
-                    .as_ref()
+                let approx = self.chart.as_ref()
                     .map(|c| approximate_aspects(blob.solar_month, &c.positions))
                     .unwrap_or_default();
-
-                self.peers.guard().push_back(PeerInit {
-                    peer_id,
-                    geohash_prefix: blob.geohash_prefix,
-                    solar_month: blob.solar_month,
-                    approximate_aspects: approx,
-                });
-                self.peer_count += 1;
+                self.discovered_peers.push(DiscoveredPeer::from_blob(peer_id, &blob, approx));
+                self.peer_list_generation += 1;
             }
             ZodiaNetEvent::PeerLeft { peer_id } => {
-                let maybe_idx = self
-                    .peers
-                    .guard()
-                    .iter()
-                    .position(|p| p.peer_id == peer_id);
-                if let Some(i) = maybe_idx {
-                    self.peers.guard().remove(i);
-                    self.peer_count = self.peer_count.saturating_sub(1);
-                }
+                self.discovered_peers.retain(|p| p.peer_id != peer_id);
+                self.peer_list_generation += 1;
             }
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 if let Some(net) = &self.network {
@@ -396,6 +379,7 @@ impl AsyncComponent for AppModel {
                                     &self.identity, &peer_hex,
                                 ).await;
                                 self.connected_peers.insert(peer_id.clone(), their_blob);
+                                self.peer_list_generation += 1;
                             }
                             Err(e) => warn!("tier-1 exchange (incoming): {e}"),
                         }
@@ -423,14 +407,15 @@ impl AsyncComponent for AppModel {
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, sender: AsyncComponentSender<Self>) {
-        if self.on_setup_page {
-            widgets.outer_stack.set_visible_child_name("setup");
-        } else {
-            widgets.outer_stack.set_visible_child_name("main");
-        }
+        // ── setup / main stack ────────────────────────────────────────────────
+
+        widgets.outer_stack.set_visible_child_name(
+            if self.on_setup_page { "setup" } else { "main" }
+        );
         widgets.setup_status.set_text(&self.setup_error);
 
-        // Lazily populate aspect views the first time the main page is shown.
+        // ── lazily populate aspect views ──────────────────────────────────────
+
         if !self.on_setup_page && widgets.chart_container.first_child().is_none() {
             if let Some(chart) = &self.chart {
                 let nav = AspectView::natal(
@@ -454,40 +439,46 @@ impl AsyncComponent for AppModel {
             }
         }
 
-        // Push a navigation page for each newly connected peer.
-        for (peer_id, their_blob) in &self.connected_peers {
-            if !widgets.shown_peers.contains(peer_id) {
-                if let Some(chart) = &self.chart {
-                    let page = peer_page::build_peer_page(
-                        peer_id,
-                        their_blob,
-                        chart,
-                        Rc::clone(&self.store),
-                        Rc::clone(&self.identity),
-                        &sender,
-                    );
-                    widgets.nav_view.push(&page);
-                    widgets.shown_peers.insert(peer_id.clone());
+        // ── rebuild peer list when content changes ────────────────────────────
+
+        if self.peer_list_generation != widgets.peer_list_shown_gen {
+            rebuild_peer_list(widgets, self, &sender);
+            widgets.peer_list_shown_gen = self.peer_list_generation;
+            widgets.peers_page.set_needs_attention(!self.discovered_peers.is_empty());
+        }
+
+        // ── push peer pages for OpenPeer requests ─────────────────────────────
+
+        let pending: Vec<PeerId> = self.pending_push_queue.borrow_mut().drain(..).collect();
+        for peer_id in pending {
+            if let Some(their_blob) = self.connected_peers.get(&peer_id) {
+                let tag = hex::encode_upper(&peer_id.0[..4]);
+                // Only push if not already on the navigation stack.
+                if widgets.peers_nav.find_page(&tag).is_none() {
+                    if let Some(chart) = &self.chart {
+                        let page = peer_page::build_peer_page(
+                            &peer_id, their_blob, chart,
+                            Rc::clone(&self.store),
+                            Rc::clone(&self.identity),
+                            &sender,
+                        );
+                        page.set_tag(Some(&tag));
+                        widgets.peers_nav.push(&page);
+                    }
                 }
+            } else {
+                // Not connected yet — re-queue, will be retried on next update.
+                self.pending_push_queue.borrow_mut().push(peer_id);
             }
         }
 
-        // Peer count + badge
-        let peer_text = if self.peer_count == 0 {
-            "Scanning for peers…".to_string()
-        } else {
-            format!(
-                "{} peer{} online",
-                self.peer_count,
-                if self.peer_count == 1 { "" } else { "s" }
-            )
-        };
-        widgets.peer_count_label.set_text(&peer_text);
-        widgets.peers_page.set_needs_attention(self.peer_count > 0);
+        // ── node ID label ─────────────────────────────────────────────────────
 
         if !self.node_id_text.is_empty() {
             widgets.node_id_label.set_text(&format!("Node ···{}", self.node_id_text));
         }
+
+        // ── call bar ─────────────────────────────────────────────────────────
 
         match &self.call_state {
             CallState::Idle => {
@@ -521,6 +512,97 @@ impl AsyncComponent for AppModel {
     }
 }
 
+// ── peer list widget builder ──────────────────────────────────────────────────
+
+/// Clear and rebuild the peer list groups inside `peers_content`.
+fn rebuild_peer_list(
+    widgets: &mut AppWidgets,
+    model: &AppModel,
+    sender: &AsyncComponentSender<AppModel>,
+) {
+    // Remove all existing children.
+    while let Some(child) = widgets.peers_content.first_child() {
+        widgets.peers_content.remove(&child);
+    }
+
+    // ── Connected section ─────────────────────────────────────────────────────
+
+    if !model.connected_peers.is_empty() {
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Connected");
+
+        let mut sorted: Vec<&PeerId> = model.connected_peers.keys().collect();
+        sorted.sort_by_key(|id| hex::encode_upper(&id.0[..4]));
+
+        for peer_id in sorted {
+            let their_blob = &model.connected_peers[peer_id];
+            let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+            let solar_month = zodia_core::solar_month(their_blob.birth.jdn);
+            let glyph = sign_glyph(solar_month);
+            let online = model.connected_channels.contains_key(peer_id);
+
+            let row = adw::ActionRow::new();
+            row.set_title(&format!("{glyph}  ···{peer_hex}"));
+            row.set_subtitle(if online { "● Online" } else { "○ Last seen" });
+            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            row.set_activatable(true);
+
+            let pid = peer_id.clone();
+            let s = sender.clone();
+            row.connect_activated(move |_| s.input(AppMsg::OpenPeer(pid.clone())));
+            group.add(&row);
+        }
+        widgets.peers_content.append(&group);
+    }
+
+    // ── Online section ────────────────────────────────────────────────────────
+
+    let online: Vec<&DiscoveredPeer> = model.discovered_peers.iter()
+        .filter(|p| !model.connected_peers.contains_key(&p.peer_id))
+        .collect();
+
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Online");
+
+    if online.is_empty() && model.connected_peers.is_empty() {
+        let row = adw::ActionRow::new();
+        row.set_title("Scanning for peers…");
+        row.set_subtitle(
+            "Other Zodia users in your astrological neighbourhood will appear here."
+        );
+        group.add(&row);
+    } else if online.is_empty() {
+        let row = adw::ActionRow::new();
+        row.set_title("No other peers visible right now");
+        group.add(&row);
+    } else {
+        let n = online.len();
+        group.set_description(Some(&format!(
+            "{n} peer{} nearby",
+            if n == 1 { "" } else { "s" }
+        )));
+        for dp in &online {
+            let glyph = sign_glyph(dp.solar_month);
+            let aspects = if dp.approximate_aspects.is_empty() {
+                "—".to_string()
+            } else {
+                dp.approximate_aspects.join("  ")
+            };
+            let row = adw::ActionRow::new();
+            row.set_title(&format!("{glyph}  {aspects}"));
+            row.set_subtitle(&dp.geohash_prefix);
+            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            row.set_activatable(true);
+
+            let pid = dp.peer_id.clone();
+            let s = sender.clone();
+            row.connect_activated(move |_| s.input(AppMsg::OpenPeer(pid.clone())));
+            group.add(&row);
+        }
+    }
+    widgets.peers_content.append(&group);
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn try_spawn_network(
@@ -530,10 +612,7 @@ async fn try_spawn_network(
     let signing_key = config.identity.signing_key().clone();
     match ZodiaNetwork::spawn(NetworkConfig { signing_key }, birth).await {
         Ok(pair) => Some(pair),
-        Err(e) => {
-            error!("network spawn failed: {e}");
-            None
-        }
+        Err(e) => { error!("network spawn failed: {e}"); None }
     }
 }
 
@@ -544,23 +623,112 @@ fn start_network_command(
     sender.command(|out, _shutdown| async move {
         let mut rx: Receiver<ZodiaNetEvent> = rx;
         while let Some(ev) = rx.recv().await {
-            if out.send(ev).is_err() {
-                break;
-            }
+            if out.send(ev).is_err() { break; }
         }
     });
 }
 
-/// Construct our Tier-1 blob with exact birth data.
-///
-/// Prekey/ephemeral fields are zeroed — crypto key exchange is deferred
-/// until message support is added (see zodia-crypto).
 fn make_tier1_blob(config: &LocalConfig) -> Option<Tier1Blob> {
     config.birth.as_ref().map(|birth| Tier1Blob {
         birth: birth.clone(),
-        prekey:   [0u8; 32], // TODO: real X25519 prekey
-        ephemeral: [0u8; 32], // TODO: real ephemeral key for X3DH
+        prekey:    [0u8; 32],
+        ephemeral: [0u8; 32],
     })
+}
+
+// ── interpretation sync ───────────────────────────────────────────────────────
+
+async fn do_interp_sync(
+    channel: &DirectChannel,
+    their_blob: &Tier1Blob,
+    our_chart: Option<&Chart>,
+    store: &Rc<RefCell<ZodiaStore>>,
+    identity: &Rc<IdentityKeypair>,
+    peer_hex: &str,
+) {
+    let outgoing = collect_entries_for_peer(their_blob, our_chart, store, identity);
+    match channel.exchange_interps(&outgoing).await {
+        Ok(received) => {
+            let n = import_interps(&received, store, peer_hex);
+            if n > 0 {
+                info!(peer = %peer_hex, "imported {n} interpretations from peer");
+            }
+        }
+        Err(e) => warn!(peer = %peer_hex, "interp sync failed: {e}"),
+    }
+}
+
+fn collect_entries_for_peer(
+    their_blob: &Tier1Blob,
+    our_chart: Option<&Chart>,
+    store: &Rc<RefCell<ZodiaStore>>,
+    _identity: &Rc<IdentityKeypair>,
+) -> Vec<InterpEntry> {
+    let their_chart = Chart::compute(their_blob.birth.clone()).ok();
+    let mut key_sigs: Vec<String> = Vec::new();
+
+    if let Some(ref chart) = their_chart {
+        for aspect in chart.natal_aspects() {
+            key_sigs.push(InterpKey::from_natal(&aspect).to_sig());
+        }
+    }
+    if let (Some(ref their_chart), Some(ours)) = (&their_chart, our_chart) {
+        for aspect in compute_synastry(&ours.positions, &their_chart.positions) {
+            key_sigs.push(InterpKey::from_synastry(&aspect).to_sig());
+        }
+    }
+
+    let refs: Vec<&str> = key_sigs.iter().map(|s| s.as_str()).collect();
+    store.borrow().community_for_keys(&refs, 100)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| InterpEntry {
+            interp_key: e.interp_key,
+            body: e.body,
+            author_pk: e.author_pk,
+            author_sig: e.author_sig.to_vec(),
+        })
+        .collect()
+}
+
+fn import_interps(
+    entries: &[InterpEntry],
+    store: &Rc<RefCell<ZodiaStore>>,
+    peer_hex: &str,
+) -> usize {
+    let mut count = 0;
+    for entry in entries {
+        let Ok(sig_arr): Result<[u8; 64], _> = entry.author_sig.as_slice().try_into() else {
+            warn!(peer = %peer_hex, key = %entry.interp_key, "invalid sig length, skipping");
+            continue;
+        };
+        match store.borrow().insert_received(
+            &entry.interp_key, &entry.body, &entry.author_pk, &sig_arr,
+        ) {
+            Ok(true)  => count += 1,
+            Ok(false) => {}
+            Err(StoreError::InvalidSignature) => {
+                warn!(peer = %peer_hex, key = %entry.interp_key,
+                      "received interpretation with invalid signature — discarded");
+            }
+            Err(e) => warn!(peer = %peer_hex, "interpretation import: {e}"),
+        }
+    }
+    count
+}
+
+// ── session ID ────────────────────────────────────────────────────────────────
+
+fn new_session_id(peer_id: &PeerId) -> [u8; 32] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&peer_id.0);
+    hasher.update(&ts.to_le_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 // ── widget construction ───────────────────────────────────────────────────────
@@ -579,14 +747,16 @@ fn build_widgets(
     let (setup_page, setup_status) = build_setup_page(sender);
     outer_stack.add_named(&setup_page, Some("setup"));
 
-    let (nav_view, chart_container, sky_container, peers_page, peer_count_label,
-         node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn) =
-        build_main_page(model, sender);
-    outer_stack.add_named(&nav_view, Some("main"));
+    let (
+        main_view,
+        chart_container, sky_container,
+        peers_nav, peers_content,
+        peers_page, node_id_label,
+        call_bar, call_status, accept_btn, hangup_btn,
+    ) = build_main_page(model, sender);
+    outer_stack.add_named(&main_view, Some("main"));
 
-    peers_scrolled.set_child(Some(model.peers.widget()));
-
-    // For returning users with an existing chart, populate aspect views now.
+    // Populate aspect views for returning users with an existing chart.
     if let Some(chart) = &model.chart {
         let nav = AspectView::natal(
             aspect_list::natal_items(&chart.natal_aspects()),
@@ -608,12 +778,9 @@ fn build_widgets(
         }
     }
 
-    if model.on_setup_page {
-        outer_stack.set_visible_child_name("setup");
-    } else {
-        outer_stack.set_visible_child_name("main");
-    }
-
+    outer_stack.set_visible_child_name(
+        if model.on_setup_page { "setup" } else { "main" }
+    );
     root.set_content(Some(&outer_stack));
 
     AppWidgets {
@@ -621,15 +788,15 @@ fn build_widgets(
         setup_status,
         chart_container,
         sky_container,
+        peers_nav,
+        peers_content,
+        peer_list_shown_gen: u64::MAX, // force initial build
         peers_page,
-        peer_count_label,
         node_id_label,
         call_bar,
         call_status,
         accept_btn,
         hangup_btn,
-        nav_view,
-        shown_peers: HashSet::new(),
     }
 }
 
@@ -766,12 +933,12 @@ fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
-    adw::NavigationView,
-    gtk::Box, gtk::Box,               // chart_container, sky_container
-    adw::ViewStackPage, gtk::Label,   // peers_page, peer_count_label
-    gtk::Label,                       // node_id_label
-    gtk::ScrolledWindow,              // peers_scrolled
-    gtk::Box, gtk::Label, gtk::Button, gtk::Button, // call bar widgets
+    adw::ToolbarView,
+    gtk::Box, gtk::Box,                     // chart_container, sky_container
+    adw::NavigationView, gtk::Box,          // peers_nav, peers_content
+    adw::ViewStackPage,                     // peers_page (for badge)
+    gtk::Label,                             // node_id_label
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button, // call bar
 ) {
     let toolbar_view = adw::ToolbarView::new();
     let view_stack = adw::ViewStack::new();
@@ -779,7 +946,6 @@ fn build_main_page(
     // ── Chart tab ─────────────────────────────────────────────────────────────
     let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
     chart_container.set_vexpand(true);
-
     let chart_page = view_stack.add_titled(&chart_container, Some("chart"), "Chart");
     chart_page.set_icon_name(Some("weather-clear-symbolic"));
     let _ = chart_page;
@@ -787,43 +953,35 @@ fn build_main_page(
     // ── Sky tab ───────────────────────────────────────────────────────────────
     let sky_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sky_container.set_vexpand(true);
-
     let sky_page = view_stack.add_titled(&sky_container, Some("sky"), "Sky");
     sky_page.set_icon_name(Some("night-light-symbolic"));
     let _ = sky_page;
 
-    // ── Peers tab ─────────────────────────────────────────────────────────────
-    let peers_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // ── Peers tab — has its own NavigationView for peer detail pages ──────────
+    let peers_nav = adw::NavigationView::new();
+    peers_nav.set_vexpand(true);
 
-    let peer_count_label = gtk::Label::new(Some("Scanning for peers…"));
-    peer_count_label.add_css_class("dim-label");
-    peer_count_label.add_css_class("caption");
-    peer_count_label.set_halign(gtk::Align::Start);
-    peer_count_label.set_margin_start(12);
-    peer_count_label.set_margin_end(12);
-    peer_count_label.set_margin_top(10);
-    peer_count_label.set_margin_bottom(4);
-    peers_container.append(&peer_count_label);
+    // Root page: a scrolled box rebuilt dynamically as peers come and go.
+    let peers_scroll = gtk::ScrolledWindow::new();
+    peers_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    peers_scroll.set_vexpand(true);
 
-    let hint = gtk::Label::new(Some(
-        "All online Zodia peers appear below.\n\
-         Aspect glyphs show their ☉ resonance with your natal chart.",
-    ));
-    hint.add_css_class("caption");
-    hint.add_css_class("dim-label");
-    hint.set_wrap(true);
-    hint.set_halign(gtk::Align::Start);
-    hint.set_margin_start(12);
-    hint.set_margin_end(12);
-    hint.set_margin_bottom(8);
-    peers_container.append(&hint);
+    let peers_clamp = adw::Clamp::new();
+    peers_clamp.set_maximum_size(720);
+    peers_clamp.set_margin_top(8);
+    peers_clamp.set_margin_bottom(8);
+    peers_clamp.set_margin_start(12);
+    peers_clamp.set_margin_end(12);
 
-    let peers_scrolled = gtk::ScrolledWindow::new();
-    peers_scrolled.set_vexpand(true);
-    peers_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
-    peers_container.append(&peers_scrolled);
+    let peers_content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    peers_clamp.set_child(Some(&peers_content));
+    peers_scroll.set_child(Some(&peers_clamp));
 
-    let peers_page = view_stack.add_titled(&peers_container, Some("peers"), "Peers");
+    let peers_root = adw::NavigationPage::new(&peers_scroll, "Peers");
+    peers_root.set_tag(Some("peers-root"));
+    peers_nav.push(&peers_root);
+
+    let peers_page = view_stack.add_titled(&peers_nav, Some("peers"), "Peers");
     peers_page.set_icon_name(Some("system-users-symbolic"));
 
     toolbar_view.set_content(Some(&view_stack));
@@ -879,120 +1037,13 @@ fn build_main_page(
 
     toolbar_view.add_bottom_bar(&call_bar);
 
-    // Wrap in NavigationView so peer pages can be pushed onto the stack.
-    let nav_view = adw::NavigationView::new();
-    nav_view.push(&adw::NavigationPage::new(&toolbar_view, "Zodia"));
-
     let _ = model;
 
-    (nav_view, chart_container, sky_container, peers_page, peer_count_label,
-     node_id_label, peers_scrolled, call_bar, call_status, accept_btn, hangup_btn)
-}
-
-// ── interpretation sync ───────────────────────────────────────────────────────
-
-/// Run a mutual interpretation exchange over `channel`.
-///
-/// We collect our top signed community entries for the peer's relevant keys,
-/// send them, receive theirs, and import any we haven't seen.  Must be called
-/// before `accept_channel` so the streams aren't grabbed by the message loop.
-async fn do_interp_sync(
-    channel: &DirectChannel,
-    their_blob: &Tier1Blob,
-    our_chart: Option<&Chart>,
-    store: &Rc<RefCell<ZodiaStore>>,
-    identity: &Rc<IdentityKeypair>,
-    peer_hex: &str,
-) {
-    let outgoing = collect_entries_for_peer(their_blob, our_chart, store, identity);
-    match channel.exchange_interps(&outgoing).await {
-        Ok(received) => {
-            let n = import_interps(&received, store, peer_hex);
-            if n > 0 {
-                info!(peer = %peer_hex, "imported {n} interpretations from peer");
-            }
-        }
-        Err(e) => warn!(peer = %peer_hex, "interp sync failed: {e}"),
-    }
-}
-
-/// Build the list of our signed community entries for the keys a peer cares
-/// about: their natal aspect keys plus synastry keys between our charts.
-fn collect_entries_for_peer(
-    their_blob: &Tier1Blob,
-    our_chart: Option<&Chart>,
-    store: &Rc<RefCell<ZodiaStore>>,
-    _identity: &Rc<IdentityKeypair>,
-) -> Vec<InterpEntry> {
-    let their_chart = Chart::compute(their_blob.birth.clone()).ok();
-    let mut key_sigs: Vec<String> = Vec::new();
-
-    if let Some(ref chart) = their_chart {
-        for aspect in chart.natal_aspects() {
-            key_sigs.push(InterpKey::from_natal(&aspect).to_sig());
-        }
-    }
-    if let (Some(ref their_chart), Some(ours)) = (&their_chart, our_chart) {
-        for aspect in compute_synastry(&ours.positions, &their_chart.positions) {
-            key_sigs.push(InterpKey::from_synastry(&aspect).to_sig());
-        }
-    }
-
-    let refs: Vec<&str> = key_sigs.iter().map(|s| s.as_str()).collect();
-    store
-        .borrow()
-        .community_for_keys(&refs, 100)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| InterpEntry {
-            interp_key: e.interp_key,
-            body: e.body,
-            author_pk: e.author_pk,
-            author_sig: e.author_sig.to_vec(),
-        })
-        .collect()
-}
-
-/// Verify and insert received interpretations.  Returns the number newly stored.
-fn import_interps(
-    entries: &[InterpEntry],
-    store: &Rc<RefCell<ZodiaStore>>,
-    peer_hex: &str,
-) -> usize {
-    let mut count = 0;
-    for entry in entries {
-        let Ok(sig_arr): Result<[u8; 64], _> = entry.author_sig.as_slice().try_into() else {
-            warn!(peer = %peer_hex, key = %entry.interp_key, "invalid sig length, skipping");
-            continue;
-        };
-        match store.borrow().insert_received(
-            &entry.interp_key,
-            &entry.body,
-            &entry.author_pk,
-            &sig_arr,
-        ) {
-            Ok(true)  => count += 1,
-            Ok(false) => {}
-            Err(StoreError::InvalidSignature) => {
-                warn!(peer = %peer_hex, key = %entry.interp_key,
-                      "received interpretation with invalid signature — discarded");
-            }
-            Err(e) => warn!(peer = %peer_hex, "interpretation import: {e}"),
-        }
-    }
-    count
-}
-
-// ── session ID ────────────────────────────────────────────────────────────────
-
-fn new_session_id(peer_id: &PeerId) -> [u8; 32] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&peer_id.0);
-    hasher.update(&ts.to_le_bytes());
-    *hasher.finalize().as_bytes()
+    (
+        toolbar_view,
+        chart_container, sky_container,
+        peers_nav, peers_content,
+        peers_page, node_id_label,
+        call_bar, call_status, accept_btn, hangup_btn,
+    )
 }

@@ -1,139 +1,28 @@
-//! PeerEntry — a single row in the peer discovery list.
+//! Discovered peer data — the plain structs behind the peer list UI.
 //!
-//! Implemented as a `FactoryComponent` so `FactoryVecDeque` can manage the
-//! `gtk::ListBox` items reactively.
+//! The actual GTK widgets are built dynamically in `app::update_view`
+//! rather than through the relm4 factory machinery, so this module is
+//! intentionally light — just the data types.
 
-use gtk::prelude::*;
-use relm4::prelude::*;
-use zodia_net::PeerId;
-use crate::util::sign_glyph;
+use zodia_net::{PeerId, Tier0Blob};
 
-// ── init / output types ───────────────────────────────────────────────────────
-
-/// Data required to create a `PeerEntry`.
-pub struct PeerInit {
+/// A single peer seen on the gossip swarm (Tier-0 announce received).
+#[derive(Debug, Clone)]
+pub struct DiscoveredPeer {
     pub peer_id: PeerId,
-    pub geohash_prefix: String,
     pub solar_month: u8,
-    /// Pre-computed glyph strings, e.g. `["☉△♀", "☉□♄"]`
+    pub geohash_prefix: String,
+    /// Pre-computed approximate aspect glyph strings against our natal chart.
     pub approximate_aspects: Vec<String>,
 }
 
-/// Messages sent from a `PeerEntry` to its parent `AppModel`.
-#[derive(Debug)]
-pub enum PeerOutput {
-    Connect(PeerId),
-    Call(PeerId),
-}
-
-// ── model ─────────────────────────────────────────────────────────────────────
-
-pub struct PeerEntry {
-    pub peer_id: PeerId,
-    aspects_line: String,
-    sun_sign: String,
-    region: String,
-}
-
-// ── factory component ─────────────────────────────────────────────────────────
-
-#[relm4::factory(pub)]
-impl FactoryComponent for PeerEntry {
-    type Init = PeerInit;
-    type Input = ();
-    type Output = PeerOutput;
-    type CommandOutput = ();
-    type ParentWidget = gtk::ListBox;
-
-    view! {
-        gtk::ListBoxRow {
-            set_selectable: false,
-            set_activatable: false,
-
-            gtk::Box {
-                set_orientation: gtk::Orientation::Horizontal,
-                set_spacing: 12,
-                set_margin_top: 10,
-                set_margin_bottom: 10,
-                set_margin_start: 14,
-                set_margin_end: 14,
-
-                // left: symbol column
-                gtk::Label {
-                    set_label: "◉",
-                    set_css_classes: &["peer-dot"],
-                    set_valign: gtk::Align::Center,
-                },
-
-                // centre: aspect glyphs + meta
-                gtk::Box {
-                    set_orientation: gtk::Orientation::Vertical,
-                    set_hexpand: true,
-                    set_spacing: 2,
-                    set_valign: gtk::Align::Center,
-
-                    gtk::Label {
-                        set_halign: gtk::Align::Start,
-                        set_ellipsize: gtk::pango::EllipsizeMode::End,
-                        set_css_classes: &["aspects-line"],
-                        #[watch]
-                        set_label: &self.aspects_line,
-                    },
-
-                    gtk::Label {
-                        set_halign: gtk::Align::Start,
-                        set_css_classes: &["peer-meta"],
-                        #[watch]
-                        set_label: &format!("☉ {}  ·  {}", self.sun_sign, self.region),
-                    },
-                },
-
-                // right: action buttons
-                gtk::Box {
-                    set_orientation: gtk::Orientation::Horizontal,
-                    set_spacing: 6,
-                    set_valign: gtk::Align::Center,
-
-                    gtk::Button {
-                        set_label: "Connect",
-                        set_css_classes: &["connect-btn"],
-                        connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
-                            sender.output(PeerOutput::Connect(peer_id.clone())).ok();
-                        },
-                    },
-
-                    gtk::Button {
-                        set_label: "☎",
-                        set_tooltip_text: Some("Voice call"),
-                        set_css_classes: &["call-btn"],
-                        connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
-                            sender.output(PeerOutput::Call(peer_id.clone())).ok();
-                        },
-                    },
-                },
-            }
+impl DiscoveredPeer {
+    pub fn from_blob(peer_id: PeerId, blob: &Tier0Blob, approx: Vec<String>) -> Self {
+        Self {
+            peer_id,
+            solar_month: blob.solar_month,
+            geohash_prefix: blob.geohash_prefix.clone(),
+            approximate_aspects: approx,
         }
     }
-
-    fn init_model(init: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
-        let aspects_line = if init.approximate_aspects.is_empty() {
-            "— no close aspects detected".to_string()
-        } else {
-            init.approximate_aspects.join("  ")
-        };
-        PeerEntry {
-            peer_id: init.peer_id,
-            aspects_line,
-            sun_sign: format!("{} {}", sign_glyph(init.solar_month), {
-                const NAMES: [&str; 12] = [
-                    "Aries","Taurus","Gemini","Cancer","Leo","Virgo",
-                    "Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces",
-                ];
-                NAMES.get(init.solar_month as usize % 12).copied().unwrap_or("?")
-            }),
-            region: format!("~{}", init.geohash_prefix),
-        }
-    }
-
-    fn update(&mut self, _msg: (), _sender: FactorySender<Self>) {}
 }
