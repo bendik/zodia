@@ -19,11 +19,13 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
 use p2panda_core::PrivateKey as PandaKey;
+use p2panda_net::address_book::report::ConnectionOutcome;
 use p2panda_net::gossip::{GossipHandle, GossipSubscription};
 use p2panda_net::iroh_mdns::{MdnsDiscovery, MdnsDiscoveryMode};
 use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 use tracing::{debug, info, instrument, warn};
 use zodia_core::{BirthData, compute_positions, topic_key_global, topic_keys_for_chart};
 
@@ -69,7 +71,7 @@ pub struct ZodiaNetwork {
     my_blob: Tier0Blob,
     event_tx: mpsc::Sender<ZodiaNetEvent>,
     // Keep discovery components alive (their drop = shutdown).
-    _address_book: AddressBook,
+    address_book: AddressBook,
     _mdns: MdnsDiscovery,
     _discovery: Discovery,
 }
@@ -169,7 +171,7 @@ impl ZodiaNetwork {
             endpoint,
             my_blob,
             event_tx,
-            _address_book: address_book,
+            address_book,
             _mdns: mdns,
             _discovery: discovery,
         };
@@ -196,19 +198,40 @@ impl ZodiaNetwork {
 
     /// Open a direct QUIC connection to `peer` for the Tier-1 handshake.
     ///
-    /// Both sides then use `channel::tier1_exchange` to exchange `Tier1Blob`s
-    /// and derive the shared session key via X3DH.
+    /// Retries up to 3 times with short delays to recover from transient path
+    /// failures and stale address-book entries.  On success the address book is
+    /// explicitly marked `Successful` so subsequent attempts are not blocked by
+    /// a stale timestamp left over from the previous failure.
     #[instrument(skip(self), fields(peer = %hex::encode_upper(&peer.0[..4])))]
     pub async fn connect_peer(&self, peer: &PeerId) -> Result<crate::channel::DirectChannel, NetworkError> {
-        debug!("opening tier-1 QUIC connection");
+        const DELAYS_MS: [u64; 2] = [1_000, 3_000];
         let node_id = peer.to_node_id();
-        let conn = self
-            .endpoint
-            .connect(node_id, TIER1_PROTOCOL)
-            .await
-            .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
-        info!("tier-1 channel open");
-        Ok(crate::channel::DirectChannel::from_connection(conn))
+        let mut last_err = String::new();
+
+        for attempt in 0..3u8 {
+            if attempt > 0 {
+                let delay = DELAYS_MS[(attempt - 1) as usize];
+                debug!(attempt, delay_ms = delay, "retrying tier-1 connection");
+                sleep(Duration::from_millis(delay)).await;
+            }
+            debug!(attempt, "opening tier-1 QUIC connection");
+            match self.endpoint.connect(node_id, TIER1_PROTOCOL).await {
+                Ok(conn) => {
+                    // Clear any stale mark so the next connect attempt is not
+                    // blocked by a previously recorded failure.
+                    let _ = self.address_book
+                        .report(node_id, ConnectionOutcome::Successful)
+                        .await;
+                    info!(attempt, "tier-1 channel open");
+                    return Ok(crate::channel::DirectChannel::from_connection(conn));
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    warn!(attempt, err = %last_err, "tier-1 connect failed");
+                }
+            }
+        }
+        Err(NetworkError::Endpoint(last_err))
     }
 
     /// Our own node ID (= public key bytes of the identity keypair).

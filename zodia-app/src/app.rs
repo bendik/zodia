@@ -85,6 +85,10 @@ pub enum AppMsg {
     SetNickname { peer_id: PeerId, name: String },
     /// Sent internally after the network starts to force an initial update_view.
     NetworkReady,
+    /// Re-publish our Tier-0 announce blob and reschedule the next announce.
+    ReAnnounce,
+    /// Retry a Tier-1 connection to a peer whose channel has dropped.
+    Reconnect(PeerId),
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -237,6 +241,12 @@ impl AsyncComponent for AppModel {
                 model.network = Some(net);
                 start_network_command(&sender, rx);
                 sender.input(AppMsg::NetworkReady);
+                // Kick off periodic re-announce loop starting in 60 s.
+                let s2 = sender.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    s2.input(AppMsg::ReAnnounce);
+                });
             }
         }
 
@@ -281,6 +291,11 @@ impl AsyncComponent for AppModel {
                     self.network = Some(net);
                     start_network_command(&sender, rx);
                     sender.input(AppMsg::NetworkReady);
+                    let s2 = sender.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                        s2.input(AppMsg::ReAnnounce);
+                    });
                 }
                 self.setup_error.clear();
                 self.on_setup_page = false;
@@ -291,6 +306,50 @@ impl AsyncComponent for AppModel {
             }
 
             AppMsg::NetworkReady => {}
+
+            AppMsg::ReAnnounce => {
+                if let Some(net) = &self.network {
+                    if let Err(e) = net.publish_announce().await {
+                        warn!("re-announce failed: {e}");
+                    }
+                }
+                // Schedule the next announce in 60 s.
+                let s = sender.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    s.input(AppMsg::ReAnnounce);
+                });
+            }
+
+            AppMsg::Reconnect(peer_id) => {
+                // Only reconnect if we know the peer but no longer have a channel.
+                if !self.connected_peers.contains_key(&peer_id)
+                    || self.connected_channels.contains_key(&peer_id)
+                {
+                    return;
+                }
+                if let Some(net) = &self.network {
+                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                    info!(peer = %peer_hex, "attempting auto-reconnect");
+                    match net.connect_peer(&peer_id).await {
+                        Ok(channel) => {
+                            if let Some(our_blob) = make_tier1_blob(&self.config) {
+                                match channel.exchange_tier1(&our_blob).await {
+                                    Ok(their_blob) => {
+                                        info!(peer = %peer_hex, "auto-reconnect tier-1 exchange ok");
+                                        self.connected_peers.insert(peer_id.clone(), their_blob);
+                                        self.peer_list_generation += 1;
+                                    }
+                                    Err(e) => warn!("auto-reconnect tier-1 exchange: {e}"),
+                                }
+                            }
+                            net.accept_channel(peer_id.clone(), channel.clone());
+                            self.connected_channels.insert(peer_id, channel);
+                        }
+                        Err(e) => warn!(peer = %peer_hex, "auto-reconnect failed: {e}"),
+                    }
+                }
+            }
 
             AppMsg::SetNickname { peer_id, name } => {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
@@ -470,6 +529,16 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::PeerChannelClosed { peer_id } => {
                 self.connected_channels.remove(&peer_id);
                 self.peer_list_generation += 1;
+                // If we have a Tier-1 relationship with this peer, schedule a
+                // reconnect attempt after 10 s to restore the channel.
+                if self.connected_peers.contains_key(&peer_id) {
+                    let s = _sender.clone();
+                    let pid = peer_id.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        s.input(AppMsg::Reconnect(pid));
+                    });
+                }
             }
             _ => {}
         }
