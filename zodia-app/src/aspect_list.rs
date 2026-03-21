@@ -20,7 +20,7 @@ pub fn natal_items(aspects: &[Aspect]) -> Vec<AspectItem> {
         .map(|a| AspectItem {
             key: InterpKey::from_natal(a),
             glyph_suffix: format!(
-                "{}{}{}  orb {:.1}°",
+                "{} {} {}  orb {:.1}°",
                 a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(), a.orb
             ),
         })
@@ -36,7 +36,7 @@ pub fn transit_items(
         .map(|ta| AspectItem {
             key: ta.interp_key(),
             glyph_suffix: format!(
-                "{}{}natal {}  orb {:.1}°",
+                "{} {} natal {}  orb {:.1}°",
                 ta.transiting.symbol(), ta.kind.symbol(), ta.natal_body.symbol(), ta.orb
             ),
         })
@@ -57,7 +57,7 @@ pub fn synastry_items(aspects: &[SynastryAspect]) -> Vec<AspectItem> {
         .map(|a| AspectItem {
             key: InterpKey::from_synastry(a),
             glyph_suffix: format!(
-                "{}{}{}  orb {:.1}°",
+                "{} {} {}  orb {:.1}°",
                 a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(), a.orb
             ),
         })
