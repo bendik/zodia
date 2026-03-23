@@ -255,3 +255,174 @@ fn ra_to_ecl_lon(ra: f64, eps: f64) -> f64 {
         .to_degrees()
         .rem_euclid(360.0)
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::birth::birth_from_coords;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    fn birth(jdn: f64, lat: f64, lon: f64) -> crate::birth::BirthData {
+        birth_from_coords(jdn, lat, lon, 9)
+    }
+
+    /// All opposite-cusp pairs (H1↔H7, H2↔H8, …) must differ by exactly 180°.
+    fn check_opposite_pairs(sys: &HouseSystem) {
+        for (a, b) in [(0,6),(1,7),(2,8),(3,9),(4,10),(5,11)] {
+            let diff = (sys.cusps[b] - sys.cusps[a]).rem_euclid(360.0);
+            assert!(
+                (diff - 180.0).abs() < 0.01,
+                "H{} ({:.3}°) and H{} ({:.3}°) should be 180° apart, got {diff:.4}°",
+                a+1, sys.cusps[a], b+1, sys.cusps[b]
+            );
+        }
+    }
+
+    /// Midpoint of each house sector must fall inside that house.
+    ///
+    /// This is the primary regression guard: if any two adjacent cusps are
+    /// transposed (e.g. the H2/H3 frac swap), at least one sector's midpoint
+    /// maps to the wrong house via `house_of`.
+    fn check_midpoints(sys: &HouseSystem) {
+        for i in 0..12 {
+            let start = sys.cusps[i];
+            let end   = sys.cusps[(i + 1) % 12];
+            let arc   = (end - start).rem_euclid(360.0);
+            let mid   = (start + arc / 2.0).rem_euclid(360.0);
+            let got   = sys.house_of(mid);
+            assert_eq!(
+                got, (i + 1) as u8,
+                "midpoint {mid:.2}° of H{} ({start:.2}°–{end:.2}°) returned H{got}",
+                i + 1
+            );
+        }
+    }
+
+    // ── Equal House ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn equal_house_cusps_are_exactly_30_apart() {
+        let sys = HouseSystem::compute(&birth(2451545.0, 51.5, 0.0), HouseKind::Equal).unwrap();
+        let asc = sys.ascendant;
+        for i in 0..12 {
+            let expected = (asc + i as f64 * 30.0).rem_euclid(360.0);
+            assert!(
+                (sys.cusps[i] - expected).abs() < 0.001,
+                "Equal H{}: {:.4}° != expected {expected:.4}°", i+1, sys.cusps[i]
+            );
+        }
+    }
+
+    // ── Whole Sign ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn whole_sign_cusps_are_multiples_of_30() {
+        let sys = HouseSystem::compute(&birth(2451545.0, 48.0, 11.6), HouseKind::WholeSign).unwrap();
+        for i in 0..12 {
+            assert!(
+                (sys.cusps[i] % 30.0) < 0.001,
+                "Whole Sign H{}: {:.4}° is not a multiple of 30°", i+1, sys.cusps[i]
+            );
+        }
+        // H1 starts at the beginning of the sign containing the ASC.
+        let sign_start = (sys.ascendant / 30.0).floor() * 30.0;
+        assert!((sys.cusps[0] - sign_start).abs() < 0.001);
+    }
+
+    // ── Placidus structural tests ─────────────────────────────────────────────
+
+    /// Opposite cusps and sector midpoints across a range of latitudes and epochs.
+    #[test]
+    fn placidus_structural_integrity() {
+        let cases = [
+            (2451545.0,   0.0,   0.0),           // equator, J2000
+            (2451545.0,  45.0,   0.0),           // mid-latitude north
+            (2451545.0,  60.0,  25.0),           // high latitude (Helsinki area)
+            (2451545.0, -34.0,  18.5),           // southern hemisphere (Cape Town area)
+            (2446090.28681, 59.9, 10.733),       // Oslo 1985
+            (2437482.28125, 52.817, 0.483),      // Sandringham 1961
+        ];
+        for (jdn, lat, lon) in cases {
+            let sys = HouseSystem::compute(&birth(jdn, lat, lon), HouseKind::Placidus).unwrap();
+            check_opposite_pairs(&sys);
+            check_midpoints(&sys);
+        }
+    }
+
+    // ── Placidus reference charts ─────────────────────────────────────────────
+
+    /// Princess Diana — 1961-07-01, 18:45 UTC, Sandringham UK (52.817°N 0.483°E).
+    ///
+    /// Reference values from astro.com (Swiss Ephemeris, Placidus, Tropical):
+    ///   ASC: 18°24' Sagittarius = 258.40°
+    ///   MC:  23°05' Libra       = 203.08°
+    ///
+    /// Our simplified GMST (Meeus single-term) agrees to <0.1° for dates
+    /// within ~50 years of J2000, as confirmed by this chart.
+    #[test]
+    fn placidus_diana_1961() {
+        let sys = HouseSystem::compute(
+            &birth(2437482.28125, 52.817, 0.483),
+            HouseKind::Placidus,
+        ).unwrap();
+        assert!(
+            (sys.ascendant - 258.40).abs() < 0.3,
+            "ASC: expected 258.40° (18°Sag), got {:.3}°", sys.ascendant
+        );
+        assert!(
+            (sys.midheaven - 203.08).abs() < 0.3,
+            "MC: expected 203.08° (23°Lib), got {:.3}°", sys.midheaven
+        );
+        check_opposite_pairs(&sys);
+        check_midpoints(&sys);
+    }
+
+    /// User birth chart — 1985-01-24, 18:53 UTC, Oslo Norway (59.9°N 10.733°E).
+    ///
+    /// Cross-checked against astro.com (Swiss Ephemeris, Placidus, Tropical):
+    ///   MC:  0°12' Gemini = 60.2°
+    ///   ASC: 10°07' Virgo = 160.12°
+    ///
+    /// JDN = 2446090.0 (noon Jan 24 1985) + (18h53m − 12h)/24 = 2446090.28681
+    #[test]
+    fn placidus_oslo_1985_debug() {
+        use crate::ephemeris::compute_positions;
+        use crate::planet::Planet;
+
+        let jdn = 2446090.28681_f64;
+        let sys = HouseSystem::compute(&birth(jdn, 59.9, 10.733), HouseKind::Placidus).unwrap();
+        let pos = compute_positions(jdn).unwrap();
+        let moon = pos.get(Planet::Moon).unwrap();
+
+        println!("\n=== Oslo 1985 — Placidus cusps ===");
+        let signs = ["Ari","Tau","Gem","Can","Leo","Vir","Lib","Sco","Sag","Cap","Aqu","Pis"];
+        let sign = |d: f64| format!("{:.2}° {}", d % 30.0, signs[(d / 30.0) as usize % 12]);
+        for i in 0..12 {
+            println!("  H{:2} cusp: {:7.3}°  ({})", i+1, sys.cusps[i], sign(sys.cusps[i]));
+        }
+        println!("  ASC: {:.3}°  ({})", sys.ascendant, sign(sys.ascendant));
+        println!("  MC:  {:.3}°  ({})", sys.midheaven, sign(sys.midheaven));
+        println!("  Moon: {:.3}°  ({})  → H{}", moon, sign(moon), sys.house_of(moon));
+    }
+
+    #[test]
+    fn placidus_oslo_1985() {
+        let sys = HouseSystem::compute(
+            &birth(2446090.28681, 59.9, 10.733),
+            HouseKind::Placidus,
+        ).unwrap();
+        assert!(
+            (sys.midheaven - 60.2).abs() < 0.3,
+            "MC: expected 60.2° (0°Gem), got {:.3}°", sys.midheaven
+        );
+        assert!(
+            (sys.ascendant - 160.12).abs() < 0.5,
+            "ASC: expected 160.12° (10°Vir), got {:.3}°", sys.ascendant
+        );
+        check_opposite_pairs(&sys);
+        check_midpoints(&sys);
+    }
+}

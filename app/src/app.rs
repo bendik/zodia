@@ -21,6 +21,7 @@ use tokio::sync::mpsc::Receiver;
 use tracing::{error, info, warn};
 use zodia_av::AudioSession;
 use zodia_config::LocalConfig;
+use chrono::{NaiveDateTime, TimeZone as _, Timelike as _};
 use zodia_core::{birth_from_coords, compute_synastry, current_jdn, gregorian_to_jdn,
                  Chart, InterpKey};
 use zodia_crypto::IdentityKeypair;
@@ -299,8 +300,10 @@ impl AsyncComponent for AppModel {
                     ));
                     return;
                 }
-                let jdn = gregorian_to_jdn(year, month, day,
-                    hour as f64 + minute as f64 / 60.0);
+                // Convert local birth time → UTC using the birth location's
+                // IANA timezone (tzf-rs embeds the full boundary database).
+                let utc_hour_frac = local_to_utc_hour(year, month, day, hour, minute, lat, lon);
+                let jdn = gregorian_to_jdn(year, month, day, utc_hour_frac);
                 let birth = birth_from_coords(jdn, lat, lon, 9);
 
                 if let Err(e) = self.config.save_birth(birth.clone()) {
@@ -1323,6 +1326,7 @@ fn build_setup_page(
 
     let date_group = adw::PreferencesGroup::new();
     date_group.set_title("Birth Date & Time");
+    date_group.set_description(Some("Enter your local birth time — timezone is resolved automatically from the birth location."));
 
     let year_row = adw::SpinRow::with_range(1900.0, 2100.0, 1.0);
     year_row.set_title("Year");
@@ -1340,7 +1344,7 @@ fn build_setup_page(
     date_group.add(&day_row);
 
     let hour_row = adw::SpinRow::with_range(0.0, 23.0, 1.0);
-    hour_row.set_title("Hour (UTC)");
+    hour_row.set_title("Hour (local)");
     hour_row.set_value(12.0);
     date_group.add(&hour_row);
 
@@ -1738,6 +1742,39 @@ fn save_peers(data_dir: &std::path::Path, peers: &HashMap<PeerId, zodia_net::Tie
         .map(|(id, blob)| format!("{}\t{}\t{}\n", hex::encode(&id.0), blob.birth.jdn, blob.birth.geohash))
         .collect();
     let _ = std::fs::write(data_dir.join("peers.tsv"), content);
+}
+
+/// Convert a local birth time to a UTC fractional hour using the IANA timezone
+/// for the given coordinates.  Falls back to a naive UTC offset of lon/15 if
+/// the timezone database lookup fails.
+fn local_to_utc_hour(
+    year: i32, month: u32, day: u32,
+    hour: u32, minute: u32,
+    lat: f64, lon: f64,
+) -> f64 {
+    use chrono_tz::Tz;
+
+    let finder = tzf_rs::DefaultFinder::new();
+    let tz_name = finder.get_tz_name(lon, lat);
+    if let Ok(tz) = tz_name.parse::<Tz>() {
+        if let Some(naive) = NaiveDateTime::new(
+            chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap_or_default(),
+            chrono::NaiveTime::from_hms_opt(hour, minute, 0).unwrap_or_default(),
+        ).checked_add_signed(chrono::Duration::zero()) {
+            // Use the earliest valid UTC interpretation (handles ambiguous DST transitions).
+            if let chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _)
+                = tz.from_local_datetime(&naive)
+            {
+                let utc_dt = dt.with_timezone(&chrono::Utc);
+                return utc_dt.hour() as f64 + utc_dt.minute() as f64 / 60.0
+                    + utc_dt.second() as f64 / 3600.0;
+            }
+        }
+    }
+    // Fallback: crude solar time offset (±12 h)
+    let offset_h = (lon / 15.0).round().clamp(-12.0, 14.0);
+    let raw = hour as f64 + minute as f64 / 60.0 - offset_h;
+    raw.rem_euclid(24.0)
 }
 
 fn save_nicknames(data_dir: &std::path::Path, nicknames: &HashMap<String, String>) {
