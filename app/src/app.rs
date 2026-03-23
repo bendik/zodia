@@ -863,22 +863,36 @@ fn rebuild_sidebar_peers(
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         hbox.set_margin_start(12);
         hbox.set_margin_end(12);
-        hbox.set_margin_top(10);
-        hbox.set_margin_bottom(10);
+        hbox.set_margin_top(6);
+        hbox.set_margin_bottom(6);
 
-        // Three-state presence dot:
-        //   ● green  = Active (explicit status)
-        //   ● yellow = Away   (explicit status) or channel open but no status yet
-        //   ○ grey   = no channel (offline / never connected this session)
-        let (dot_char, dot_class) = match (has_channel, status) {
-            (_, Some(PeerStatus::Active))  => ("●", "success"),
-            (_, Some(PeerStatus::Away))    => ("●", "warning"),
-            (true,  None)                  => ("●", "warning"),  // channel up, awaiting status
-            (false, _)                     => ("○", "dim-label"),
+        // Three-state presence dot — drawn as a 6 px circle so it sits at the
+        // true geometric centre of the row rather than riding the text baseline.
+        let (dot_filled, dot_color) = match (has_channel, status) {
+            (_, Some(PeerStatus::Active))  => (true,  [0.46_f32, 0.82, 0.46, 1.0]),
+            (_, Some(PeerStatus::Away))    => (true,  [0.95,     0.75, 0.30, 1.0]),
+            (true,  None)                  => (true,  [0.95,     0.75, 0.30, 1.0]),
+            (false, _)                     => (false, [0.55,     0.55, 0.55, 0.7]),
         };
-        let dot = gtk::Label::new(Some(dot_char));
+        let dot = gtk::DrawingArea::new();
+        dot.set_size_request(8, 8);
         dot.set_valign(gtk::Align::Center);
-        dot.add_css_class(dot_class);
+        dot.set_draw_func(move |_, cr, w, h| {
+            let (r, g, b, a) = (dot_color[0] as f64, dot_color[1] as f64,
+                                dot_color[2] as f64, dot_color[3] as f64);
+            let cx = w as f64 / 2.0;
+            let cy = h as f64 / 2.0;
+            let radius = (w.min(h)) as f64 / 2.0;
+            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+            if dot_filled {
+                cr.set_source_rgba(r, g, b, a);
+                let _ = cr.fill();
+            } else {
+                cr.set_source_rgba(r, g, b, a);
+                cr.set_line_width(1.2);
+                let _ = cr.stroke();
+            }
+        });
         hbox.append(&dot);
 
         let lbl = gtk::Label::new(Some(&format!("{glyph}  {display_name}")));
@@ -904,13 +918,20 @@ fn rebuild_sidebar_peers(
         edit_img.set_tooltip_text(Some("Set nickname"));
         hbox.append(&edit_img);
 
-        // Fade in/out on hover.
-        let motion = gtk::EventControllerMotion::new();
-        let img_enter = edit_img.clone();
-        let img_leave = edit_img.clone();
-        motion.connect_enter(move |_, _, _| img_enter.set_opacity(1.0));
-        motion.connect_leave(move |_| img_leave.set_opacity(0.0));
-        row.add_controller(motion);
+        // Row hover → dim (0.4 opacity); icon hover → full (1.0 opacity).
+        let motion_row = gtk::EventControllerMotion::new();
+        let img_row_enter = edit_img.clone();
+        let img_row_leave = edit_img.clone();
+        motion_row.connect_enter(move |_, _, _| img_row_enter.set_opacity(0.4));
+        motion_row.connect_leave(move |_| img_row_leave.set_opacity(0.0));
+        row.add_controller(motion_row);
+
+        let motion_icon = gtk::EventControllerMotion::new();
+        let img_icon_enter = edit_img.clone();
+        let img_icon_leave = edit_img.clone();
+        motion_icon.connect_enter(move |_, _, _| img_icon_enter.set_opacity(1.0));
+        motion_icon.connect_leave(move |_| img_icon_leave.set_opacity(0.4));
+        edit_img.add_controller(motion_icon);
 
         // Open a nickname dialog on click.
         {
