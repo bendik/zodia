@@ -49,6 +49,17 @@ pub struct InterpEntry {
 
 // ── signaling messages ────────────────────────────────────────────────────────
 
+/// Explicit presence state, sent over the Tier-1 channel.
+///
+/// `Active` is sent immediately after a channel is established so both sides
+/// know the peer is present.  `Away` is sent before the app closes or idles,
+/// so the remote peer marks them offline without waiting for a QUIC timeout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeerStatus {
+    Active,
+    Away,
+}
+
 /// Typed messages exchanged over reliable QUIC streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelMsg {
@@ -56,6 +67,8 @@ pub enum ChannelMsg {
     Tier1Handshake(Tier1Blob),
     /// Post-handshake: swap top community interpretations for each other's keys.
     InterpShare { entries: Vec<InterpEntry> },
+    /// Explicit presence update — sent on connect (Active) and before quit (Away).
+    StatusUpdate { status: PeerStatus },
     /// Caller proposes a voice session.
     CallOffer  { session_id: [u8; 32] },
     /// Callee accepts.

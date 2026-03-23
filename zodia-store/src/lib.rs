@@ -76,7 +76,7 @@ impl ZodiaStore {
 
     fn init(&self) -> Result<(), StoreError> {
         self.conn.execute_batch(SCHEMA)?;
-        // Migration: add author_sig column if this is an older DB without it.
+        // Migrations for older DBs.
         let _ = self.conn.execute_batch(
             "ALTER TABLE interpretations ADD COLUMN author_sig BLOB;",
         );
@@ -358,6 +358,41 @@ impl ZodiaStore {
         Ok(n as u64)
     }
 
+    // ── messages ──────────────────────────────────────────────────────────────
+
+    /// Persist a single chat message.
+    pub fn insert_message(
+        &self,
+        peer_id: &[u8; 32],
+        from_us: bool,
+        body: &str,
+    ) -> Result<(), StoreError> {
+        let ts = unix_ms();
+        self.conn.execute(
+            "INSERT INTO messages (peer_id, from_us, body, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![peer_id.as_slice(), from_us as i32, body, ts as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Load all messages for a peer, oldest-first.
+    pub fn messages_for_peer(
+        &self,
+        peer_id: &[u8; 32],
+    ) -> Result<Vec<(bool, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_us, body FROM messages WHERE peer_id = ?1 ORDER BY ts ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![peer_id.as_slice()], |row| {
+                let from_us: i32 = row.get(0)?;
+                let body: String = row.get(1)?;
+                Ok((from_us != 0, body))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ── seeding ───────────────────────────────────────────────────────────────
 
     /// Populate the store from baseline data if it is currently empty.
@@ -428,6 +463,15 @@ CREATE TABLE IF NOT EXISTS interpretations (
 CREATE INDEX IF NOT EXISTS idx_interp_key  ON interpretations(interp_key);
 CREATE INDEX IF NOT EXISTS idx_interp_kind ON interpretations(interp_kind);
 
+CREATE TABLE IF NOT EXISTS messages (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer_id   BLOB    NOT NULL,
+    from_us   INTEGER NOT NULL,
+    body      TEXT    NOT NULL,
+    ts        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_msg_peer ON messages(peer_id, ts);
+
 CREATE TABLE IF NOT EXISTS affirmations (
     log_id        BLOB    NOT NULL PRIMARY KEY,
     interp_log_id BLOB    NOT NULL,
@@ -465,4 +509,11 @@ fn unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

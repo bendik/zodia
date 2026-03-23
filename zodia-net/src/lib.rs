@@ -2,7 +2,7 @@ pub mod announce;
 pub mod channel;
 pub mod network;
 
-pub use channel::{ChannelMsg, DirectChannel, InterpEntry};
+pub use channel::{ChannelMsg, DirectChannel, InterpEntry, PeerStatus};
 pub use network::{NetworkConfig, NetworkError, ZodiaNetwork};
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,8 @@ pub enum ZodiaNetEvent {
     IncomingChannel { peer_id: PeerId, channel: DirectChannel },
     /// A plain-text chat message received from a connected peer.
     ChatReceived { from: PeerId, text: String },
+    /// The peer sent an explicit presence update (Active / Away).
+    PeerStatusChanged { peer_id: PeerId, status: PeerStatus },
     /// The direct channel to a connected peer has closed (peer went offline).
     PeerChannelClosed { peer_id: PeerId },
 }

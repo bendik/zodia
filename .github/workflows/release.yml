@@ -19,10 +19,10 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
 
-          - os: macos-14            # Apple Silicon
+          - os: macos-14
             target: aarch64-apple-darwin
 
-          - os: macos-13            # Intel
+          - os: macos-14
             target: x86_64-apple-darwin
 
           - os: windows-latest

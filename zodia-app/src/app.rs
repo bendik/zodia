@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use libadwaita as adw;
 use libadwaita::gtk;
+use libadwaita::glib;
 use libadwaita::prelude::*;
 use relm4::prelude::*;
 use tokio::sync::mpsc::Receiver;
@@ -23,8 +24,8 @@ use zodia_config::LocalConfig;
 use zodia_core::{birth_from_coords, compute_synastry, current_jdn, gregorian_to_jdn,
                  Chart, InterpKey};
 use zodia_crypto::IdentityKeypair;
-use zodia_net::{ChannelMsg, DirectChannel, InterpEntry, NetworkConfig, PeerId, Tier1Blob,
-                ZodiaNetEvent, ZodiaNetwork};
+use zodia_net::{ChannelMsg, DirectChannel, InterpEntry, NetworkConfig, PeerId, PeerStatus,
+                Tier1Blob, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore};
 
 use crate::aspect_list;
@@ -91,6 +92,8 @@ pub enum AppMsg {
     ReAnnounce,
     /// Retry a Tier-1 connection to a peer whose channel has dropped.
     Reconnect(PeerId),
+    /// App window is closing — send Away to all connected peers.
+    GoingOffline,
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -108,8 +111,10 @@ pub struct AppModel {
     discovered_peers: Vec<DiscoveredPeer>,
     /// Peers whose Tier-1 exchange has completed.
     connected_peers: HashMap<PeerId, Tier1Blob>,
-    /// Active QUIC channels — presence means currently online.
+    /// Active QUIC channels — presence means the channel is open.
     connected_channels: HashMap<PeerId, DirectChannel>,
+    /// Explicit presence state received from each peer over their channel.
+    peer_status: HashMap<PeerId, PeerStatus>,
 
     /// Incremented whenever the peer list content changes so `update_view`
     /// knows when to rebuild the GTK rows.
@@ -208,6 +213,15 @@ impl AsyncComponent for AppModel {
         let peer_nicknames = load_nicknames(init.config.data_dir());
         let persisted_peers = load_peers(init.config.data_dir());
 
+        // Pre-load chat history for all persisted peers.
+        let chat_logs: HashMap<PeerId, Vec<(bool, String)>> = persisted_peers
+            .keys()
+            .filter_map(|peer_id| {
+                let msgs = store.borrow().messages_for_peer(&peer_id.0).ok()?;
+                if msgs.is_empty() { None } else { Some((peer_id.clone(), msgs)) }
+            })
+            .collect();
+
         let mut model = AppModel {
             on_setup_page: !has_birth,
             chart: None,
@@ -217,6 +231,7 @@ impl AsyncComponent for AppModel {
             discovered_peers: Vec::new(),
             connected_peers: persisted_peers,
             connected_channels: HashMap::new(),
+            peer_status: HashMap::new(),
             peer_list_generation: 0,
             pending_push_queue: RefCell::new(Vec::new()),
             config: init.config,
@@ -224,7 +239,7 @@ impl AsyncComponent for AppModel {
             identity,
             call_state: CallState::Idle,
             active_audio: None,
-            chat_logs: HashMap::new(),
+            chat_logs,
             peer_nicknames,
             unread_messages: HashMap::new(),
         };
@@ -236,6 +251,15 @@ impl AsyncComponent for AppModel {
         }
 
         let widgets = build_widgets(&root, &model, &sender);
+
+        // Send Away to all connected peers when the window is closed.
+        {
+            let s = sender.clone();
+            root.connect_close_request(move |_| {
+                s.input(AppMsg::GoingOffline);
+                glib::Propagation::Proceed
+            });
+        }
 
         if let Some(birth) = model.config.birth.clone() {
             if let Some((net, rx)) = try_spawn_network(&model.config, &birth).await {
@@ -328,6 +352,15 @@ impl AsyncComponent for AppModel {
                 });
             }
 
+            AppMsg::GoingOffline => {
+                for channel in self.connected_channels.values() {
+                    let ch = channel.clone();
+                    tokio::spawn(async move {
+                        let _ = ch.send_msg(&ChannelMsg::StatusUpdate { status: PeerStatus::Away }).await;
+                    });
+                }
+            }
+
             AppMsg::Reconnect(peer_id) => {
                 // Only reconnect if we know the peer but no longer have a channel.
                 if !self.connected_peers.contains_key(&peer_id)
@@ -351,6 +384,7 @@ impl AsyncComponent for AppModel {
                                 }
                             }
                             net.accept_channel(peer_id.clone(), channel.clone());
+                            send_status_active(&channel);
                             self.connected_channels.insert(peer_id, channel);
                         }
                         Err(e) => warn!(peer = %peer_hex, "auto-reconnect failed: {e}"),
@@ -396,6 +430,7 @@ impl AsyncComponent for AppModel {
                                 }
                             }
                             net.accept_channel(peer_id.clone(), channel.clone());
+                            send_status_active(&channel);
                             self.connected_channels.insert(peer_id, channel);
                         }
                         Err(e) => error!("connect_peer: {e}"),
@@ -432,6 +467,7 @@ impl AsyncComponent for AppModel {
                                     }
                                 }
                                 net.accept_channel(peer_id.clone(), channel.clone());
+                                send_status_active(&channel);
                                 self.connected_channels.insert(peer_id.clone(), channel);
                             }
                             Err(e) => { error!("connect_peer: {e}"); return; }
@@ -502,6 +538,7 @@ impl AsyncComponent for AppModel {
             AppMsg::SendChat { peer_id, text } => {
                 if let Some(channel) = self.connected_channels.get(&peer_id) {
                     if channel.send_msg(&ChannelMsg::ChatMsg { text: text.clone() }).await.is_ok() {
+                        let _ = self.store.borrow().insert_message(&peer_id.0, true, &text);
                         self.chat_logs.entry(peer_id).or_default().push((true, text));
                     }
                 }
@@ -546,6 +583,7 @@ impl AsyncComponent for AppModel {
                         }
                     }
                     net.accept_channel(peer_id.clone(), channel.clone());
+                    send_status_active(&channel);
                     self.connected_channels.insert(peer_id, channel);
                 }
             }
@@ -566,9 +604,17 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::ChatReceived { from, text } => {
                 let tag = hex::encode_upper(&from.0[..4]);
                 *self.unread_messages.entry(tag).or_insert(0) += 1;
+                let _ = self.store.borrow().insert_message(&from.0, false, &text);
                 self.chat_logs.entry(from).or_default().push((false, text));
             }
+            ZodiaNetEvent::PeerStatusChanged { peer_id, status } => {
+                let tag = hex::encode_upper(&peer_id.0[..4]);
+                info!(peer = %tag, ?status, "peer status update");
+                self.peer_status.insert(peer_id, status);
+                self.peer_list_generation += 1;
+            }
             ZodiaNetEvent::PeerChannelClosed { peer_id } => {
+                self.peer_status.remove(&peer_id);
                 self.connected_channels.remove(&peer_id);
                 self.peer_list_generation += 1;
                 // If we have a Tier-1 relationship with this peer, schedule a
@@ -646,9 +692,9 @@ impl AsyncComponent for AppModel {
                             &sender,
                             nickname,
                         );
-                        let online = self.connected_channels.contains_key(&peer_id);
-                        call_btn.set_sensitive(online);
-                        send_btn.set_sensitive(online);
+                        let active = self.peer_status.get(&peer_id) == Some(&PeerStatus::Active);
+                        call_btn.set_sensitive(active);
+                        send_btn.set_sensitive(active);
                         page.set_tag(Some(&tag));
                         widgets.content_nav.push(&page);
                         widgets.peer_msg_lists.insert(tag.clone(), msg_list);
@@ -680,11 +726,10 @@ impl AsyncComponent for AppModel {
         // ── update call/send button sensitivity for open peer pages ──────────
 
         for (tag, (call_btn, send_btn)) in &widgets.peer_actions {
-            // Reconstruct PeerId from tag to look up channel presence.
-            let online = self.connected_channels.keys()
-                .any(|id| hex::encode_upper(&id.0[..4]) == *tag);
-            call_btn.set_sensitive(online);
-            send_btn.set_sensitive(online);
+            let active = self.peer_status.iter()
+                .any(|(id, s)| hex::encode_upper(&id.0[..4]) == *tag && *s == PeerStatus::Active);
+            call_btn.set_sensitive(active);
+            send_btn.set_sensitive(active);
         }
 
         // ── network status label (shown in the Network content view) ─────────
@@ -785,7 +830,8 @@ fn rebuild_sidebar_peers(
         let peer_hex     = hex::encode_upper(&peer_id.0[..4]);
         let solar_month  = zodia_core::solar_month(their_blob.birth.jdn);
         let glyph        = sign_glyph(solar_month);
-        let online       = model.connected_channels.contains_key(peer_id);
+        let status       = model.peer_status.get(peer_id);
+        let has_channel  = model.connected_channels.contains_key(peer_id);
         let display_name = model.peer_nicknames.get(&peer_hex)
             .cloned()
             .unwrap_or_else(|| format!("···{peer_hex}"));
@@ -801,10 +847,19 @@ fn rebuild_sidebar_peers(
         hbox.set_margin_top(10);
         hbox.set_margin_bottom(10);
 
-        // Online dot
-        let dot = gtk::Label::new(Some(if online { "●" } else { "○" }));
+        // Three-state presence dot:
+        //   ● green  = Active (explicit status)
+        //   ● yellow = Away   (explicit status) or channel open but no status yet
+        //   ○ grey   = no channel (offline / never connected this session)
+        let (dot_char, dot_class) = match (has_channel, status) {
+            (_, Some(PeerStatus::Active))  => ("●", "success"),
+            (_, Some(PeerStatus::Away))    => ("●", "warning"),
+            (true,  None)                  => ("●", "warning"),  // channel up, awaiting status
+            (false, _)                     => ("○", "dim-label"),
+        };
+        let dot = gtk::Label::new(Some(dot_char));
         dot.set_valign(gtk::Align::Center);
-        if online { dot.add_css_class("success"); } else { dot.add_css_class("dim-label"); }
+        dot.add_css_class(dot_class);
         hbox.append(&dot);
 
         let lbl = gtk::Label::new(Some(&format!("{glyph}  {display_name}")));
@@ -1470,6 +1525,16 @@ fn build_main_page(
         net_status_label,
         call_bar, call_status, accept_btn, hangup_btn,
     )
+}
+
+// ── status helpers ────────────────────────────────────────────────────────────
+
+/// Fire-and-forget: send `Active` to a newly established channel.
+fn send_status_active(channel: &DirectChannel) {
+    let ch = channel.clone();
+    tokio::spawn(async move {
+        let _ = ch.send_msg(&ChannelMsg::StatusUpdate { status: PeerStatus::Active }).await;
+    });
 }
 
 // ── nickname persistence ──────────────────────────────────────────────────────
