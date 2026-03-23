@@ -13,10 +13,13 @@ use std::rc::Rc;
 use libadwaita as adw;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
+use relm4::AsyncComponentSender;
 use zodia_core::InterpKey;
 use zodia_crypto::IdentityKeypair;
+use zodia_net::InterpEntry;
 use zodia_store::ZodiaStore;
 
+use crate::app::{AppModel, AppMsg};
 use crate::aspect_list::AspectItem;
 
 // ── public entry point ────────────────────────────────────────────────────────
@@ -31,8 +34,9 @@ impl AspectView {
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
         identity: Rc<IdentityKeypair>,
+        sender: AsyncComponentSender<AppModel>,
     ) -> Self {
-        Self::build(items, store, identity, None, "Aspects")
+        Self::build(items, store, identity, sender, None, "Aspects")
     }
 
     /// Natal chart view — prepends a placements section above the aspect list.
@@ -41,9 +45,10 @@ impl AspectView {
         chart: &zodia_core::Chart,
         store: Rc<RefCell<ZodiaStore>>,
         identity: Rc<IdentityKeypair>,
+        sender: AsyncComponentSender<AppModel>,
     ) -> Self {
         let preamble = crate::placements::build_placements_group(chart);
-        Self::build(items, store, identity, Some(preamble.upcast::<gtk::Widget>()), "Aspects")
+        Self::build(items, store, identity, sender, Some(preamble.upcast::<gtk::Widget>()), "Aspects")
     }
 
     /// Transit view — group title is "Transits".
@@ -51,20 +56,22 @@ impl AspectView {
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
         identity: Rc<IdentityKeypair>,
+        sender: AsyncComponentSender<AppModel>,
     ) -> Self {
-        Self::build(items, store, identity, None, "Transits")
+        Self::build(items, store, identity, sender, None, "Transits")
     }
 
     fn build(
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
         identity: Rc<IdentityKeypair>,
+        sender: AsyncComponentSender<AppModel>,
         preamble: Option<gtk::Widget>,
         group_title: &'static str,
     ) -> Self {
         let nav = adw::NavigationView::new();
         nav.set_vexpand(true);
-        nav.push(&list_page(&items, &nav, Rc::clone(&store), Rc::clone(&identity), preamble, group_title));
+        nav.push(&list_page(&items, &nav, Rc::clone(&store), Rc::clone(&identity), sender, preamble, group_title));
         Self { nav }
     }
 
@@ -80,6 +87,7 @@ fn list_page(
     nav: &adw::NavigationView,
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,
+    sender: AsyncComponentSender<AppModel>,
     preamble: Option<gtk::Widget>,
     group_title: &'static str,
 ) -> adw::NavigationPage {
@@ -129,9 +137,10 @@ fn list_page(
             let nav_c = nav.clone();
             let store_c = Rc::clone(&store);
             let identity_c = Rc::clone(&identity);
+            let sender_c = sender.clone();
             let key = item.key.clone();
             row.connect_activated(move |_| {
-                nav_c.push(&detail_page(&key, Rc::clone(&store_c), Rc::clone(&identity_c)));
+                nav_c.push(&detail_page(&key, Rc::clone(&store_c), Rc::clone(&identity_c), sender_c.clone()));
             });
 
             aspect_group.add(&row);
@@ -155,6 +164,7 @@ pub fn detail_page(
     key: &InterpKey,
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,
+    sender: AsyncComponentSender<AppModel>,
 ) -> adw::NavigationPage {
     let toolbar = adw::ToolbarView::new();
 
@@ -250,6 +260,7 @@ pub fn detail_page(
     let entry_c = entry.clone();
     let key_c = key.clone();
     let group_c = interp_group.clone();
+    let sender_c = sender.clone();
     submit.connect_clicked(move |_| {
         let text = entry_c.text().to_string();
         let trimmed = text.trim();
@@ -265,6 +276,12 @@ pub fn detail_page(
             new_row.set_subtitle("0 ♡  ·  community (just added)");
             group_c.add(&new_row);
             entry_c.set_text("");
+            sender_c.input(AppMsg::ShareInterp(InterpEntry {
+                interp_key: key_c.to_sig(),
+                body: trimmed.to_string(),
+                author_pk,
+                author_sig: author_sig.to_vec(),
+            }));
         }
     });
 

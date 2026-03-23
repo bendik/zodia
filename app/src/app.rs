@@ -94,6 +94,8 @@ pub enum AppMsg {
     Reconnect(PeerId),
     /// App window is closing — send Away to all connected peers.
     GoingOffline,
+    /// User submitted a new interpretation — broadcast it to all live peers.
+    ShareInterp(InterpEntry),
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -555,6 +557,15 @@ impl AsyncComponent for AppModel {
                     }
                 }
             }
+            AppMsg::ShareInterp(entry) => {
+                let msg = ChannelMsg::InterpShare { entries: vec![entry] };
+                for (peer_id, channel) in &self.connected_channels {
+                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                    if let Err(e) = channel.send_msg(&msg).await {
+                        warn!(peer = %peer_hex, "interp share failed: {e}");
+                    }
+                }
+            }
         }
     }
 
@@ -661,6 +672,7 @@ impl AsyncComponent for AppModel {
                     chart,
                     Rc::clone(&self.store),
                     Rc::clone(&self.identity),
+                    sender.clone(),
                 );
                 nav.widget().set_vexpand(true);
                 widgets.chart_container.append(nav.widget());
@@ -670,6 +682,7 @@ impl AsyncComponent for AppModel {
                         aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
                         Rc::clone(&self.store),
                         Rc::clone(&self.identity),
+                        sender.clone(),
                     );
                     tav.widget().set_vexpand(true);
                     widgets.sky_container.append(tav.widget());
@@ -1222,6 +1235,7 @@ fn build_widgets(
             chart,
             Rc::clone(&model.store),
             Rc::clone(&model.identity),
+            sender.clone(),
         );
         nav.widget().set_vexpand(true);
         chart_container.append(nav.widget());
@@ -1231,6 +1245,7 @@ fn build_widgets(
                 aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
                 Rc::clone(&model.store),
                 Rc::clone(&model.identity),
+                sender.clone(),
             );
             tav.widget().set_vexpand(true);
             sky_container.append(tav.widget());

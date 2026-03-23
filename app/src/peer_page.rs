@@ -73,8 +73,9 @@ pub fn build_peer_page(
             chart,
             Rc::clone(&store),
             Rc::clone(&identity),
+            sender.clone(),
         ),
-        None => AspectView::new(vec![], Rc::clone(&store), Rc::clone(&identity)),
+        None => AspectView::new(vec![], Rc::clone(&store), Rc::clone(&identity), sender.clone()),
     };
     their_av.widget().set_vexpand(true);
 
@@ -86,7 +87,7 @@ pub fn build_peer_page(
     their_page.set_icon_name(Some("weather-clear-symbolic"));
 
     // Synastry tab
-    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity));
+    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity), sender.clone());
     syn_av.widget().set_vexpand(true);
     let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
     syn_page.set_icon_name(Some("synastry-symbolic"));
