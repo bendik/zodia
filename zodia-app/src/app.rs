@@ -158,14 +158,10 @@ pub struct AppWidgets {
     /// Generation of the peer list we last rendered.
     peer_list_shown_gen: u64,
 
-    /// NavigationView in the content pane — peer pages are pushed here.
-    content_nav: adw::NavigationView,
-    /// Stack inside the content root page — switches between chart/sky/network views.
+    /// Single content stack — chart / sky / network + peer pages, all as named children.
     content_stack: gtk::Stack,
     /// The "Network" scrollable view (rebuilt for discovered/online peers).
     peers_content: gtk::Box,
-    /// Title widget in the content header bar (chart/sky/network).
-    content_title: adw::WindowTitle,
 
     /// Message list widget per peer (keyed by 4-byte hex tag).
     peer_msg_lists: HashMap<String, gtk::ListBox>,
@@ -694,11 +690,11 @@ impl AsyncComponent for AppModel {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
                 if let Some(chart) = &self.chart {
                     let nickname = self.peer_nicknames.get(&tag).map(|s| s.as_str());
-                    if widgets.content_nav.find_page(&tag).is_some() {
-                        // Page already exists — navigate directly to it.
-                        widgets.content_nav.pop_to_tag(&tag);
+                    if widgets.content_stack.child_by_name(&tag).is_some() {
+                        // Page already built — switch to it directly.
+                        widgets.content_stack.set_visible_child_name(&tag);
                     } else {
-                        let (page, msg_list, call_btn, send_btn) = peer_page::build_peer_page(
+                        let (toolbar_view, msg_list, call_btn, send_btn) = peer_page::build_peer_page(
                             &peer_id, their_blob, chart,
                             Rc::clone(&self.store),
                             Rc::clone(&self.identity),
@@ -708,8 +704,8 @@ impl AsyncComponent for AppModel {
                         let active = self.peer_status.get(&peer_id) == Some(&PeerStatus::Active);
                         call_btn.set_sensitive(active);
                         send_btn.set_sensitive(active);
-                        page.set_tag(Some(&tag));
-                        widgets.content_nav.push(&page);
+                        widgets.content_stack.add_named(&toolbar_view, Some(&tag));
+                        widgets.content_stack.set_visible_child_name(&tag);
                         widgets.peer_msg_lists.insert(tag.clone(), msg_list);
                         widgets.peer_actions.insert(tag, (call_btn, send_btn));
                     }
@@ -1118,7 +1114,7 @@ fn build_widgets(
         main_view,
         chart_container, sky_container,
         split_view, nav_list,
-        content_nav, content_stack, peers_content, content_title,
+        content_stack, peers_content,
         notif_btn, notif_label,
         net_status_label,
         call_bar, call_status, accept_btn, hangup_btn,
@@ -1160,10 +1156,8 @@ fn build_widgets(
         split_view,
         nav_list,
         peer_list_shown_gen: u64::MAX, // force initial build
-        content_nav,
         content_stack,
         peers_content,
-        content_title,
         peer_msg_lists: HashMap::new(),
         peer_chat_shown: HashMap::new(),
         peer_actions: HashMap::new(),
@@ -1309,13 +1303,13 @@ fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
-    adw::ToolbarView,                                          // outermost wrapper (call_bar bottom)
-    gtk::Box, gtk::Box,                                        // chart_container, sky_container
-    adw::NavigationSplitView, gtk::ListBox,                    // split_view, nav_list
-    adw::NavigationView, gtk::Stack, gtk::Box, adw::WindowTitle, // content_nav, content_stack, peers_content, content_title
-    gtk::MenuButton, gtk::Label,                               // notif_btn, notif_label
-    gtk::Label,                                                // net_status_label
-    gtk::Box, gtk::Label, gtk::Button, gtk::Button,            // call bar
+    adw::ToolbarView,                                   // outermost wrapper (call_bar bottom)
+    gtk::Box, gtk::Box,                                 // chart_container, sky_container
+    adw::NavigationSplitView, gtk::ListBox,             // split_view, nav_list
+    gtk::Stack, gtk::Box,                               // content_stack, peers_content
+    gtk::MenuButton, gtk::Label,                        // notif_btn, notif_label
+    gtk::Label,                                         // net_status_label
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
 ) {
     // ── Notification bell (sidebar header) ───────────────────────────────────
 
@@ -1397,20 +1391,33 @@ fn build_main_page(
     let sidebar_page = adw::NavigationPage::new(&sidebar_toolbar, "Zodia");
     sidebar_page.set_tag(Some("sidebar"));
 
-    // ── Content area — NavigationView so peer pages can be pushed ─────────────
+    // ── Content area — single crossfade Stack for all views ──────────────────
 
     let content_stack = gtk::Stack::new();
     content_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     content_stack.set_transition_duration(150);
 
+    // Chart view
     let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
     chart_container.set_vexpand(true);
-    content_stack.add_named(&chart_container, Some("chart"));
+    let chart_header = adw::HeaderBar::new();
+    chart_header.set_title_widget(Some(&adw::WindowTitle::new("Chart", "")));
+    let chart_toolbar = adw::ToolbarView::new();
+    chart_toolbar.add_top_bar(&chart_header);
+    chart_toolbar.set_content(Some(&chart_container));
+    content_stack.add_named(&chart_toolbar, Some("chart"));
 
+    // Sky view
     let sky_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sky_container.set_vexpand(true);
-    content_stack.add_named(&sky_container, Some("sky"));
+    let sky_header = adw::HeaderBar::new();
+    sky_header.set_title_widget(Some(&adw::WindowTitle::new("Sky", "")));
+    let sky_toolbar = adw::ToolbarView::new();
+    sky_toolbar.add_top_bar(&sky_header);
+    sky_toolbar.set_content(Some(&sky_container));
+    content_stack.add_named(&sky_toolbar, Some("sky"));
 
+    // Network view
     let peers_scroll = gtk::ScrolledWindow::new();
     peers_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     peers_scroll.set_vexpand(true);
@@ -1422,7 +1429,6 @@ fn build_main_page(
     peers_clamp.set_margin_end(12);
     let peers_content = gtk::Box::new(gtk::Orientation::Vertical, 16);
 
-    // Network status row — shown at top of the Network view, updated via update_view.
     let net_status_label = gtk::Label::new(Some("Starting up…"));
     net_status_label.add_css_class("dim-label");
     net_status_label.add_css_class("caption");
@@ -1432,24 +1438,17 @@ fn build_main_page(
 
     peers_clamp.set_child(Some(&peers_content));
     peers_scroll.set_child(Some(&peers_clamp));
-    content_stack.add_named(&peers_scroll, Some("network"));
 
-    let content_title = adw::WindowTitle::new("Chart", "");
-    let content_header = adw::HeaderBar::new();
-    content_header.set_title_widget(Some(&content_title));
+    let network_header = adw::HeaderBar::new();
+    network_header.set_title_widget(Some(&adw::WindowTitle::new("Network", "")));
+    let network_toolbar = adw::ToolbarView::new();
+    network_toolbar.add_top_bar(&network_header);
+    network_toolbar.set_content(Some(&peers_scroll));
+    content_stack.add_named(&network_toolbar, Some("network"));
 
-    let content_toolbar = adw::ToolbarView::new();
-    content_toolbar.add_top_bar(&content_header);
-    content_toolbar.set_content(Some(&content_stack));
+    // Peer pages are added dynamically as named children when first opened.
 
-    // Root NavigationPage for the content NavigationView
-    let content_root = adw::NavigationPage::new(&content_toolbar, "Chart");
-    content_root.set_tag(Some("content-root"));
-
-    let content_nav = adw::NavigationView::new();
-    content_nav.push(&content_root);
-
-    let content_page = adw::NavigationPage::new(&content_nav, "Chart");
+    let content_page = adw::NavigationPage::new(&content_stack, "Zodia");
     content_page.set_tag(Some("content"));
 
     // ── Navigation split view ─────────────────────────────────────────────────
@@ -1467,27 +1466,23 @@ fn build_main_page(
 
     {
         let cs = content_stack.clone();
-        let ct = content_title.clone();
-        let cn = content_nav.clone();
         let sv = split_view.clone();
         let s  = sender.clone();
 
         nav_list.connect_row_activated(move |_, row| {
             match row.index() {
                 0 | 1 | 2 => {
-                    let (page, title) = match row.index() {
-                        0 => ("chart",   "Chart"),
-                        1 => ("sky",     "Sky"),
-                        2 => ("network", "Network"),
+                    let page = match row.index() {
+                        0 => "chart",
+                        1 => "sky",
+                        2 => "network",
                         _ => unreachable!(),
                     };
-                    cn.pop_to_tag("content-root");
                     cs.set_visible_child_name(page);
-                    ct.set_title(title);
                     sv.set_show_content(true);
                 }
                 idx if idx >= 4 => {
-                    // Peer row — widget name holds the full peer id hex
+                    // Peer row — widget name holds the full peer id hex.
                     let name = row.widget_name();
                     if let Ok(bytes) = hex::decode(name.as_str()) {
                         if let Ok(arr) = bytes.try_into() as Result<[u8; 32], _> {
@@ -1540,7 +1535,7 @@ fn build_main_page(
         toolbar_view,
         chart_container, sky_container,
         split_view, nav_list,
-        content_nav, content_stack, peers_content, content_title,
+        content_stack, peers_content,
         notif_btn, notif_label,
         net_status_label,
         call_bar, call_status, accept_btn, hangup_btn,

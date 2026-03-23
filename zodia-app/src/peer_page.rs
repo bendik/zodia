@@ -1,19 +1,20 @@
 //! Connected-peer navigation page.
 //!
-//! Pushed onto the Peers tab's `adw::NavigationView` when a Tier-1 exchange
+//! Added as a named child of the main `gtk::Stack` when a Tier-1 exchange
 //! completes.  Shows three tabs:
 //!   - **Their Chart** — peer's planet placements + their natal aspects.
 //!   - **Synastry**    — cross-chart aspects between the two of you.
 //!   - **Messages**    — live text chat over the Tier-1 QUIC channel.
 //!
-//! Returns `(NavigationPage, gtk::ListBox)` — the caller appends chat rows
-//! to the `ListBox` whenever new messages arrive.
+//! Returns `(ToolbarView, gtk::ListBox, call_btn, send_btn)` — the caller
+//! appends chat rows to the `ListBox` whenever new messages arrive.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use libadwaita as adw;
 use libadwaita::gtk;
+use libadwaita::glib;
 use libadwaita::prelude::*;
 use relm4::AsyncComponentSender;
 use zodia_core::{Chart, compute_positions, compute_synastry};
@@ -26,11 +27,10 @@ use crate::aspect_list::{natal_items, synastry_items};
 use crate::aspect_view::AspectView;
 use crate::util::sign_glyph;
 
-/// Build the `adw::NavigationPage` for a connected peer.
+/// Build the `adw::ToolbarView` for a connected peer.
 ///
-/// Returns `(page, msg_list, call_btn, send_btn)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn)`.
 /// `call_btn` and `send_btn` should be set insensitive when the peer is offline.
-#[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_peer_page(
     peer_id: &PeerId,
     their_blob: &Tier1Blob,
@@ -39,7 +39,7 @@ pub fn build_peer_page(
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
-) -> (adw::NavigationPage, gtk::ListBox, gtk::Button, gtk::Button) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -54,10 +54,15 @@ pub fn build_peer_page(
         }
     };
 
-    // ── view stack ────────────────────────────────────────────────────────────
+    // ── tab view ──────────────────────────────────────────────────────────────
 
-    let view_stack = adw::ViewStack::new();
-    view_stack.set_vexpand(true);
+    let tab_view = adw::TabView::new();
+
+    // Prevent all tabs from being closed — these three are permanent.
+    tab_view.connect_close_page(|view, page| {
+        view.close_page_finish(page, false);
+        glib::Propagation::Stop
+    });
 
     // ── nickname entry (only on "Their Chart" tab) ────────────────────────────
     let nick_entry = adw::EntryRow::new();
@@ -104,20 +109,41 @@ pub fn build_peer_page(
     their_tab.append(their_av.widget());
     their_tab.set_vexpand(true);
 
-    let their_page = view_stack.add_titled(&their_tab, Some("their"), "Their Chart");
-    their_page.set_icon_name(Some("weather-clear-symbolic"));
+    let their_page = tab_view.append(&their_tab);
+    their_page.set_title("Their Chart");
 
     // Synastry tab
     let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity));
     syn_av.widget().set_vexpand(true);
-    let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
-    syn_page.set_icon_name(Some("synastry-symbolic"));
+    let syn_page = tab_view.append(syn_av.widget());
+    syn_page.set_title("Synastry");
 
-    // Messages tab
-    let (messages_widget, msg_list, send_btn) = build_messages_tab(peer_id, sender);
+    // Messages tab — call and send buttons both live in the input row
+    let (messages_widget, msg_list, call_btn, send_btn) = build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
-    let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
-    msg_page.set_icon_name(Some("mail-unread-symbolic"));
+    let msg_page = tab_view.append(&messages_widget);
+    msg_page.set_title("Messages");
+
+    // Scroll to bottom whenever the Messages tab is selected — handles both
+    // the initial backfill (rows added before layout) and returning to the tab.
+    {
+        let msg_page_ref = msg_page.clone();
+        let list = msg_list.clone();
+        tab_view.connect_notify_local(Some("selected-page"), move |tv, _| {
+            if let Some(selected) = tv.selected_page() {
+                if selected == msg_page_ref {
+                    if let Some(sw) = list.parent()
+                        .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
+                    {
+                        let adj = sw.vadjustment();
+                        glib::idle_add_local_once(move || {
+                            adj.set_value(adj.upper() - adj.page_size());
+                        });
+                    }
+                }
+            }
+        });
+    }
 
     let _ = (their_page, syn_page, msg_page);
 
@@ -125,65 +151,51 @@ pub fn build_peer_page(
 
     let toolbar_view = adw::ToolbarView::new();
 
-    // Header bar
+    // Header bar — nickname (or peer hex) as the title
     let header = adw::HeaderBar::new();
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
 
     let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
     let glyph = sign_glyph(their_solar_month);
-
-    let switcher_title = adw::ViewSwitcherTitle::new();
-    switcher_title.set_stack(Some(&view_stack));
     let title_text = nickname
         .filter(|n| !n.is_empty())
         .map(|n| format!("{glyph}  {n}"))
         .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
-    switcher_title.set_title(&title_text);
-    header.set_title_widget(Some(&switcher_title));
+    let win_title = adw::WindowTitle::new(&title_text, "");
+    header.set_title_widget(Some(&win_title));
 
-    let call_btn = gtk::Button::from_icon_name("call-start-symbolic");
-    call_btn.add_css_class("suggested-action");
-    call_btn.add_css_class("circular");
-    call_btn.set_tooltip_text(Some("Start voice call"));
-
-    let pid = peer_id.clone();
-    let s = sender.clone();
-    call_btn.connect_clicked(move |_| s.input(AppMsg::CallPeer(pid.clone())));
-    header.pack_end(&call_btn);
+    // Tab bar sits directly below the header
+    let tab_bar = adw::TabBar::new();
+    tab_bar.set_view(Some(&tab_view));
+    tab_bar.set_autohide(false);
 
     toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&view_stack));
+    toolbar_view.add_top_bar(&tab_bar);
+    toolbar_view.set_content(Some(&tab_view));
 
-    // Bottom switcher bar (appears when window is too narrow for header tabs)
-    let switcher_bar = adw::ViewSwitcherBar::new();
-    switcher_bar.set_stack(Some(&view_stack));
-    switcher_title
-        .bind_property("title-visible", &switcher_bar, "reveal")
-        .sync_create()
-        .build();
-    toolbar_view.add_bottom_bar(&switcher_bar);
-
-    let nav_title = nickname
-        .filter(|n| !n.is_empty())
-        .map(|n| format!("{glyph}  {n}"))
-        .unwrap_or_else(|| format!("···{peer_hex}"));
-    let page = adw::NavigationPage::new(&toolbar_view, &nav_title);
-    // Sidebar is the only navigation control — hide the auto-injected back button.
-    page.set_can_pop(false);
-    (page, msg_list, call_btn, send_btn)
+    (toolbar_view, msg_list, call_btn, send_btn)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
 
 /// Build the Messages tab content.
 ///
-/// Returns `(container_widget, msg_list, send_btn)`.
+/// Returns `(container_widget, msg_list, call_btn, send_btn)`.
+/// Both action buttons live in the input row so they are always accessible.
 fn build_messages_tab(
     peer_id: &PeerId,
     sender: &AsyncComponentSender<AppModel>,
-) -> (gtk::Box, gtk::ListBox, gtk::Button) {
+) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button) {
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    outer.set_vexpand(true);
+
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(720);
+    clamp.set_vexpand(true);
+
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.set_vexpand(true);
 
     // Scrollable message list
     let msg_list = gtk::ListBox::new();
@@ -197,12 +209,20 @@ fn build_messages_tab(
     scrolled.set_child(Some(&msg_list));
     vbox.append(&scrolled);
 
-    // Input row at the bottom
+    // Input row — call button | text entry | send button
     let input_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     input_row.set_margin_start(12);
     input_row.set_margin_end(12);
     input_row.set_margin_top(8);
     input_row.set_margin_bottom(12);
+
+    let call_btn = gtk::Button::from_icon_name("call-start-symbolic");
+    call_btn.add_css_class("circular");
+    call_btn.set_tooltip_text(Some("Start voice call"));
+    let pid_c = peer_id.clone();
+    let sc = sender.clone();
+    call_btn.connect_clicked(move |_| sc.input(AppMsg::CallPeer(pid_c.clone())));
+    input_row.append(&call_btn);
 
     let entry = gtk::Entry::new();
     entry.set_hexpand(true);
@@ -216,6 +236,9 @@ fn build_messages_tab(
     input_row.append(&send_btn);
 
     vbox.append(&input_row);
+
+    clamp.set_child(Some(&vbox));
+    outer.append(&clamp);
 
     // Wire send button + Enter key
     let pid = peer_id.clone();
@@ -233,7 +256,7 @@ fn build_messages_tab(
     send_btn.connect_clicked(move |_| send_c());
     entry.connect_activate(move |_| send());
 
-    (vbox, msg_list, send_btn)
+    (outer, msg_list, call_btn, send_btn)
 }
 
 /// Append a single chat row to a message list.
@@ -253,18 +276,18 @@ pub fn append_chat_row(list: &gtk::ListBox, text: &str, from_us: bool) {
     label.set_margin_top(6);
     label.set_margin_bottom(6);
 
-    if from_us {
-        label.add_css_class("caption");
-    }
 
     row.set_child(Some(&label));
     list.append(&row);
 
-    // Scroll to bottom after appending
-    if let Some(adj) = list.parent()
+    // Defer scroll to bottom until GTK has computed layout (adj.upper may be
+    // zero if the widget is not yet realized or is currently hidden).
+    if let Some(sw) = list.parent()
         .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
-        .map(|sw| sw.vadjustment())
     {
-        adj.set_value(adj.upper() - adj.page_size());
+        let adj = sw.vadjustment();
+        glib::idle_add_local_once(move || {
+            adj.set_value(adj.upper() - adj.page_size());
+        });
     }
 }
