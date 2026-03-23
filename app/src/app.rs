@@ -152,7 +152,7 @@ pub struct AppWidgets {
     sky_container: gtk::Box,
 
     /// Sidebar + content split layout.
-    split_view: adw::NavigationSplitView,
+    split_view: adw::OverlaySplitView,
     /// Single nav ListBox (Chart / Sky / Network / peers) — one selection source.
     nav_list: gtk::ListBox,
     /// Generation of the peer list we last rendered.
@@ -704,6 +704,7 @@ impl AsyncComponent for AppModel {
                                 Rc::clone(&self.identity),
                                 &sender,
                                 nickname,
+                                &widgets.split_view,
                             );
                         let active = self.peer_status.get(&peer_id) == Some(&PeerStatus::Active);
                         call_btn.set_sensitive(active);
@@ -714,7 +715,7 @@ impl AsyncComponent for AppModel {
                         widgets.peer_actions.insert(tag.clone(), (call_btn, send_btn));
                         widgets.peer_titles.insert(tag, switcher_title);
                     }
-                    widgets.split_view.set_show_content(true);
+                    widgets.split_view.set_show_sidebar(false);
                 }
             } else {
                 // Not connected yet — re-queue, will be retried on next update.
@@ -1321,7 +1322,7 @@ fn build_main_page(
 ) -> (
     adw::ToolbarView,                                   // outermost wrapper (call_bar bottom)
     gtk::Box, gtk::Box,                                 // chart_container, sky_container
-    adw::NavigationSplitView, gtk::ListBox,             // split_view, nav_list
+    adw::OverlaySplitView, gtk::ListBox,                 // split_view, nav_list
     gtk::Stack, gtk::Box,                               // content_stack, peers_content
     gtk::MenuButton, gtk::Label,                        // notif_btn, notif_label
     gtk::Label,                                         // net_status_label
@@ -1404,20 +1405,28 @@ fn build_main_page(
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar_scroll));
 
-    let sidebar_page = adw::NavigationPage::new(&sidebar_toolbar, "Zodia");
-    sidebar_page.set_tag(Some("sidebar"));
-
     // ── Content area — single crossfade Stack for all views ──────────────────
 
     let content_stack = gtk::Stack::new();
     content_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     content_stack.set_transition_duration(150);
 
+    // Sidebar toggle button — shown only when the split view is collapsed
+    // (narrow window / mobile). Each content header gets one clone.
+    let make_sidebar_btn = || {
+        let btn = gtk::Button::from_icon_name("sidebar-show-symbolic");
+        btn.set_tooltip_text(Some("Show sidebar"));
+        btn.set_visible(false);
+        btn
+    };
+
     // Chart view
     let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
     chart_container.set_vexpand(true);
     let chart_header = adw::HeaderBar::new();
     chart_header.set_title_widget(Some(&adw::WindowTitle::new("Chart", "")));
+    let chart_sidebar_btn = make_sidebar_btn();
+    chart_header.pack_start(&chart_sidebar_btn);
     let chart_toolbar = adw::ToolbarView::new();
     chart_toolbar.add_top_bar(&chart_header);
     chart_toolbar.set_content(Some(&chart_container));
@@ -1428,6 +1437,8 @@ fn build_main_page(
     sky_container.set_vexpand(true);
     let sky_header = adw::HeaderBar::new();
     sky_header.set_title_widget(Some(&adw::WindowTitle::new("Sky", "")));
+    let sky_sidebar_btn = make_sidebar_btn();
+    sky_header.pack_start(&sky_sidebar_btn);
     let sky_toolbar = adw::ToolbarView::new();
     sky_toolbar.add_top_bar(&sky_header);
     sky_toolbar.set_content(Some(&sky_container));
@@ -1457,6 +1468,8 @@ fn build_main_page(
 
     let network_header = adw::HeaderBar::new();
     network_header.set_title_widget(Some(&adw::WindowTitle::new("Network", "")));
+    let network_sidebar_btn = make_sidebar_btn();
+    network_header.pack_start(&network_sidebar_btn);
     let network_toolbar = adw::ToolbarView::new();
     network_toolbar.add_top_bar(&network_header);
     network_toolbar.set_content(Some(&peers_scroll));
@@ -1464,16 +1477,32 @@ fn build_main_page(
 
     // Peer pages are added dynamically as named children when first opened.
 
-    let content_page = adw::NavigationPage::new(&content_stack, "Zodia");
-    content_page.set_tag(Some("content"));
+    // ── Overlay split view ────────────────────────────────────────────────────
 
-    // ── Navigation split view ─────────────────────────────────────────────────
-
-    let split_view = adw::NavigationSplitView::new();
-    split_view.set_sidebar(Some(&sidebar_page));
-    split_view.set_content(Some(&content_page));
+    let split_view = adw::OverlaySplitView::new();
+    split_view.set_sidebar(Some(&sidebar_toolbar));
+    split_view.set_content(Some(&content_stack));
     split_view.set_min_sidebar_width(200.0);
     split_view.set_max_sidebar_width(280.0);
+
+    // Show/hide sidebar toggle buttons when the view collapses/expands.
+    {
+        let btns = [
+            chart_sidebar_btn.clone(),
+            sky_sidebar_btn.clone(),
+            network_sidebar_btn.clone(),
+        ];
+        split_view.connect_notify_local(Some("collapsed"), move |sv, _| {
+            let collapsed = sv.is_collapsed();
+            for btn in &btns {
+                btn.set_visible(collapsed);
+            }
+        });
+        for btn in [chart_sidebar_btn, sky_sidebar_btn, network_sidebar_btn] {
+            let sv = split_view.clone();
+            btn.connect_clicked(move |_| sv.set_show_sidebar(true));
+        }
+    }
 
     // Default selection: Chart
     nav_list.select_row(nav_list.row_at_index(0).as_ref());
@@ -1495,14 +1524,14 @@ fn build_main_page(
                         _ => unreachable!(),
                     };
                     cs.set_visible_child_name(page);
-                    sv.set_show_content(true);
+                    sv.set_show_sidebar(false);
                 }
                 idx if idx >= 4 => {
                     // Peer row — widget name holds the full peer id hex.
                     let name = row.widget_name();
                     if let Ok(bytes) = hex::decode(name.as_str()) {
                         if let Ok(arr) = bytes.try_into() as Result<[u8; 32], _> {
-                            sv.set_show_content(true);
+                            sv.set_show_sidebar(false);
                             s.input(AppMsg::OpenPeer(PeerId(arr)));
                         }
                     }

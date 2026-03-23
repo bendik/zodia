@@ -45,6 +45,7 @@ pub fn build_peer_page(
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
+    split_view: &adw::OverlaySplitView,
 ) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, adw::ViewSwitcherTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
@@ -151,6 +152,20 @@ pub fn build_peer_page(
     let header = adw::HeaderBar::new();
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
+
+    // Sidebar toggle — visible only when the split view is collapsed.
+    let sidebar_btn = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    sidebar_btn.set_tooltip_text(Some("Show sidebar"));
+    sidebar_btn.set_visible(split_view.is_collapsed());
+    {
+        let sv = split_view.clone();
+        let btn = sidebar_btn.clone();
+        split_view.connect_notify_local(Some("collapsed"), move |sv2, _| {
+            btn.set_visible(sv2.is_collapsed());
+        });
+        sidebar_btn.connect_clicked(move |_| sv.set_show_sidebar(true));
+    }
+    header.pack_start(&sidebar_btn);
 
     let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
     let glyph = sign_glyph(their_solar_month);
