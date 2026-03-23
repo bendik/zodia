@@ -12,12 +12,14 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            container: archlinux:latest
 
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -31,16 +33,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Linux ──────────────────────────────────────────────────────────────
+      # ── Linux (Arch container) ─────────────────────────────────────────────
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev libopus-dev libasound2-dev pkg-config
-          # Verify the installed libadwaita is new enough for our v1_7 feature flag.
-          pkg-config --atleast-version=1.7 libadwaita-1 || \
-            { echo "::error::libadwaita >= 1.7 required (found $(pkg-config --modversion libadwaita-1)). Update the runner or add a PPA."; exit 1; }
+          pacman -Sy --noconfirm \
+            base-devel \
+            gtk4 \
+            libadwaita \
+            opus \
+            alsa-lib \
+            pkgconf \
+            curl \
+            git
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: Install system deps (macOS)
@@ -63,6 +68,7 @@ jobs:
         with:
           msystem: MINGW64
           update: true
+          path-type: inherit
           install: >-
             mingw-w64-x86_64-gtk4
             mingw-w64-x86_64-libadwaita
