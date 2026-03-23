@@ -894,29 +894,32 @@ fn rebuild_sidebar_peers(
             hbox.append(&badge);
         }
 
-        // Pencil button — hidden until hover.
-        let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
-        edit_btn.add_css_class("flat");
-        edit_btn.add_css_class("circular");
-        edit_btn.set_visible(false);
-        edit_btn.set_valign(gtk::Align::Center);
-        edit_btn.set_tooltip_text(Some("Set nickname"));
-        hbox.append(&edit_btn);
+        // Pencil icon — transparent until hover, always reserves space so the
+        // row height never jumps. Plain Image + GestureClick avoids button
+        // padding that would make peer rows taller than chart/sky/network rows.
+        let edit_img = gtk::Image::from_icon_name("document-edit-symbolic");
+        edit_img.set_pixel_size(16);
+        edit_img.set_opacity(0.0);
+        edit_img.set_valign(gtk::Align::Center);
+        edit_img.set_tooltip_text(Some("Set nickname"));
+        hbox.append(&edit_img);
 
-        // Show/hide on hover.
+        // Fade in/out on hover.
         let motion = gtk::EventControllerMotion::new();
-        let btn_enter = edit_btn.clone();
-        let btn_leave = edit_btn.clone();
-        motion.connect_enter(move |_, _, _| btn_enter.set_visible(true));
-        motion.connect_leave(move |_| btn_leave.set_visible(false));
+        let img_enter = edit_img.clone();
+        let img_leave = edit_img.clone();
+        motion.connect_enter(move |_, _, _| img_enter.set_opacity(1.0));
+        motion.connect_leave(move |_| img_leave.set_opacity(0.0));
         row.add_controller(motion);
 
-        // Open a dialog to set the nickname.
+        // Open a nickname dialog on click.
         {
-            let pid      = peer_id.0;
-            let s        = sender.clone();
-            let current  = model.peer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
-            edit_btn.connect_clicked(move |btn| {
+            let pid     = peer_id.0;
+            let s       = sender.clone();
+            let current = model.peer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
+            let img_ref = edit_img.clone();
+            let click   = gtk::GestureClick::new();
+            click.connect_released(move |_, _, _, _| {
                 let dialog = adw::AlertDialog::new(Some("Set Nickname"), None);
                 dialog.add_response("cancel", "Cancel");
                 dialog.add_response("set", "Set");
@@ -939,8 +942,9 @@ fn rebuild_sidebar_peers(
                         });
                     }
                 });
-                dialog.present(Some(btn));
+                dialog.present(Some(&img_ref));
             });
+            edit_img.add_controller(click);
         }
 
         row.set_child(Some(&hbox));

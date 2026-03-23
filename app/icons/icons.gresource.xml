@@ -13,5 +13,6 @@
     <file>scalable/actions/network-wireless-symbolic.svg</file>
     <file>scalable/actions/network-offline-symbolic.svg</file>
     <file>scalable/actions/notification-symbolic.svg</file>
+    <file>scalable/actions/document-edit-symbolic.svg</file>
   </gresource>
 </gresources>
