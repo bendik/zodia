@@ -25,9 +25,6 @@ jobs:
           - os: macos-14
             target: x86_64-apple-darwin
 
-          - os: windows-latest
-            target: x86_64-pc-windows-gnu
-
     steps:
       - uses: actions/checkout@v4
 
@@ -53,25 +50,8 @@ jobs:
           echo "CPATH=${BREW}/include"      >> "$GITHUB_ENV"
           echo "RUSTFLAGS=-L ${BREW}/lib"   >> "$GITHUB_ENV"
 
-      # ── Windows — MSYS2 provides the full GTK4 / libadwaita stack ──────────
-      # Windows builds use the MSYS2-bundled Rust (mingw-w64-x86_64-rust) so
-      # that cargo, the C compiler, and all libraries share the same runtime.
-      - name: Set up MSYS2 + GTK4 (Windows)
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gtk4
-            mingw-w64-x86_64-libadwaita
-            mingw-w64-x86_64-opus
-            mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-rust
-
-      # ── Rust toolchain (Linux + macOS — Windows uses MSYS2 Rust above) ────
+      # ── Rust toolchain ────────────────────────────────────────────────────
       - name: Install Rust toolchain
-        if: runner.os != 'Windows'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -88,16 +68,8 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       # ── Build ──────────────────────────────────────────────────────────────
-      - name: Build (Linux / macOS)
-        if: runner.os != 'Windows'
+      - name: Build
         run: cargo build --release --bin zodia --target ${{ matrix.target }}
-
-      # Windows: run cargo inside the MSYS2 MinGW64 shell so it picks up the
-      # correct C runtime and pkg-config paths automatically.
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: cargo build --release --bin zodia
 
       # ── Package — Linux ────────────────────────────────────────────────────
       - name: Package (Linux)
@@ -164,54 +136,6 @@ jobs:
 
           zip -r "zodia-${{ matrix.target }}.zip" "$APP"
 
-      # ── Package — Windows zip with bundled DLLs ────────────────────────────
-      # ldd (MSYS2) recursively lists all mingw64 DLLs our binary needs.
-      # We copy those alongside the exe and add a thin .cmd launcher that sets
-      # XDG_DATA_DIRS so GTK finds the bundled icon themes and schemas.
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: |
-          DIST=zodia-windows
-          mkdir -p "$DIST/share/icons" "$DIST/share/glib-2.0"
-
-          cp target/release/zodia.exe "$DIST/"
-
-          # Copy every mingw64 DLL the binary transitively depends on
-          ldd target/release/zodia.exe \
-            | grep '/mingw64/' \
-            | awk '{print $3}' \
-            | xargs -I{} cp -n {} "$DIST/"
-
-          # Icon themes
-          for theme in hicolor Adwaita; do
-            [ -d "/mingw64/share/icons/$theme" ] && \
-              cp -r "/mingw64/share/icons/$theme" "$DIST/share/icons/"
-          done
-
-          # GLib compiled schemas (GTK reads these on startup)
-          [ -d "/mingw64/share/glib-2.0/schemas" ] && \
-            cp -r /mingw64/share/glib-2.0/schemas "$DIST/share/glib-2.0/"
-
-          # GTK4 default settings / CSS
-          [ -d "/mingw64/share/gtk-4.0" ] && \
-            cp -r /mingw64/share/gtk-4.0 "$DIST/share/"
-
-          # Helper executables GTK spawns at runtime
-          for bin in gdbus gspawn-win64-helper gspawn-win64-helper-console; do
-            [ -f "/mingw64/bin/${bin}.exe" ] && cp "/mingw64/bin/${bin}.exe" "$DIST/"
-          done
-
-          # Launcher .cmd: sets XDG_DATA_DIRS to the bundle's share/ directory
-          cat > "$DIST/Zodia.cmd" <<'CMD'
-          @echo off
-          set "HERE=%~dp0"
-          set "XDG_DATA_DIRS=%HERE%share"
-          start /B "" "%HERE%zodia.exe" %*
-          CMD
-
-          zip -r "zodia-${{ matrix.target }}.zip" "$DIST"
-
       # ── Upload to GitHub Release ───────────────────────────────────────────
       - name: Upload Linux artifact
         if: runner.os == 'Linux'
@@ -227,9 +151,3 @@ jobs:
           files: zodia-${{ matrix.target }}.zip
           generate_release_notes: false
 
-      - name: Upload Windows artifact
-        if: runner.os == 'Windows'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: zodia-${{ matrix.target }}.zip
-          generate_release_notes: false

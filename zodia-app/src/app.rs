@@ -336,7 +336,20 @@ impl AsyncComponent for AppModel {
                 self.setup_error = msg;
             }
 
-            AppMsg::NetworkReady => {}
+            AppMsg::NetworkReady => {
+                // After a short settle delay, attempt to reconnect every persisted
+                // peer that we don't already have an active channel for.
+                let peer_ids: Vec<PeerId> = self.connected_peers.keys().cloned().collect();
+                if !peer_ids.is_empty() {
+                    let s = sender.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                        for peer_id in peer_ids {
+                            s.input(AppMsg::Reconnect(peer_id));
+                        }
+                    });
+                }
+            }
 
             AppMsg::ReAnnounce => {
                 if let Some(net) = &self.network {
@@ -736,14 +749,15 @@ impl AsyncComponent for AppModel {
 
         {
             let connected = self.connected_peers.len();
-            let online    = self.connected_channels.len();
+            let active    = self.peer_status.values()
+                .filter(|s| **s == PeerStatus::Active).count();
             let text = if self.node_id_text.is_empty() {
                 "Starting up…".to_string()
             } else if connected == 0 {
                 format!("Node ···{}  ·  searching…", self.node_id_text)
             } else {
-                format!("Node ···{}  ·  {} connected  ·  {} online",
-                        self.node_id_text, connected, online)
+                format!("Node ···{}  ·  {} people  ·  {} online",
+                        self.node_id_text, connected, active)
             };
             widgets.net_status_label.set_text(&text);
         }
@@ -930,8 +944,14 @@ fn rebuild_network_view(
             dp.approximate_aspects.join("  ")
         };
         let row = adw::ActionRow::new();
-        row.set_title(&format!("{glyph}  {aspects}"));
+        row.set_title(&aspects);
         row.set_subtitle(&dp.geohash_prefix);
+
+        // Glyph in a plain Label prefix so it goes through the same text
+        // rendering path as the sidebar — not through Pango markup.
+        let glyph_lbl = gtk::Label::new(Some(glyph));
+        glyph_lbl.set_valign(gtk::Align::Center);
+        row.add_prefix(&glyph_lbl);
         row.set_activatable(false);
 
         // "+" button — initiates Tier-1 connection; peer moves to sidebar on success.
