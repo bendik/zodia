@@ -715,7 +715,9 @@ impl AsyncComponent for AppModel {
                         widgets.peer_actions.insert(tag.clone(), (call_btn, send_btn));
                         widgets.peer_titles.insert(tag, switcher_title);
                     }
-                    widgets.split_view.set_show_sidebar(false);
+                    if widgets.split_view.is_collapsed() {
+                        widgets.split_view.set_show_sidebar(false);
+                    }
                 }
             } else {
                 // Not connected yet — re-queue, will be retried on next update.
@@ -1524,14 +1526,14 @@ fn build_main_page(
                         _ => unreachable!(),
                     };
                     cs.set_visible_child_name(page);
-                    sv.set_show_sidebar(false);
+                    if sv.is_collapsed() { sv.set_show_sidebar(false); }
                 }
                 idx if idx >= 4 => {
                     // Peer row — widget name holds the full peer id hex.
                     let name = row.widget_name();
                     if let Ok(bytes) = hex::decode(name.as_str()) {
                         if let Ok(arr) = bytes.try_into() as Result<[u8; 32], _> {
-                            sv.set_show_sidebar(false);
+                            if sv.is_collapsed() { sv.set_show_sidebar(false); }
                             s.input(AppMsg::OpenPeer(PeerId(arr)));
                         }
                     }
