@@ -18,46 +18,65 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            artifact: zodia
 
-          - os: macos-14
+          - os: macos-14            # Apple Silicon
             target: aarch64-apple-darwin
-            artifact: zodia
+
+          - os: macos-13            # Intel
+            target: x86_64-apple-darwin
+
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies (Linux)
+      # ── Linux ──────────────────────────────────────────────────────────────
+      - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libopus-dev \
-            libasound2-dev \
-            pkg-config
+            libgtk-4-dev libadwaita-1-dev libopus-dev libasound2-dev pkg-config
 
-      - name: Install system dependencies (macOS)
+      # ── macOS ──────────────────────────────────────────────────────────────
+      - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew install gtk4 libadwaita pango opus pkg-config glib
+        run: brew install gtk4 libadwaita pango opus pkg-config glib
 
-      - name: Export brew paths for build tools (macOS)
+      - name: Export brew env (macOS)
         if: runner.os == 'macOS'
         run: |
           BREW="$(brew --prefix)"
           echo "PKG_CONFIG_PATH=${BREW}/lib/pkgconfig:${BREW}/share/pkgconfig" >> "$GITHUB_ENV"
-          echo "LIBRARY_PATH=${BREW}/lib"                                       >> "$GITHUB_ENV"
-          echo "CPATH=${BREW}/include"                                          >> "$GITHUB_ENV"
-          # Tell the linker where to find dylibs at link time
-          echo "RUSTFLAGS=-L ${BREW}/lib"                                       >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=${BREW}/lib"   >> "$GITHUB_ENV"
+          echo "CPATH=${BREW}/include"      >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-L ${BREW}/lib"   >> "$GITHUB_ENV"
 
+      # ── Windows — MSYS2 provides the full GTK4 / libadwaita stack ──────────
+      # Windows builds use the MSYS2-bundled Rust (mingw-w64-x86_64-rust) so
+      # that cargo, the C compiler, and all libraries share the same runtime.
+      - name: Set up MSYS2 + GTK4 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk4
+            mingw-w64-x86_64-libadwaita
+            mingw-w64-x86_64-opus
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-rust
+
+      # ── Rust toolchain (Linux + macOS — Windows uses MSYS2 Rust above) ────
       - name: Install Rust toolchain
+        if: runner.os != 'Windows'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
+      # ── Cargo registry cache ───────────────────────────────────────────────
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -65,28 +84,36 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      - name: Build release binary
+      # ── Build ──────────────────────────────────────────────────────────────
+      - name: Build (Linux / macOS)
+        if: runner.os != 'Windows'
         run: cargo build --release --bin zodia --target ${{ matrix.target }}
 
-      - name: Prepare Linux artifact
+      # Windows: run cargo inside the MSYS2 MinGW64 shell so it picks up the
+      # correct C runtime and pkg-config paths automatically.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: cargo build --release --bin zodia
+
+      # ── Package — Linux ────────────────────────────────────────────────────
+      - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          BIN=target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          BIN=target/${{ matrix.target }}/release/zodia
           strip "$BIN"
           cp "$BIN" zodia-${{ matrix.target }}
 
-      - name: Create macOS .app bundle
+      # ── Package — macOS .app bundle ────────────────────────────────────────
+      - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           APP=Zodia.app
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources"
-
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} \
-             "$APP/Contents/MacOS/zodia-bin"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/${{ matrix.target }}/release/zodia "$APP/Contents/MacOS/zodia-bin"
 
           cat > "$APP/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -94,31 +121,20 @@ jobs:
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>CFBundleName</key>
-            <string>Zodia</string>
-            <key>CFBundleDisplayName</key>
-            <string>Zodia</string>
-            <key>CFBundleIdentifier</key>
-            <string>app.zodia.Zodia</string>
-            <key>CFBundleVersion</key>
-            <string>${{ github.ref_name }}</string>
-            <key>CFBundleShortVersionString</key>
-            <string>${{ github.ref_name }}</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleExecutable</key>
-            <string>zodia</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>13.0</string>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-            <key>NSHumanReadableCopyright</key>
-            <string>AGPL-3.0-or-later</string>
+            <key>CFBundleName</key><string>Zodia</string>
+            <key>CFBundleDisplayName</key><string>Zodia</string>
+            <key>CFBundleIdentifier</key><string>app.zodia.Zodia</string>
+            <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
+            <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleExecutable</key><string>zodia</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSHumanReadableCopyright</key><string>AGPL-3.0-or-later</string>
           </dict>
           </plist>
           PLIST
 
-          # Bundle shared libraries so the .app is self-contained
           brew install dylibbundler
           BREW="$(brew --prefix)"
           dylibbundler \
@@ -129,20 +145,14 @@ jobs:
             --search-path "${BREW}/lib" \
             --overwrite-dir
 
-          # Copy Adwaita icon theme so symbolic icons render
-          ICONS_SRC="$(brew --prefix)/share/icons"
-          if [ -d "$ICONS_SRC/hicolor" ]; then
-            mkdir -p "$APP/Contents/Resources/share/icons"
-            cp -r "$ICONS_SRC/hicolor" "$APP/Contents/Resources/share/icons/"
-          fi
-          if [ -d "$ICONS_SRC/Adwaita" ]; then
-            mkdir -p "$APP/Contents/Resources/share/icons"
-            cp -r "$ICONS_SRC/Adwaita" "$APP/Contents/Resources/share/icons/"
-          fi
+          # Bundle icon themes so symbolic icons render
+          mkdir -p "$APP/Contents/Resources/share/icons"
+          for theme in hicolor Adwaita; do
+            [ -d "${BREW}/share/icons/$theme" ] && \
+              cp -r "${BREW}/share/icons/$theme" "$APP/Contents/Resources/share/icons/"
+          done
 
-          # Launcher wrapper — sets XDG_DATA_DIRS so GTK finds our bundled icons
-          # Also exports GDK_PIXBUF_MODULE_FILE so pixbuf loaders are found.
-          BREW="$(brew --prefix)"
+          # Launcher: sets XDG_DATA_DIRS and pixbuf module path then execs the real binary
           cat > "$APP/Contents/MacOS/zodia" <<SH
           #!/bin/sh
           BUNDLE="\$(cd "\$(dirname "\$0")/../.." && pwd)"
@@ -154,15 +164,71 @@ jobs:
 
           zip -r "zodia-${{ matrix.target }}.zip" "$APP"
 
-      - name: Upload Linux artifact to GitHub Release
+      # ── Package — Windows zip with bundled DLLs ────────────────────────────
+      # ldd (MSYS2) recursively lists all mingw64 DLLs our binary needs.
+      # We copy those alongside the exe and add a thin .cmd launcher that sets
+      # XDG_DATA_DIRS so GTK finds the bundled icon themes and schemas.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          DIST=zodia-windows
+          mkdir -p "$DIST/share/icons" "$DIST/share/glib-2.0"
+
+          cp target/release/zodia.exe "$DIST/"
+
+          # Copy every mingw64 DLL the binary transitively depends on
+          ldd target/release/zodia.exe \
+            | grep '/mingw64/' \
+            | awk '{print $3}' \
+            | xargs -I{} cp -n {} "$DIST/"
+
+          # Icon themes
+          for theme in hicolor Adwaita; do
+            [ -d "/mingw64/share/icons/$theme" ] && \
+              cp -r "/mingw64/share/icons/$theme" "$DIST/share/icons/"
+          done
+
+          # GLib compiled schemas (GTK reads these on startup)
+          [ -d "/mingw64/share/glib-2.0/schemas" ] && \
+            cp -r /mingw64/share/glib-2.0/schemas "$DIST/share/glib-2.0/"
+
+          # GTK4 default settings / CSS
+          [ -d "/mingw64/share/gtk-4.0" ] && \
+            cp -r /mingw64/share/gtk-4.0 "$DIST/share/"
+
+          # Helper executables GTK spawns at runtime
+          for bin in gdbus gspawn-win64-helper gspawn-win64-helper-console; do
+            [ -f "/mingw64/bin/${bin}.exe" ] && cp "/mingw64/bin/${bin}.exe" "$DIST/"
+          done
+
+          # Launcher .cmd: sets XDG_DATA_DIRS to the bundle's share/ directory
+          cat > "$DIST/Zodia.cmd" <<'CMD'
+          @echo off
+          set "HERE=%~dp0"
+          set "XDG_DATA_DIRS=%HERE%share"
+          start /B "" "%HERE%zodia.exe" %*
+          CMD
+
+          zip -r "zodia-${{ matrix.target }}.zip" "$DIST"
+
+      # ── Upload to GitHub Release ───────────────────────────────────────────
+      - name: Upload Linux artifact
         if: runner.os == 'Linux'
         uses: softprops/action-gh-release@v2
         with:
           files: zodia-${{ matrix.target }}
           generate_release_notes: true
 
-      - name: Upload macOS artifact to GitHub Release
+      - name: Upload macOS artifact
         if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zodia-${{ matrix.target }}.zip
+          generate_release_notes: false
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
         uses: softprops/action-gh-release@v2
         with:
           files: zodia-${{ matrix.target }}.zip
