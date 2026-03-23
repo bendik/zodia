@@ -198,11 +198,11 @@ fn placidus_cusps(ramc: f64, lat: f64, eps: f64, mc: f64, asc: f64) -> [f64; 12]
         cusps[i] = ra_to_ecl_lon(ra, eps_r);
     }
 
-    // H2, H3: 1/3 and 2/3 of the nocturnal semi-arc from IC *toward ASC*.
-    // This arc runs in the *decreasing* RA direction (IC_RA → ASC_RA),
-    // so we use negative fractions to step backward from IC.
+    // H3 = 1/3 of the nocturnal semi-arc from IC toward ASC (closer to IC).
+    // H2 = 2/3 of the nocturnal semi-arc from IC toward ASC (closer to ASC).
+    // The arc runs in the *decreasing* RA direction, so fracs are negative.
     let ic_ra = (ramc + 180.0).rem_euclid(360.0);
-    for (i, frac) in [(1usize, -1.0_f64 / 3.0), (2, -2.0 / 3.0)] {
+    for (i, frac) in [(1usize, -2.0_f64 / 3.0), (2, -1.0 / 3.0)] {
         let ra = placidus_iter(ic_ra, frac, phi, eps_r, false);
         cusps[i] = ra_to_ecl_lon(ra, eps_r);
     }
