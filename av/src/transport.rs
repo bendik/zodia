@@ -42,7 +42,7 @@ pub fn start_transport(
 
     // ── encoder std::thread ───────────────────────────────────────────────────
     let enc_shutdown = shutdown.clone();
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("zodia-encoder".into())
         .spawn(move || {
             let mut enc = match Encoder::new() {
@@ -84,8 +84,9 @@ pub fn start_transport(
                     }
                 }
             }
-        })
-        .expect("spawn encoder thread");
+        }) {
+        tracing::error!("failed to spawn encoder thread: {e}");
+    }
 
     // ── QUIC datagram send task ───────────────────────────────────────────────
     let conn_send = conn.clone();
@@ -118,7 +119,7 @@ pub fn start_transport(
 
     // ── decoder std::thread ───────────────────────────────────────────────────
     let dec_shutdown = shutdown.clone();
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name("zodia-decoder".into())
         .spawn(move || {
             let mut dec = match Decoder::new() {
@@ -162,6 +163,7 @@ pub fn start_transport(
                     Err(e) => tracing::warn!("opus decode: {e}"),
                 }
             }
-        })
-        .expect("spawn decoder thread");
+        }) {
+        tracing::error!("failed to spawn decoder thread: {e}");
+    }
 }

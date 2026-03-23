@@ -32,7 +32,7 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected peer.
 ///
-/// Returns `(toolbar_view, msg_list, call_btn, send_btn, switcher_title)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title)`.
 /// `call_btn` and `send_btn` should be set insensitive when the peer is offline.
 /// `switcher_title` is retained by the caller so the title can be updated when
 /// the nickname changes.
@@ -46,7 +46,7 @@ pub fn build_peer_page(
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
     split_view: &adw::OverlaySplitView,
-) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, adw::ViewSwitcherTitle) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, adw::ViewSwitcherTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -92,7 +92,7 @@ pub fn build_peer_page(
     syn_page.set_icon_name(Some("synastry-symbolic"));
 
     // Messages tab
-    let (messages_widget, msg_list, call_btn, send_btn) = build_messages_tab(peer_id, sender);
+    let (messages_widget, msg_list, call_btn, send_btn, entry) = build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
     let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
     msg_page.set_icon_name(Some("mail-unread-symbolic"));
@@ -162,46 +162,54 @@ pub fn build_peer_page(
         .build();
     toolbar_view.add_bottom_bar(&switcher_bar);
 
-    (toolbar_view, msg_list, call_btn, send_btn, switcher_title)
+    (toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
 
 /// Build the Messages tab content.
 ///
-/// Returns `(container_widget, msg_list, call_btn, send_btn)`.
+/// Returns `(container_widget, msg_list, call_btn, send_btn, entry)`.
 /// Both action buttons live in the input row so they are always accessible.
 fn build_messages_tab(
     peer_id: &PeerId,
     sender: &AsyncComponentSender<AppModel>,
-) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button) {
+) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     outer.set_vexpand(true);
 
-    let clamp = adw::Clamp::new();
-    clamp.set_maximum_size(720);
-    clamp.set_vexpand(true);
-
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    vbox.set_vexpand(true);
-
-    // Scrollable message list
+    // Scrolled window is full-width so the scrollbar sits at the screen edge.
+    // The list content is clamped to 720 px to match the aspect list width.
     let msg_list = gtk::ListBox::new();
     msg_list.set_selection_mode(gtk::SelectionMode::None);
     msg_list.add_css_class("boxed-list");
     msg_list.set_vexpand(true);
 
+    let msg_clamp = adw::Clamp::new();
+    msg_clamp.set_maximum_size(720);
+    msg_clamp.set_margin_top(8);
+    msg_clamp.set_margin_bottom(8);
+    msg_clamp.set_margin_start(12);
+    msg_clamp.set_margin_end(12);
+    msg_clamp.set_child(Some(&msg_list));
+
     let scrolled = gtk::ScrolledWindow::new();
     scrolled.set_vexpand(true);
     scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scrolled.set_child(Some(&msg_list));
-    vbox.append(&scrolled);
+    scrolled.set_child(Some(&msg_clamp));
+    outer.append(&scrolled);
 
     // Auto-scroll to bottom whenever the content height grows (new message added).
-    // `notify::upper` fires after GTK has measured the new row, so the adjustment
-    // values are already final — no idle deferral needed here.
+    // `notify::upper` fires during the allocation phase; we defer one frame via
+    // idle_add_local_once so page_size is fully settled before we set the value.
     scrolled.vadjustment().connect_notify_local(Some("upper"), |adj, _| {
-        adj.set_value(adj.upper() - adj.page_size());
+        let adj = adj.clone();
+        glib::idle_add_local_once(move || {
+            let max = adj.upper() - adj.page_size();
+            if max > 0.0 {
+                adj.set_value(max);
+            }
+        });
     });
 
     // Input row — call button | text entry | send button
@@ -230,10 +238,7 @@ fn build_messages_tab(
     send_btn.set_tooltip_text(Some("Send"));
     input_row.append(&send_btn);
 
-    vbox.append(&input_row);
-
-    clamp.set_child(Some(&vbox));
-    outer.append(&clamp);
+    outer.append(&input_row);
 
     // Wire send button + Enter key
     let pid = peer_id.clone();
@@ -251,7 +256,7 @@ fn build_messages_tab(
     send_btn.connect_clicked(move |_| send_c());
     entry.connect_activate(move |_| send());
 
-    (outer, msg_list, call_btn, send_btn)
+    (outer, msg_list, call_btn, send_btn, entry)
 }
 
 /// Append a single chat row to a message list.

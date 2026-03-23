@@ -12,7 +12,6 @@ mod placements;
 mod util;
 
 use app::{AppInit, AppModel};
-use libadwaita as adw;
 use relm4::RelmApp;
 use zodia_config::LocalConfig;
 use zodia_store::{ZodiaStore, seed::BaselineData};

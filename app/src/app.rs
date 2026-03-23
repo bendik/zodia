@@ -168,7 +168,7 @@ pub struct AppWidgets {
     /// How many messages from `chat_logs` have already been appended to each list.
     peer_chat_shown: HashMap<String, usize>,
     /// Call and send buttons per peer — disabled when peer is offline.
-    peer_actions: HashMap<String, (gtk::Button, gtk::Button)>,
+    peer_actions: HashMap<String, (gtk::Button, gtk::Button, gtk::Entry)>,
     /// ViewSwitcherTitle per peer — updated when the nickname changes.
     #[allow(deprecated)]
     peer_titles: HashMap<String, adw::ViewSwitcherTitle>,
@@ -697,7 +697,7 @@ impl AsyncComponent for AppModel {
                         // Page already built — switch to it directly.
                         widgets.content_stack.set_visible_child_name(&tag);
                     } else {
-                        let (toolbar_view, msg_list, call_btn, send_btn, switcher_title) =
+                        let (toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title) =
                             peer_page::build_peer_page(
                                 &peer_id, their_blob, chart,
                                 Rc::clone(&self.store),
@@ -706,13 +706,14 @@ impl AsyncComponent for AppModel {
                                 nickname,
                                 &widgets.split_view,
                             );
-                        let active = self.peer_status.get(&peer_id) == Some(&PeerStatus::Active);
-                        call_btn.set_sensitive(active);
-                        send_btn.set_sensitive(active);
+                        let online = self.connected_channels.contains_key(&peer_id);
+                        call_btn.set_sensitive(online);
+                        send_btn.set_sensitive(online);
+                        entry.set_sensitive(online);
                         widgets.content_stack.add_named(&toolbar_view, Some(&tag));
                         widgets.content_stack.set_visible_child_name(&tag);
                         widgets.peer_msg_lists.insert(tag.clone(), msg_list);
-                        widgets.peer_actions.insert(tag.clone(), (call_btn, send_btn));
+                        widgets.peer_actions.insert(tag.clone(), (call_btn, send_btn, entry));
                         widgets.peer_titles.insert(tag, switcher_title);
                     }
                     if widgets.split_view.is_collapsed() {
@@ -742,11 +743,12 @@ impl AsyncComponent for AppModel {
 
         // ── update call/send button sensitivity for open peer pages ──────────
 
-        for (tag, (call_btn, send_btn)) in &widgets.peer_actions {
-            let active = self.peer_status.iter()
-                .any(|(id, s)| hex::encode_upper(&id.0[..4]) == *tag && *s == PeerStatus::Active);
-            call_btn.set_sensitive(active);
-            send_btn.set_sensitive(active);
+        for (tag, (call_btn, send_btn, entry)) in &widgets.peer_actions {
+            let online = self.connected_channels.keys()
+                .any(|id| hex::encode_upper(&id.0[..4]) == *tag);
+            call_btn.set_sensitive(online);
+            send_btn.set_sensitive(online);
+            entry.set_sensitive(online);
         }
 
         // ── network status label (shown in the Network content view) ─────────
