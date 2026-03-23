@@ -63,10 +63,6 @@ fn main() {
     // ── GTK / ADW application ─────────────────────────────────────────────────
     let app = RelmApp::new("net.zodia.app");
 
-    // Request dark colour scheme — adwaita will use the system preference as
-    // fallback if the compositor ignores prefer-dark-scheme.
-    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::PreferDark);
-
     // Add the bundled icon resource path to the default icon theme so GTK
     // resolves our icons on every platform including macOS.
     if let Some(display) = gtk4::gdk::Display::default() {

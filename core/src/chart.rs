@@ -16,10 +16,10 @@ pub struct Chart {
 }
 
 impl Chart {
-    /// Compute a chart using Whole Sign houses (default).
+    /// Compute a chart using Placidus houses (default).
     /// Falls back to an all-zero house stub if the geohash is too coarse.
     pub fn compute(birth: BirthData) -> Result<Self, EphemerisError> {
-        Self::compute_with(birth, HouseKind::WholeSign)
+        Self::compute_with(birth, HouseKind::Placidus)
     }
 
     /// Compute a chart with an explicit house system.
