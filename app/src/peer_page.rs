@@ -8,6 +8,9 @@
 //!
 //! Returns `(ToolbarView, gtk::ListBox, call_btn, send_btn)` — the caller
 //! appends chat rows to the `ListBox` whenever new messages arrive.
+//!
+//! `ViewSwitcherTitle` is deprecated in ADW 1.4 but the TabBar alternative
+//! exposes close buttons that cannot be hidden without fragile CSS hacks.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,8 +32,11 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected peer.
 ///
-/// Returns `(toolbar_view, msg_list, call_btn, send_btn)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn, switcher_title)`.
 /// `call_btn` and `send_btn` should be set insensitive when the peer is offline.
+/// `switcher_title` is retained by the caller so the title can be updated when
+/// the nickname changes.
+#[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_peer_page(
     peer_id: &PeerId,
     their_blob: &Tier1Blob,
@@ -39,7 +45,7 @@ pub fn build_peer_page(
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
-) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, adw::ViewSwitcherTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -54,15 +60,10 @@ pub fn build_peer_page(
         }
     };
 
-    // ── tab view ──────────────────────────────────────────────────────────────
+    // ── view stack ────────────────────────────────────────────────────────────
 
-    let tab_view = adw::TabView::new();
-
-    // Prevent all tabs from being closed — these three are permanent.
-    tab_view.connect_close_page(|view, page| {
-        view.close_page_finish(page, false);
-        glib::Propagation::Stop
-    });
+    let view_stack = adw::ViewStack::new();
+    view_stack.set_vexpand(true);
 
     // ── nickname entry (only on "Their Chart" tab) ────────────────────────────
     let nick_entry = adw::EntryRow::new();
@@ -109,37 +110,33 @@ pub fn build_peer_page(
     their_tab.append(their_av.widget());
     their_tab.set_vexpand(true);
 
-    let their_page = tab_view.append(&their_tab);
-    their_page.set_title("Their Chart");
+    let their_page = view_stack.add_titled(&their_tab, Some("their"), "Their Chart");
+    their_page.set_icon_name(Some("weather-clear-symbolic"));
 
     // Synastry tab
     let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity));
     syn_av.widget().set_vexpand(true);
-    let syn_page = tab_view.append(syn_av.widget());
-    syn_page.set_title("Synastry");
+    let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
+    syn_page.set_icon_name(Some("synastry-symbolic"));
 
-    // Messages tab — call and send buttons both live in the input row
+    // Messages tab
     let (messages_widget, msg_list, call_btn, send_btn) = build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
-    let msg_page = tab_view.append(&messages_widget);
-    msg_page.set_title("Messages");
+    let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
+    msg_page.set_icon_name(Some("mail-unread-symbolic"));
 
-    // Scroll to bottom whenever the Messages tab is selected — handles both
-    // the initial backfill (rows added before layout) and returning to the tab.
+    // Scroll to bottom whenever the Messages tab becomes visible.
     {
-        let msg_page_ref = msg_page.clone();
         let list = msg_list.clone();
-        tab_view.connect_notify_local(Some("selected-page"), move |tv, _| {
-            if let Some(selected) = tv.selected_page() {
-                if selected == msg_page_ref {
-                    if let Some(sw) = list.parent()
-                        .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
-                    {
-                        let adj = sw.vadjustment();
-                        glib::idle_add_local_once(move || {
-                            adj.set_value(adj.upper() - adj.page_size());
-                        });
-                    }
+        view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
+            if stack.visible_child_name().as_deref() == Some("messages") {
+                if let Some(sw) = list.parent()
+                    .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
+                {
+                    let adj = sw.vadjustment();
+                    glib::idle_add_local_once(move || {
+                        adj.set_value(adj.upper() - adj.page_size());
+                    });
                 }
             }
         });
@@ -151,30 +148,35 @@ pub fn build_peer_page(
 
     let toolbar_view = adw::ToolbarView::new();
 
-    // Header bar — nickname (or peer hex) as the title
     let header = adw::HeaderBar::new();
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
 
     let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
     let glyph = sign_glyph(their_solar_month);
+
+    let switcher_title = adw::ViewSwitcherTitle::new();
+    switcher_title.set_stack(Some(&view_stack));
     let title_text = nickname
         .filter(|n| !n.is_empty())
         .map(|n| format!("{glyph}  {n}"))
         .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
-    let win_title = adw::WindowTitle::new(&title_text, "");
-    header.set_title_widget(Some(&win_title));
-
-    // Tab bar sits directly below the header
-    let tab_bar = adw::TabBar::new();
-    tab_bar.set_view(Some(&tab_view));
-    tab_bar.set_autohide(false);
+    switcher_title.set_title(&title_text);
+    header.set_title_widget(Some(&switcher_title));
 
     toolbar_view.add_top_bar(&header);
-    toolbar_view.add_top_bar(&tab_bar);
-    toolbar_view.set_content(Some(&tab_view));
+    toolbar_view.set_content(Some(&view_stack));
 
-    (toolbar_view, msg_list, call_btn, send_btn)
+    // Bottom switcher bar (appears when window is too narrow for header tabs)
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_stack(Some(&view_stack));
+    switcher_title
+        .bind_property("title-visible", &switcher_bar, "reveal")
+        .sync_create()
+        .build();
+    toolbar_view.add_bottom_bar(&switcher_bar);
+
+    (toolbar_view, msg_list, call_btn, send_btn, switcher_title)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
@@ -208,6 +210,13 @@ fn build_messages_tab(
     scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scrolled.set_child(Some(&msg_list));
     vbox.append(&scrolled);
+
+    // Auto-scroll to bottom whenever the content height grows (new message added).
+    // `notify::upper` fires after GTK has measured the new row, so the adjustment
+    // values are already final — no idle deferral needed here.
+    scrolled.vadjustment().connect_notify_local(Some("upper"), |adj, _| {
+        adj.set_value(adj.upper() - adj.page_size());
+    });
 
     // Input row — call button | text entry | send button
     let input_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -276,18 +285,8 @@ pub fn append_chat_row(list: &gtk::ListBox, text: &str, from_us: bool) {
     label.set_margin_top(6);
     label.set_margin_bottom(6);
 
-
     row.set_child(Some(&label));
     list.append(&row);
-
-    // Defer scroll to bottom until GTK has computed layout (adj.upper may be
-    // zero if the widget is not yet realized or is currently hidden).
-    if let Some(sw) = list.parent()
-        .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
-    {
-        let adj = sw.vadjustment();
-        glib::idle_add_local_once(move || {
-            adj.set_value(adj.upper() - adj.page_size());
-        });
-    }
+    // Scrolling is handled by the vadjustment `notify::upper` signal wired
+    // in build_messages_tab — no manual scroll needed here.
 }

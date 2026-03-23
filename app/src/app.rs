@@ -169,6 +169,9 @@ pub struct AppWidgets {
     peer_chat_shown: HashMap<String, usize>,
     /// Call and send buttons per peer — disabled when peer is offline.
     peer_actions: HashMap<String, (gtk::Button, gtk::Button)>,
+    /// ViewSwitcherTitle per peer — updated when the nickname changes.
+    #[allow(deprecated)]
+    peer_titles: HashMap<String, adw::ViewSwitcherTitle>,
 
     /// Bell button — only visible when there are unread messages.
     notif_btn: gtk::MenuButton,
@@ -694,20 +697,22 @@ impl AsyncComponent for AppModel {
                         // Page already built — switch to it directly.
                         widgets.content_stack.set_visible_child_name(&tag);
                     } else {
-                        let (toolbar_view, msg_list, call_btn, send_btn) = peer_page::build_peer_page(
-                            &peer_id, their_blob, chart,
-                            Rc::clone(&self.store),
-                            Rc::clone(&self.identity),
-                            &sender,
-                            nickname,
-                        );
+                        let (toolbar_view, msg_list, call_btn, send_btn, switcher_title) =
+                            peer_page::build_peer_page(
+                                &peer_id, their_blob, chart,
+                                Rc::clone(&self.store),
+                                Rc::clone(&self.identity),
+                                &sender,
+                                nickname,
+                            );
                         let active = self.peer_status.get(&peer_id) == Some(&PeerStatus::Active);
                         call_btn.set_sensitive(active);
                         send_btn.set_sensitive(active);
                         widgets.content_stack.add_named(&toolbar_view, Some(&tag));
                         widgets.content_stack.set_visible_child_name(&tag);
                         widgets.peer_msg_lists.insert(tag.clone(), msg_list);
-                        widgets.peer_actions.insert(tag, (call_btn, send_btn));
+                        widgets.peer_actions.insert(tag.clone(), (call_btn, send_btn));
+                        widgets.peer_titles.insert(tag, switcher_title);
                     }
                     widgets.split_view.set_show_content(true);
                 }
@@ -814,8 +819,9 @@ impl AsyncComponent for AppModel {
 
 // ── sidebar peer list builder ─────────────────────────────────────────────────
 
-/// Rebuild the peer rows in `nav_list` (indices 4+).
-/// Removes stale rows, then appends one row per connected peer.
+/// Rebuild the peer rows in `nav_list` (indices 4+) and refresh any open peer
+/// page titles so nickname changes are reflected immediately.
+#[allow(deprecated)] // ViewSwitcherTitle
 fn rebuild_sidebar_peers(
     widgets: &mut AppWidgets,
     model: &AppModel,
@@ -887,6 +893,15 @@ fn rebuild_sidebar_peers(
 
         row.set_child(Some(&hbox));
         widgets.nav_list.append(&row);
+
+        // Keep the open peer page title in sync with the current nickname.
+        if let Some(title_widget) = widgets.peer_titles.get(&peer_hex) {
+            let title_text = model.peer_nicknames.get(&peer_hex)
+                .filter(|n| !n.is_empty())
+                .map(|n| format!("{glyph}  {n}"))
+                .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
+            title_widget.set_title(&title_text);
+        }
     }
 }
 
@@ -1161,6 +1176,7 @@ fn build_widgets(
         peer_msg_lists: HashMap::new(),
         peer_chat_shown: HashMap::new(),
         peer_actions: HashMap::new(),
+        peer_titles: HashMap::new(),
         notif_btn,
         notif_label,
         net_status_label,

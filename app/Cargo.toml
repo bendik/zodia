@@ -17,15 +17,15 @@ zodia-config.workspace = true
 zodia-store.workspace = true
 zodia-av.workspace = true
 blake3.workspace = true
-relm4 = { version = "0.9", features = ["macros", "libadwaita"] }
-gtk4 = "0.9"
-libadwaita = { version = "0.7", features = ["v1_4"] }
+relm4 = { version = "0.10", features = ["macros", "libadwaita"] }
+gtk4 = "0.10"
+libadwaita = { version = "0.8", features = ["v1_8"] }
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-gio = "0.20"
+gio = "0.21"
 hex = "0.4"
 
 [build-dependencies]
-glib-build-tools = "0.20"
+glib-build-tools = "0.21"

@@ -1,13 +1,13 @@
 [workspace]
 members = [
-    "zodia-core",
-    "zodia-net",
-    "zodia-store",
-    "zodia-crypto",
-    "zodia-sync",
-    "zodia-config",
-    "zodia-av",
-    "zodia-app",
+    "core",
+    "net",
+    "store",
+    "crypto",
+    "sync",
+    "config",
+    "av",
+    "app",
 ]
 resolver = "2"
 
@@ -17,14 +17,14 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
-zodia-core   = { path = "zodia-core" }
-zodia-net    = { path = "zodia-net" }
-zodia-store  = { path = "zodia-store" }
-zodia-crypto = { path = "zodia-crypto" }
-zodia-sync   = { path = "zodia-sync" }
-zodia-av     = { path = "zodia-av" }
+zodia-core   = { path = "core" }
+zodia-net    = { path = "net" }
+zodia-store  = { path = "store" }
+zodia-crypto = { path = "crypto" }
+zodia-sync   = { path = "sync" }
+zodia-av     = { path = "av" }
 
-zodia-config = { path = "zodia-config" }
+zodia-config = { path = "config" }
 
 rusqlite   = "0.31"
 toml       = "0.8"
