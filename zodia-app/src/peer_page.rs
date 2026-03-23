@@ -28,8 +28,8 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::NavigationPage` for a connected peer.
 ///
-/// Returns `(page, msg_list)` where `msg_list` is the `gtk::ListBox`
-/// the app uses to append incoming/outgoing chat rows.
+/// Returns `(page, msg_list, call_btn, send_btn)`.
+/// `call_btn` and `send_btn` should be set insensitive when the peer is offline.
 #[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_peer_page(
     peer_id: &PeerId,
@@ -39,7 +39,7 @@ pub fn build_peer_page(
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
-) -> (adw::NavigationPage, gtk::ListBox) {
+) -> (adw::NavigationPage, gtk::ListBox, gtk::Button, gtk::Button) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -80,7 +80,7 @@ pub fn build_peer_page(
     syn_page.set_icon_name(Some("synastry-symbolic"));
 
     // Messages tab
-    let (messages_widget, msg_list) = build_messages_tab(peer_id, sender);
+    let (messages_widget, msg_list, send_btn) = build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
     let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
     msg_page.set_icon_name(Some("mail-unread-symbolic"));
@@ -164,19 +164,20 @@ pub fn build_peer_page(
         .map(|n| format!("{glyph}  {n}"))
         .unwrap_or_else(|| format!("···{peer_hex}"));
     let page = adw::NavigationPage::new(&toolbar_view, &nav_title);
-    (page, msg_list)
+    // Sidebar is the only navigation control — hide the auto-injected back button.
+    page.set_can_pop(false);
+    (page, msg_list, call_btn, send_btn)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
 
 /// Build the Messages tab content.
 ///
-/// Returns `(container_widget, msg_list)` — the `msg_list` is the `gtk::ListBox`
-/// the app layer appends rows to when new messages arrive.
+/// Returns `(container_widget, msg_list, send_btn)`.
 fn build_messages_tab(
     peer_id: &PeerId,
     sender: &AsyncComponentSender<AppModel>,
-) -> (gtk::Box, gtk::ListBox) {
+) -> (gtk::Box, gtk::ListBox, gtk::Button) {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     // Scrollable message list
@@ -227,7 +228,7 @@ fn build_messages_tab(
     send_btn.connect_clicked(move |_| send_c());
     entry.connect_activate(move |_| send());
 
-    (vbox, msg_list)
+    (vbox, msg_list, send_btn)
 }
 
 /// Append a single chat row to a message list.
