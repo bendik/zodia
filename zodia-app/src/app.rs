@@ -83,6 +83,8 @@ pub enum AppMsg {
     SendChat { peer_id: PeerId, text: String },
     /// User set or updated a nickname for a connected peer.
     SetNickname { peer_id: PeerId, name: String },
+    /// "+" pressed in the Network view — connect and add to sidebar, no navigation.
+    ConnectPeer(PeerId),
     /// Sent internally after the network starts to force an initial update_view.
     NetworkReady,
     /// Re-publish our Tier-0 announce blob and reschedule the next announce.
@@ -144,31 +146,36 @@ pub struct AppWidgets {
     chart_container: gtk::Box,
     sky_container: gtk::Box,
 
-    /// The `NavigationView` that lives *inside* the Peers tab.
-    /// Peer detail pages are pushed onto this — the tab bar always stays visible.
-    peers_nav: adw::NavigationView,
-    /// The box whose children are rebuilt whenever `peer_list_generation` changes.
-    peers_content: gtk::Box,
+    /// Sidebar + content split layout.
+    split_view: adw::NavigationSplitView,
+    /// Fixed nav ListBox (Chart / Sky / Network) — stored so peer rows can deselect it.
+    nav_list: gtk::ListBox,
+    /// Box below the separator — contains a single AdwPreferencesGroup
+    /// that is recreated on every peer list change.
+    peers_section_box: gtk::Box,
     /// Generation of the peer list we last rendered.
     peer_list_shown_gen: u64,
+
+    /// NavigationView in the content pane — peer pages are pushed here.
+    content_nav: adw::NavigationView,
+    /// Stack inside the content root page — switches between chart/sky/network views.
+    content_stack: gtk::Stack,
+    /// The "Network" scrollable view (rebuilt for discovered/online peers).
+    peers_content: gtk::Box,
+    /// Title widget in the content header bar (chart/sky/network).
+    content_title: adw::WindowTitle,
 
     /// Message list widget per peer (keyed by 4-byte hex tag).
     peer_msg_lists: HashMap<String, gtk::ListBox>,
     /// How many messages from `chat_logs` have already been appended to each list.
     peer_chat_shown: HashMap<String, usize>,
 
-    peers_page: adw::ViewStackPage,
-
-    /// Network status button (header bar, end side) — click for node info popover.
-    net_status_btn: gtk::MenuButton,
-    /// Stable image child of net_status_btn — update icon here, never via set_icon_name on the button.
-    net_icon: gtk::Image,
-    /// Label inside the network status popover — updated with peer/sync counts.
-    net_popover_label: gtk::Label,
     /// Bell button — only visible when there are unread messages.
     notif_btn: gtk::MenuButton,
-    /// Label inside the notification popover — lists unread counts.
+    /// Label inside the notification popover.
     notif_label: gtk::Label,
+    /// Network status label shown in the Network content view header row.
+    net_status_label: gtk::Label,
 
     call_bar: gtk::Box,
     call_status: gtk::Label,
@@ -200,6 +207,7 @@ impl AsyncComponent for AppModel {
         let store = Rc::new(RefCell::new(init.store));
 
         let peer_nicknames = load_nicknames(init.config.data_dir());
+        let persisted_peers = load_peers(init.config.data_dir());
 
         let mut model = AppModel {
             on_setup_page: !has_birth,
@@ -208,7 +216,7 @@ impl AsyncComponent for AppModel {
             network: None,
             node_id_text: String::new(),
             discovered_peers: Vec::new(),
-            connected_peers: HashMap::new(),
+            connected_peers: persisted_peers,
             connected_channels: HashMap::new(),
             peer_list_generation: 0,
             pending_push_queue: RefCell::new(Vec::new()),
@@ -362,21 +370,15 @@ impl AsyncComponent for AppModel {
                 self.peer_list_generation += 1;
             }
 
-            AppMsg::OpenPeer(peer_id) => {
-                // Clear unread count when opening a peer's page.
-                let tag = hex::encode_upper(&peer_id.0[..4]);
-                self.unread_messages.remove(&tag);
-                // Queue a navigation push — fulfilled in update_view once connected.
-                self.pending_push_queue.borrow_mut().push(peer_id.clone());
-
-                // Start connection if we don't already have one.
+            AppMsg::ConnectPeer(peer_id) => {
+                // "+" from Network view — establish Tier-1, add to sidebar, no navigation.
                 if self.connected_peers.contains_key(&peer_id) {
-                    return; // already connected, update_view will push the page
+                    return; // already added
                 }
                 if let Some(net) = &self.network {
+                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
-                            let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                             info!(peer = %peer_hex, "tier-1 channel opened");
                             if let Some(our_blob) = make_tier1_blob(&self.config) {
                                 match channel.exchange_tier1(&our_blob).await {
@@ -388,6 +390,7 @@ impl AsyncComponent for AppModel {
                                             &self.identity, &peer_hex,
                                         ).await;
                                         self.connected_peers.insert(peer_id.clone(), their_blob);
+                                        save_peers(self.config.data_dir(), &self.connected_peers);
                                         self.peer_list_generation += 1;
                                     }
                                     Err(e) => warn!("tier-1 exchange: {e}"),
@@ -399,6 +402,46 @@ impl AsyncComponent for AppModel {
                         Err(e) => error!("connect_peer: {e}"),
                     }
                 }
+            }
+
+            AppMsg::OpenPeer(peer_id) => {
+                // Sidebar tap — navigate to peer page; connect first if needed.
+                let tag = hex::encode_upper(&peer_id.0[..4]);
+                self.unread_messages.remove(&tag);
+
+                if !self.connected_peers.contains_key(&peer_id) {
+                    // Not connected yet — connect silently, then queue navigation.
+                    if let Some(net) = &self.network {
+                        let peer_hex = tag.clone();
+                        match net.connect_peer(&peer_id).await {
+                            Ok(channel) => {
+                                info!(peer = %peer_hex, "tier-1 channel opened");
+                                if let Some(our_blob) = make_tier1_blob(&self.config) {
+                                    match channel.exchange_tier1(&our_blob).await {
+                                        Ok(their_blob) => {
+                                            info!(peer = %peer_hex, "tier-1 exchange complete");
+                                            do_interp_sync(
+                                                &channel, &their_blob,
+                                                self.chart.as_ref(), &self.store,
+                                                &self.identity, &peer_hex,
+                                            ).await;
+                                            self.connected_peers.insert(peer_id.clone(), their_blob);
+                                            save_peers(self.config.data_dir(), &self.connected_peers);
+                                            self.peer_list_generation += 1;
+                                        }
+                                        Err(e) => warn!("tier-1 exchange: {e}"),
+                                    }
+                                }
+                                net.accept_channel(peer_id.clone(), channel.clone());
+                                self.connected_channels.insert(peer_id.clone(), channel);
+                            }
+                            Err(e) => { error!("connect_peer: {e}"); return; }
+                        }
+                    }
+                }
+
+                // Queue a navigation push — fulfilled in update_view.
+                self.pending_push_queue.borrow_mut().push(peer_id);
             }
 
             AppMsg::CallPeer(peer_id) => {
@@ -580,9 +623,9 @@ impl AsyncComponent for AppModel {
         // ── rebuild peer list when content changes ────────────────────────────
 
         if self.peer_list_generation != widgets.peer_list_shown_gen {
-            rebuild_peer_list(widgets, self, &sender);
+            rebuild_sidebar_peers(widgets, self, &sender);
+            rebuild_network_view(widgets, self, &sender);
             widgets.peer_list_shown_gen = self.peer_list_generation;
-            widgets.peers_page.set_needs_attention(!self.discovered_peers.is_empty());
         }
 
         // ── push peer pages for OpenPeer requests ─────────────────────────────
@@ -591,10 +634,12 @@ impl AsyncComponent for AppModel {
         for peer_id in pending {
             if let Some(their_blob) = self.connected_peers.get(&peer_id) {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
-                // Only push if not already on the navigation stack.
-                if widgets.peers_nav.find_page(&tag).is_none() {
-                    if let Some(chart) = &self.chart {
-                        let nickname = self.peer_nicknames.get(&tag).map(|s| s.as_str());
+                if let Some(chart) = &self.chart {
+                    let nickname = self.peer_nicknames.get(&tag).map(|s| s.as_str());
+                    if widgets.content_nav.find_page(&tag).is_some() {
+                        // Page already exists — navigate directly to it.
+                        widgets.content_nav.pop_to_tag(&tag);
+                    } else {
                         let (page, msg_list) = peer_page::build_peer_page(
                             &peer_id, their_blob, chart,
                             Rc::clone(&self.store),
@@ -603,9 +648,10 @@ impl AsyncComponent for AppModel {
                             nickname,
                         );
                         page.set_tag(Some(&tag));
-                        widgets.peers_nav.push(&page);
+                        widgets.content_nav.push(&page);
                         widgets.peer_msg_lists.insert(tag, msg_list);
                     }
+                    widgets.split_view.set_show_content(true);
                 }
             } else {
                 // Not connected yet — re-queue, will be retried on next update.
@@ -628,32 +674,20 @@ impl AsyncComponent for AppModel {
             }
         }
 
-        // ── network status button ─────────────────────────────────────────────
+        // ── network status label (shown in the Network content view) ─────────
 
         {
             let connected = self.connected_peers.len();
             let online    = self.connected_channels.len();
-
-            let (icon_name, tooltip, popover_text) = if self.node_id_text.is_empty() {
-                ("network-offline-symbolic",
-                 "Starting up…".to_string(),
-                 "Starting up…".to_string())
+            let text = if self.node_id_text.is_empty() {
+                "Starting up…".to_string()
             } else if connected == 0 {
-                ("network-wireless-symbolic",
-                 "Looking for peers…".to_string(),
-                 format!("Node ···{}\nLooking for peers…", self.node_id_text))
+                format!("Node ···{}  ·  searching…", self.node_id_text)
             } else {
-                let s = format!("{connected} peer{} connected  ·  {online} online",
-                                if connected == 1 { "" } else { "s" });
-                ("network-wireless-symbolic",
-                 s.clone(),
-                 format!("Node ···{}\n{s}", self.node_id_text))
+                format!("Node ···{}  ·  {} connected  ·  {} online",
+                        self.node_id_text, connected, online)
             };
-            // Update the stable Image child — never call set_icon_name on the
-            // MenuButton itself while a popover may be open.
-            widgets.net_icon.set_icon_name(Some(icon_name));
-            widgets.net_status_btn.set_tooltip_text(Some(&tooltip));
-            widgets.net_popover_label.set_text(&popover_text);
+            widgets.net_status_label.set_text(&text);
         }
 
         // ── notification bell ─────────────────────────────────────────────────
@@ -710,105 +744,152 @@ impl AsyncComponent for AppModel {
     }
 }
 
-// ── peer list widget builder ──────────────────────────────────────────────────
+// ── sidebar peer list builder ─────────────────────────────────────────────────
 
-/// Clear and rebuild the peer list groups inside `peers_content`.
-fn rebuild_peer_list(
+/// Rebuild the peer section below the separator using an `adw::PreferencesGroup`.
+/// The group is recreated from scratch on every change so rows are always fresh.
+fn rebuild_sidebar_peers(
     widgets: &mut AppWidgets,
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) {
-    // Remove all existing children.
-    while let Some(child) = widgets.peers_content.first_child() {
-        widgets.peers_content.remove(&child);
+    // Drop the previous group (if any).
+    while let Some(child) = widgets.peers_section_box.first_child() {
+        widgets.peers_section_box.remove(&child);
     }
 
-    // ── Connected section ─────────────────────────────────────────────────────
+    if model.connected_peers.is_empty() {
+        return;
+    }
 
-    if !model.connected_peers.is_empty() {
-        let group = adw::PreferencesGroup::new();
-        group.set_title("Connected");
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Connected");
 
-        let mut sorted: Vec<&PeerId> = model.connected_peers.keys().collect();
-        sorted.sort_by_key(|id| hex::encode_upper(&id.0[..4]));
+    let mut sorted: Vec<&PeerId> = model.connected_peers.keys().collect();
+    sorted.sort_by_key(|id| hex::encode_upper(&id.0[..4]));
 
-        for peer_id in sorted {
-            let their_blob = &model.connected_peers[peer_id];
-            let peer_hex = hex::encode_upper(&peer_id.0[..4]);
-            let solar_month = zodia_core::solar_month(their_blob.birth.jdn);
-            let glyph = sign_glyph(solar_month);
-            let online = model.connected_channels.contains_key(peer_id);
-            let display_name = model.peer_nicknames.get(&peer_hex)
-                .cloned()
-                .unwrap_or_else(|| format!("···{peer_hex}"));
-            let unread = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
+    for peer_id in sorted {
+        let their_blob   = &model.connected_peers[peer_id];
+        let peer_hex     = hex::encode_upper(&peer_id.0[..4]);
+        let solar_month  = zodia_core::solar_month(their_blob.birth.jdn);
+        let glyph        = sign_glyph(solar_month);
+        let online       = model.connected_channels.contains_key(peer_id);
+        let display_name = model.peer_nicknames.get(&peer_hex)
+            .cloned()
+            .unwrap_or_else(|| format!("···{peer_hex}"));
+        let unread = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
 
-            let row = adw::ActionRow::new();
-            row.set_title(&format!("{glyph}  {display_name}"));
-            row.set_subtitle(if online { "● Online" } else { "○ Last seen" });
-            if unread > 0 {
-                let badge = gtk::Label::new(Some(&unread.to_string()));
-                badge.add_css_class("badge");
-                badge.add_css_class("accent");
-                row.add_suffix(&badge);
-            }
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-            row.set_activatable(true);
+        let row = adw::ActionRow::new();
+        row.set_title(&format!("{glyph}  {display_name}"));
+        row.set_subtitle(if online { "Online" } else { "Last seen" });
+        row.set_activatable(true);
 
-            let pid = peer_id.clone();
-            let s = sender.clone();
-            row.connect_activated(move |_| s.input(AppMsg::OpenPeer(pid.clone())));
-            group.add(&row);
+        // Online / last-seen indicator dot as prefix
+        let dot = gtk::Label::new(Some("●"));
+        dot.set_valign(gtk::Align::Center);
+        if online {
+            dot.add_css_class("success");
+        } else {
+            dot.add_css_class("dim-label");
         }
-        widgets.peers_content.append(&group);
+        row.add_prefix(&dot);
+
+        // Unread / missed-call badge as suffix
+        if unread > 0 {
+            let badge = gtk::Label::new(Some(&unread.to_string()));
+            badge.add_css_class("badge");
+            badge.add_css_class("accent");
+            badge.set_valign(gtk::Align::Center);
+            row.add_suffix(&badge);
+        }
+
+        // Chevron suffix
+        let chevron = gtk::Image::from_icon_name("go-next-symbolic");
+        chevron.set_valign(gtk::Align::Center);
+        row.add_suffix(&chevron);
+
+        let pid = peer_id.clone();
+        let s   = sender.clone();
+        let sv  = widgets.split_view.clone();
+        let nl  = widgets.nav_list.clone();
+        row.connect_activated(move |_| {
+            nl.unselect_all();
+            sv.set_show_content(true);
+            s.input(AppMsg::OpenPeer(pid.clone()));
+        });
+
+        group.add(&row);
     }
 
-    // ── Online section ────────────────────────────────────────────────────────
+    widgets.peers_section_box.append(&group);
+}
 
-    let online: Vec<&DiscoveredPeer> = model.discovered_peers.iter()
+// ── network content view builder ──────────────────────────────────────────────
+
+/// Rebuild the "Network" content pane — shows discoverable peers not yet connected.
+/// The net_status_label at the top of peers_content is a persistent widget and
+/// is NOT touched here; it is updated separately in update_view.
+fn rebuild_network_view(
+    widgets: &mut AppWidgets,
+    model: &AppModel,
+    sender: &AsyncComponentSender<AppModel>,
+) {
+    // Remove everything except the first child (net_status_label).
+    loop {
+        match widgets.peers_content.last_child() {
+            Some(child) if child != widgets.peers_content.first_child().unwrap() => {
+                widgets.peers_content.remove(&child);
+            }
+            _ => break,
+        }
+    }
+
+    let discoverable: Vec<&DiscoveredPeer> = model.discovered_peers.iter()
         .filter(|p| !model.connected_peers.contains_key(&p.peer_id))
         .collect();
 
-    let group = adw::PreferencesGroup::new();
-    group.set_title("Online");
-
-    if online.is_empty() && model.connected_peers.is_empty() {
+    if discoverable.is_empty() {
         let status = adw::StatusPage::new();
-        status.set_icon_name(Some("system-users-symbolic"));
-        status.set_title("No peers nearby");
+        status.set_icon_name(Some("network-wireless-symbolic"));
+        status.set_title("No peers found yet");
         status.set_description(Some(
-            "Other Zodia users in your astrological neighbourhood will appear here as they come online.",
+            "Other Zodia users on the network will appear here as they are discovered.",
         ));
         widgets.peers_content.append(&status);
         return;
-    } else if online.is_empty() {
-        let row = adw::ActionRow::new();
-        row.set_title("No other peers visible right now");
-        group.add(&row);
-    } else {
-        let n = online.len();
-        group.set_description(Some(&format!(
-            "{n} peer{} nearby",
-            if n == 1 { "" } else { "s" }
-        )));
-        for dp in &online {
-            let glyph = sign_glyph(dp.solar_month);
-            let aspects = if dp.approximate_aspects.is_empty() {
-                "—".to_string()
-            } else {
-                dp.approximate_aspects.join("  ")
-            };
-            let row = adw::ActionRow::new();
-            row.set_title(&format!("{glyph}  {aspects}"));
-            row.set_subtitle(&dp.geohash_prefix);
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-            row.set_activatable(true);
+    }
 
-            let pid = dp.peer_id.clone();
-            let s = sender.clone();
-            row.connect_activated(move |_| s.input(AppMsg::OpenPeer(pid.clone())));
-            group.add(&row);
-        }
+    let group = adw::PreferencesGroup::new();
+    let n = discoverable.len();
+    group.set_title(&format!(
+        "{n} peer{} on the network",
+        if n == 1 { "" } else { "s" }
+    ));
+
+    for dp in &discoverable {
+        let glyph = sign_glyph(dp.solar_month);
+        let aspects = if dp.approximate_aspects.is_empty() {
+            "—".to_string()
+        } else {
+            dp.approximate_aspects.join("  ")
+        };
+        let row = adw::ActionRow::new();
+        row.set_title(&format!("{glyph}  {aspects}"));
+        row.set_subtitle(&dp.geohash_prefix);
+        row.set_activatable(false);
+
+        // "+" button — initiates Tier-1 connection; peer moves to sidebar on success.
+        let add_btn = gtk::Button::new();
+        add_btn.set_icon_name("list-add-symbolic");
+        add_btn.add_css_class("flat");
+        add_btn.set_valign(gtk::Align::Center);
+        add_btn.set_tooltip_text(Some("Connect to this peer"));
+        let pid = dp.peer_id.clone();
+        let s = sender.clone();
+        add_btn.connect_clicked(move |_| s.input(AppMsg::ConnectPeer(pid.clone())));
+        row.add_suffix(&add_btn);
+
+        group.add(&row);
     }
     widgets.peers_content.append(&group);
 }
@@ -960,10 +1041,10 @@ fn build_widgets(
     let (
         main_view,
         chart_container, sky_container,
-        peers_nav, peers_content,
-        peers_page,
-        net_status_btn, net_icon, net_popover_label,
+        split_view, nav_list, peers_section_box,
+        content_nav, content_stack, peers_content, content_title,
         notif_btn, notif_label,
+        net_status_label,
         call_bar, call_status, accept_btn, hangup_btn,
     ) = build_main_page(model, sender);
     outer_stack.add_named(&main_view, Some("main"));
@@ -1000,17 +1081,19 @@ fn build_widgets(
         setup_status,
         chart_container,
         sky_container,
-        peers_nav,
-        peers_content,
+        split_view,
+        nav_list,
+        peers_section_box,
         peer_list_shown_gen: u64::MAX, // force initial build
+        content_nav,
+        content_stack,
+        peers_content,
+        content_title,
         peer_msg_lists: HashMap::new(),
         peer_chat_shown: HashMap::new(),
-        peers_page,
-        net_status_btn,
-        net_icon,
-        net_popover_label,
         notif_btn,
         notif_label,
+        net_status_label,
         call_bar,
         call_status,
         accept_btn,
@@ -1145,91 +1228,21 @@ fn build_setup_page(
 
 // ── main page ─────────────────────────────────────────────────────────────────
 
-#[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4; migrate when bindings catch up
 #[allow(clippy::type_complexity)]
 fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
-    adw::ToolbarView,
-    gtk::Box, gtk::Box,                              // chart_container, sky_container
-    adw::NavigationView, gtk::Box,                   // peers_nav, peers_content
-    adw::ViewStackPage,                              // peers_page (for badge)
-    gtk::MenuButton, gtk::Image, gtk::Label,             // net_status_btn, net_icon, net_popover_label
-    gtk::MenuButton, gtk::Label,                     // notif_btn, notif_label
-    gtk::Box, gtk::Label, gtk::Button, gtk::Button,  // call bar
+    adw::ToolbarView,                                          // outermost wrapper (call_bar bottom)
+    gtk::Box, gtk::Box,                                        // chart_container, sky_container
+    adw::NavigationSplitView, gtk::ListBox, gtk::Box,            // split_view, nav_list, peers_section_box
+    adw::NavigationView, gtk::Stack, gtk::Box, adw::WindowTitle, // content_nav, content_stack, peers_content, content_title
+    gtk::MenuButton, gtk::Label,                               // notif_btn, notif_label
+    gtk::Label,                                                // net_status_label
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button,            // call bar
 ) {
-    let toolbar_view = adw::ToolbarView::new();
-    let view_stack = adw::ViewStack::new();
+    // ── Notification bell (sidebar header) ───────────────────────────────────
 
-    // ── Chart tab ─────────────────────────────────────────────────────────────
-    let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    chart_container.set_vexpand(true);
-    let chart_page = view_stack.add_titled(&chart_container, Some("chart"), "Chart");
-    chart_page.set_icon_name(Some("weather-clear-symbolic"));
-    let _ = chart_page;
-
-    // ── Sky tab ───────────────────────────────────────────────────────────────
-    let sky_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    sky_container.set_vexpand(true);
-    let sky_page = view_stack.add_titled(&sky_container, Some("sky"), "Sky");
-    sky_page.set_icon_name(Some("night-light-symbolic"));
-    let _ = sky_page;
-
-    // ── Peers tab — has its own NavigationView for peer detail pages ──────────
-    let peers_nav = adw::NavigationView::new();
-    peers_nav.set_vexpand(true);
-
-    // Root page: a scrolled box rebuilt dynamically as peers come and go.
-    let peers_scroll = gtk::ScrolledWindow::new();
-    peers_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    peers_scroll.set_vexpand(true);
-
-    let peers_clamp = adw::Clamp::new();
-    peers_clamp.set_maximum_size(720);
-    peers_clamp.set_margin_top(8);
-    peers_clamp.set_margin_bottom(8);
-    peers_clamp.set_margin_start(12);
-    peers_clamp.set_margin_end(12);
-
-    let peers_content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    peers_clamp.set_child(Some(&peers_content));
-    peers_scroll.set_child(Some(&peers_clamp));
-
-    let peers_root = adw::NavigationPage::new(&peers_scroll, "Peers");
-    peers_root.set_tag(Some("peers-root"));
-    peers_nav.push(&peers_root);
-
-    let peers_page = view_stack.add_titled(&peers_nav, Some("peers"), "Peers");
-    peers_page.set_icon_name(Some("system-users-symbolic"));
-
-    toolbar_view.set_content(Some(&view_stack));
-
-    // ── Header bar ────────────────────────────────────────────────────────────
-    let switcher_title = adw::ViewSwitcherTitle::new();
-    switcher_title.set_stack(Some(&view_stack));
-    switcher_title.set_title("Zodia");
-
-    // Network status button — icon in the header bar, popover with detail on click.
-    let net_popover_label = gtk::Label::new(Some("Starting up…"));
-    net_popover_label.set_margin_top(8);
-    net_popover_label.set_margin_bottom(8);
-    net_popover_label.set_margin_start(12);
-    net_popover_label.set_margin_end(12);
-    net_popover_label.add_css_class("dim-label");
-    let net_popover = gtk::Popover::new();
-    net_popover.set_child(Some(&net_popover_label));
-
-    // Use a persistent Image child so update_view can swap the icon without
-    // replacing the button's child widget (which re-anchors the open popover
-    // and blocks GTK layout).
-    let net_icon = gtk::Image::from_icon_name("network-offline-symbolic");
-    let net_status_btn = gtk::MenuButton::new();
-    net_status_btn.set_child(Some(&net_icon));
-    net_status_btn.set_always_show_arrow(false);
-    net_status_btn.set_popover(Some(&net_popover));
-
-    // Notification bell — only visible when there are unread messages.
     let notif_label = gtk::Label::new(None);
     notif_label.set_margin_top(8);
     notif_label.set_margin_bottom(8);
@@ -1243,20 +1256,157 @@ fn build_main_page(
     notif_btn.set_tooltip_text(Some("Notifications"));
     notif_btn.set_visible(false);
 
-    let header_bar = adw::HeaderBar::new();
-    header_bar.set_title_widget(Some(&switcher_title));
-    header_bar.pack_end(&net_status_btn);
-    header_bar.pack_end(&notif_btn);
-    toolbar_view.add_top_bar(&header_bar);
+    // ── Sidebar ───────────────────────────────────────────────────────────────
 
-    // ── Bottom bars ───────────────────────────────────────────────────────────
-    let switcher_bar = adw::ViewSwitcherBar::new();
-    switcher_bar.set_stack(Some(&view_stack));
-    switcher_title
-        .bind_property("title-visible", &switcher_bar, "reveal")
-        .sync_create()
-        .build();
-    toolbar_view.add_bottom_bar(&switcher_bar);
+    // ── Nav list (fixed: Chart / Sky / Network) ───────────────────────────────
+    let nav_list = gtk::ListBox::new();
+    nav_list.add_css_class("navigation-sidebar");
+    nav_list.set_selection_mode(gtk::SelectionMode::Single);
+
+    let make_nav_row = |icon: &str, label_text: &str| -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::new();
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        hbox.set_margin_start(12);
+        hbox.set_margin_end(12);
+        hbox.set_margin_top(10);
+        hbox.set_margin_bottom(10);
+        let img = gtk::Image::from_icon_name(icon);
+        img.set_pixel_size(16);
+        hbox.append(&img);
+        let lbl = gtk::Label::new(Some(label_text));
+        lbl.set_halign(gtk::Align::Start);
+        hbox.append(&lbl);
+        row.set_child(Some(&hbox));
+        row
+    };
+
+    nav_list.append(&make_nav_row("weather-clear-symbolic",   "Chart"));
+    nav_list.append(&make_nav_row("night-light-symbolic",     "Sky"));
+    nav_list.append(&make_nav_row("network-wireless-symbolic","Network"));
+
+    // ── Thin separator between nav items and peers group ─────────────────────
+    let sidebar_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+
+    // ── Box that holds the AdwPreferencesGroup; rebuilt by rebuild_sidebar_peers ──
+    let peers_section_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    peers_section_box.set_margin_top(4);
+    peers_section_box.set_margin_bottom(8);
+    peers_section_box.set_margin_start(8);
+    peers_section_box.set_margin_end(8);
+
+    let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar_box.append(&nav_list);
+    sidebar_box.append(&sidebar_sep);
+    sidebar_box.append(&peers_section_box);
+
+    let sidebar_scroll = gtk::ScrolledWindow::new();
+    sidebar_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    sidebar_scroll.set_vexpand(true);
+    sidebar_scroll.set_child(Some(&sidebar_box));
+
+    let sidebar_toolbar = adw::ToolbarView::new();
+    let sidebar_header = adw::HeaderBar::new();
+    let sidebar_title = adw::WindowTitle::new("Zodia", "");
+    sidebar_header.set_title_widget(Some(&sidebar_title));
+    sidebar_header.pack_end(&notif_btn);
+    sidebar_toolbar.add_top_bar(&sidebar_header);
+    sidebar_toolbar.set_content(Some(&sidebar_scroll));
+
+    let sidebar_page = adw::NavigationPage::new(&sidebar_toolbar, "Zodia");
+    sidebar_page.set_tag(Some("sidebar"));
+
+    // ── Content area — NavigationView so peer pages can be pushed ─────────────
+
+    let content_stack = gtk::Stack::new();
+    content_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    content_stack.set_transition_duration(150);
+
+    let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    chart_container.set_vexpand(true);
+    content_stack.add_named(&chart_container, Some("chart"));
+
+    let sky_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sky_container.set_vexpand(true);
+    content_stack.add_named(&sky_container, Some("sky"));
+
+    let peers_scroll = gtk::ScrolledWindow::new();
+    peers_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    peers_scroll.set_vexpand(true);
+    let peers_clamp = adw::Clamp::new();
+    peers_clamp.set_maximum_size(720);
+    peers_clamp.set_margin_top(8);
+    peers_clamp.set_margin_bottom(8);
+    peers_clamp.set_margin_start(12);
+    peers_clamp.set_margin_end(12);
+    let peers_content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+
+    // Network status row — shown at top of the Network view, updated via update_view.
+    let net_status_label = gtk::Label::new(Some("Starting up…"));
+    net_status_label.add_css_class("dim-label");
+    net_status_label.add_css_class("caption");
+    net_status_label.set_halign(gtk::Align::Center);
+    net_status_label.set_margin_top(8);
+    peers_content.append(&net_status_label);
+
+    peers_clamp.set_child(Some(&peers_content));
+    peers_scroll.set_child(Some(&peers_clamp));
+    content_stack.add_named(&peers_scroll, Some("network"));
+
+    let content_title = adw::WindowTitle::new("Chart", "");
+    let content_header = adw::HeaderBar::new();
+    content_header.set_title_widget(Some(&content_title));
+
+    let content_toolbar = adw::ToolbarView::new();
+    content_toolbar.add_top_bar(&content_header);
+    content_toolbar.set_content(Some(&content_stack));
+
+    // Root NavigationPage for the content NavigationView
+    let content_root = adw::NavigationPage::new(&content_toolbar, "Chart");
+    content_root.set_tag(Some("content-root"));
+
+    let content_nav = adw::NavigationView::new();
+    content_nav.push(&content_root);
+
+    let content_page = adw::NavigationPage::new(&content_nav, "Chart");
+    content_page.set_tag(Some("content"));
+
+    // ── Navigation split view ─────────────────────────────────────────────────
+
+    let split_view = adw::NavigationSplitView::new();
+    split_view.set_sidebar(Some(&sidebar_page));
+    split_view.set_content(Some(&content_page));
+    split_view.set_min_sidebar_width(200.0);
+    split_view.set_max_sidebar_width(280.0);
+
+    // Default selection: Chart
+    nav_list.select_row(nav_list.row_at_index(0).as_ref());
+
+    // ── Wire up nav row activation ────────────────────────────────────────────
+
+    {
+        let cs = content_stack.clone();
+        let ct = content_title.clone();
+        let cn = content_nav.clone();
+        let sv = split_view.clone();
+
+        nav_list.connect_row_activated(move |_, row| {
+            let (page, title) = match row.index() {
+                0 => ("chart",   "Chart"),
+                1 => ("sky",     "Sky"),
+                2 => ("network", "Network"),
+                _ => return,
+            };
+            cn.pop_to_tag("content-root");
+            cs.set_visible_child_name(page);
+            ct.set_title(title);
+            sv.set_show_content(true);
+        });
+    }
+
+    // ── Outer ToolbarView — just hosts the call bar at bottom ─────────────────
+
+    let toolbar_view = adw::ToolbarView::new();
+    toolbar_view.set_content(Some(&split_view));
 
     let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     call_bar.add_css_class("toolbar");
@@ -1291,10 +1441,10 @@ fn build_main_page(
     (
         toolbar_view,
         chart_container, sky_container,
-        peers_nav, peers_content,
-        peers_page,
-        net_status_btn, net_icon, net_popover_label,
+        split_view, nav_list, peers_section_box,
+        content_nav, content_stack, peers_content, content_title,
         notif_btn, notif_label,
+        net_status_label,
         call_bar, call_status, accept_btn, hangup_btn,
     )
 }
@@ -1313,6 +1463,40 @@ fn load_nicknames(data_dir: &std::path::Path) -> HashMap<String, String> {
             Some((k, v))
         })
         .collect()
+}
+
+// ── peer persistence ──────────────────────────────────────────────────────────
+
+/// Load previously connected peers from `peers.tsv`.
+/// Format: `{peer_id_hex64}\t{jdn}\t{geohash}`
+fn load_peers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::Tier1Blob> {
+    let Ok(content) = std::fs::read_to_string(data_dir.join("peers.tsv")) else {
+        return HashMap::new();
+    };
+    content.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let id_hex  = parts.next()?;
+            let jdn: f64 = parts.next()?.parse().ok()?;
+            let geohash  = parts.next()?.to_string();
+            let id_bytes: Vec<u8> = hex::decode(id_hex).ok()?;
+            let id_arr: [u8; 32] = id_bytes.try_into().ok()?;
+            let peer_id = PeerId(id_arr);
+            let blob = zodia_net::Tier1Blob {
+                birth: zodia_core::BirthData::new(jdn, geohash),
+                prekey:    [0u8; 32],
+                ephemeral: [0u8; 32],
+            };
+            Some((peer_id, blob))
+        })
+        .collect()
+}
+
+fn save_peers(data_dir: &std::path::Path, peers: &HashMap<PeerId, zodia_net::Tier1Blob>) {
+    let content: String = peers.iter()
+        .map(|(id, blob)| format!("{}\t{}\t{}\n", hex::encode(&id.0), blob.birth.jdn, blob.birth.geohash))
+        .collect();
+    let _ = std::fs::write(data_dir.join("peers.tsv"), content);
 }
 
 fn save_nicknames(data_dir: &std::path::Path, nicknames: &HashMap<String, String>) {
