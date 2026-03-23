@@ -66,35 +66,7 @@ pub fn build_peer_page(
     let view_stack = adw::ViewStack::new();
     view_stack.set_vexpand(true);
 
-    // ── nickname entry (only on "Their Chart" tab) ────────────────────────────
-    let nick_entry = adw::EntryRow::new();
-    nick_entry.set_title("Nickname");
-    if let Some(n) = nickname.filter(|n| !n.is_empty()) {
-        nick_entry.set_text(n);
-    }
-    nick_entry.set_show_apply_button(true);
-
-    let nick_group = adw::PreferencesGroup::new();
-    nick_group.add(&nick_entry);
-
-    let nick_clamp = adw::Clamp::new();
-    nick_clamp.set_maximum_size(720);
-    nick_clamp.set_margin_top(8);
-    nick_clamp.set_margin_start(12);
-    nick_clamp.set_margin_end(12);
-    nick_clamp.set_child(Some(&nick_group));
-
-    let pid_n = peer_id.clone();
-    let s_n = sender.clone();
-    let ne_c = nick_entry.clone();
-    nick_entry.connect_apply(move |_| {
-        s_n.input(AppMsg::SetNickname {
-            peer_id: pid_n.clone(),
-            name: ne_c.text().to_string(),
-        });
-    });
-
-    // Their Chart tab — nick entry + aspect view stacked
+    // Their Chart tab
     let their_av = match &their_chart {
         Some(chart) => AspectView::natal(
             natal_items(&chart.natal_aspects()),
@@ -107,7 +79,6 @@ pub fn build_peer_page(
     their_av.widget().set_vexpand(true);
 
     let their_tab = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    their_tab.append(&nick_clamp);
     their_tab.append(their_av.widget());
     their_tab.set_vexpand(true);
 

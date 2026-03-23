@@ -828,7 +828,7 @@ impl AsyncComponent for AppModel {
 fn rebuild_sidebar_peers(
     widgets: &mut AppWidgets,
     model: &AppModel,
-    _sender: &AsyncComponentSender<AppModel>,
+    sender: &AsyncComponentSender<AppModel>,
 ) {
     // Remove all rows at index >= 4 (peer rows from last build).
     let mut to_remove: Vec<gtk::ListBoxRow> = Vec::new();
@@ -892,6 +892,55 @@ fn rebuild_sidebar_peers(
             badge.add_css_class("accent");
             badge.set_valign(gtk::Align::Center);
             hbox.append(&badge);
+        }
+
+        // Pencil button — hidden until hover.
+        let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+        edit_btn.add_css_class("flat");
+        edit_btn.add_css_class("circular");
+        edit_btn.set_visible(false);
+        edit_btn.set_valign(gtk::Align::Center);
+        edit_btn.set_tooltip_text(Some("Set nickname"));
+        hbox.append(&edit_btn);
+
+        // Show/hide on hover.
+        let motion = gtk::EventControllerMotion::new();
+        let btn_enter = edit_btn.clone();
+        let btn_leave = edit_btn.clone();
+        motion.connect_enter(move |_, _, _| btn_enter.set_visible(true));
+        motion.connect_leave(move |_| btn_leave.set_visible(false));
+        row.add_controller(motion);
+
+        // Open a dialog to set the nickname.
+        {
+            let pid      = peer_id.0;
+            let s        = sender.clone();
+            let current  = model.peer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
+            edit_btn.connect_clicked(move |btn| {
+                let dialog = adw::AlertDialog::new(Some("Set Nickname"), None);
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("set", "Set");
+                dialog.set_response_appearance("set", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("set"));
+                dialog.set_close_response("cancel");
+
+                let entry = gtk::Entry::new();
+                entry.set_text(&current);
+                entry.set_placeholder_text(Some("Nickname…"));
+                dialog.set_extra_child(Some(&entry));
+
+                let s2 = s.clone();
+                let e  = entry.clone();
+                dialog.connect_response(None, move |_, id| {
+                    if id == "set" {
+                        s2.input(AppMsg::SetNickname {
+                            peer_id: PeerId(pid),
+                            name: e.text().to_string(),
+                        });
+                    }
+                });
+                dialog.present(Some(btn));
+            });
         }
 
         row.set_child(Some(&hbox));
