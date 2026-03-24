@@ -1,6 +1,6 @@
 # Zodia
 
-A peer-to-peer astrological companion. Zodia connects you with people who share meaningful chart alignments — no accounts, no servers - just enabling technology for people with an interest in astrology.
+A peer-to-peer astrological companion. Zodia connects you with people who share meaningful chart alignments — no accounts, no servers — just enabling technology for people with an interest in astrology.
 
 ![Zodia screenshot](screenshot.png)
 
