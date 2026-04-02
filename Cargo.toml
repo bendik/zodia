@@ -8,6 +8,8 @@ members = [
     "config",
     "av",
     "app",
+    "tools/gen_baseline",
+    "tools/bootstrap",
 ]
 resolver = "2"
 

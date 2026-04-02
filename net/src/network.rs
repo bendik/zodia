@@ -20,9 +20,12 @@ use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
 use p2panda_core::PrivateKey as PandaKey;
 use p2panda_net::address_book::report::ConnectionOutcome;
+use p2panda_net::addrs::NodeInfo;
 use p2panda_net::gossip::{GossipHandle, GossipSubscription};
+use p2panda_net::iroh_endpoint::from_public_key;
 use p2panda_net::iroh_mdns::{MdnsDiscovery, MdnsDiscoveryMode};
-use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip};
+use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, NodeId};
+use iroh::EndpointAddr;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -31,7 +34,15 @@ use zodia_core::{BirthData, compute_positions, topic_key_global, topic_keys_for_
 
 /// Zodia's network identifier — all nodes sharing this ID form one logical
 /// overlay; peers on different IDs are invisible to each other.
-const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+pub const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+/// iroh DERP relay for NAT traversal.  Must match the value in tools/bootstrap.
+pub const RELAY_URL: &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
+
+/// Bootstrap node public key (hex-decoded bytes).
+/// Set this to the `node_id` printed by `zodia-bootstrap` on first run.
+/// Leave as `None` until the bootstrap node is deployed; mDNS still works locally.
+const BOOTSTRAP_NODE_ID: Option<[u8; 32]> = Some([176, 45, 141, 10, 244, 112, 14, 59, 107, 231, 19, 72, 114, 30, 215, 65, 72, 50, 80, 56, 10, 112, 192, 16, 171, 119, 103, 105, 89, 230, 178, 181]);
 
 /// Protocol identifier for direct peer-to-peer Tier-1 consent exchanges.
 pub const TIER1_PROTOCOL: &[u8] = b"zodia/tier1/1";
@@ -93,9 +104,23 @@ impl ZodiaNetwork {
             .map_err(|e| NetworkError::AddressBook(e.to_string()))?;
         debug!("address book ready");
 
+        // Seed the address book with the bootstrap peer so the gossip swarm has
+        // somewhere to connect on first start, even on a fresh install.
+        if let Some(id_bytes) = BOOTSTRAP_NODE_ID {
+            if let Ok(bootstrap_pk) = NodeId::from_bytes(&id_bytes) {
+                let addr = EndpointAddr::new(from_public_key(bootstrap_pk))
+                    .with_relay_url(RELAY_URL.parse().unwrap());
+                let _ = address_book
+                    .insert_node_info(NodeInfo::from(addr).bootstrap())
+                    .await;
+                debug!("bootstrap peer added to address book");
+            }
+        }
+
         let endpoint = Endpoint::builder(address_book.clone())
             .network_id(NETWORK_ID)
             .private_key(panda_key)
+            .relay_url(RELAY_URL.parse().unwrap())
             .spawn()
             .await
             .map_err(|e| NetworkError::Endpoint(e.to_string()))?;

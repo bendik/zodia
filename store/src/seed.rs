@@ -26,8 +26,13 @@ use crate::StoreError;
 /// that `InterpKey::to_sig()` adds).
 #[derive(Debug, Deserialize)]
 pub struct BaselineData {
+    #[serde(default)]
     pub natal:         HashMap<String, String>,
+    #[serde(default)]
+    pub synastry:      HashMap<String, String>,
+    #[serde(default)]
     pub transit:       HashMap<String, String>,
+    #[serde(default)]
     pub house_transit: HashMap<String, String>,
 }
 

@@ -10,3 +10,7 @@ blake3.workspace = true
 geohash = "0.13"
 serde.workspace = true
 thiserror.workspace = true
+
+[build-dependencies]
+ureq = "2"
+zip = "2"

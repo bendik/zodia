@@ -410,6 +410,10 @@ impl ZodiaStore {
             self.insert_raw_sig(&format!("natal:{sig}"), "natal", body)?;
             count += 1;
         }
+        for (sig, body) in &data.synastry {
+            self.insert_raw_sig(&format!("synastry:{sig}"), "synastry", body)?;
+            count += 1;
+        }
         for (sig, body) in &data.transit {
             self.insert_raw_sig(&format!("transit:{sig}"), "transit", body)?;
             count += 1;

@@ -1,0 +1,19 @@
+[Unit]
+Description=Zodia Bootstrap Node
+Documentation=https://github.com/owner/zodia
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zodia-bootstrap --key-file /var/lib/zodia/bootstrap.key --port 17434
+Restart=on-failure
+RestartSec=10
+Environment=ZODIA_LOG=info
+
+# Hardening
+DynamicUser=yes
+StateDirectory=zodia
+
+[Install]
+WantedBy=multi-user.target

@@ -1358,6 +1358,10 @@ fn build_setup_page(
     let loc_group = adw::PreferencesGroup::new();
     loc_group.set_title("Birth Location");
 
+    let city_row = adw::EntryRow::new();
+    city_row.set_title("City");
+    loc_group.add(&city_row);
+
     let lat_row = adw::EntryRow::new();
     lat_row.set_title("Latitude  (e.g. 51.5)");
     loc_group.add(&lat_row);
@@ -1367,6 +1371,69 @@ fn build_setup_page(
     loc_group.add(&lon_row);
 
     content.append(&loc_group);
+
+    // ── City autocomplete popover ─────────────────────────────────────────────
+    let city_list = gtk::ListBox::new();
+    city_list.set_selection_mode(gtk::SelectionMode::None);
+    city_list.add_css_class("boxed-list");
+    let city_scroll = gtk::ScrolledWindow::new();
+    city_scroll.set_child(Some(&city_list));
+    city_scroll.set_max_content_height(280);
+    city_scroll.set_propagate_natural_height(true);
+    city_scroll.set_min_content_width(280);
+
+    let city_popover = gtk::Popover::new();
+    city_popover.set_child(Some(&city_scroll));
+    city_popover.set_position(gtk::PositionType::Bottom);
+    city_popover.set_autohide(true);
+    city_popover.set_has_arrow(false);
+    city_popover.set_parent(&city_row);
+
+    let city_hits: Rc<RefCell<Vec<zodia_core::CityHit>>> = Rc::new(RefCell::new(Vec::new()));
+
+    {
+        let hits = city_hits.clone();
+        let lat_r = lat_row.clone();
+        let lon_r = lon_row.clone();
+        let pop   = city_popover.clone();
+        city_list.connect_row_activated(move |_, row| {
+            let idx = row.index() as usize;
+            let guard = hits.borrow();
+            if let Some(hit) = guard.get(idx) {
+                lat_r.set_text(&format!("{:.4}", hit.lat));
+                lon_r.set_text(&format!("{:.4}", hit.lon));
+            }
+            pop.popdown();
+        });
+    }
+    {
+        let hits = city_hits.clone();
+        let list = city_list.clone();
+        let pop  = city_popover.clone();
+        city_row.connect_changed(move |entry| {
+            let text = entry.text();
+            let results = zodia_core::search_cities(text.as_str(), 10);
+            while let Some(child) = list.first_child() {
+                list.remove(&child);
+            }
+            if results.is_empty() {
+                pop.popdown();
+                *hits.borrow_mut() = results;
+                return;
+            }
+            for hit in &results {
+                let lbl = gtk::Label::new(Some(&format!("{}, {}", hit.name, hit.country)));
+                lbl.set_halign(gtk::Align::Start);
+                lbl.set_margin_start(12);
+                lbl.set_margin_end(12);
+                lbl.set_margin_top(8);
+                lbl.set_margin_bottom(8);
+                list.append(&lbl);
+            }
+            *hits.borrow_mut() = results;
+            pop.popup();
+        });
+    }
 
     let setup_status = gtk::Label::new(None);
     setup_status.add_css_class("error");

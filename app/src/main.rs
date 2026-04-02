@@ -6,6 +6,7 @@
 mod app;
 mod aspect_list;
 mod aspect_view;
+mod baseline;
 mod peer_list;
 mod peer_page;
 mod placements;
@@ -15,8 +16,6 @@ use app::{AppInit, AppModel};
 use relm4::RelmApp;
 use zodia_config::LocalConfig;
 use zodia_store::{ZodiaStore, seed::BaselineData};
-
-const BASELINE_TOML: &str = include_str!("../assets/baseline_aspects.toml");
 
 fn main() {
     // ── tracing ───────────────────────────────────────────────────────────────
@@ -44,13 +43,17 @@ fn main() {
         Ok(s) => s,
         Err(e) => { eprintln!("fatal: could not open store: {e}"); std::process::exit(1); }
     };
-    match BaselineData::from_toml(BASELINE_TOML) {
-        Ok(baseline) => {
-            if let Ok(n) = store.seed_if_empty(&baseline) {
-                if n > 0 { tracing::info!("seeded {n} baseline interpretations"); }
+    if let Some(toml) = baseline::load(config.data_dir()) {
+        match BaselineData::from_toml(&toml) {
+            Ok(b) => {
+                if let Ok(n) = store.seed_if_empty(&b) {
+                    if n > 0 { tracing::info!("seeded {n} baseline interpretations"); }
+                }
             }
+            Err(e) => tracing::warn!("baseline parse failed: {e}"),
         }
-        Err(e) => tracing::warn!("baseline parse failed: {e}"),
+    } else {
+        tracing::info!("no baseline available; store starts empty");
     }
 
     // ── Bundled icons ─────────────────────────────────────────────────────────
