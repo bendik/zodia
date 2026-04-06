@@ -18,7 +18,7 @@ use libadwaita::glib;
 use libadwaita::prelude::*;
 use relm4::prelude::*;
 use tokio::sync::mpsc::Receiver;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use zodia_av::AudioSession;
 use zodia_config::LocalConfig;
 use chrono::{NaiveDateTime, TimeZone as _, Timelike as _};
@@ -28,6 +28,7 @@ use zodia_crypto::IdentityKeypair;
 use zodia_net::{ChannelMsg, DirectChannel, InterpEntry, NetworkConfig, PeerId, PeerStatus,
                 Tier1Blob, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore};
+use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
@@ -97,6 +98,8 @@ pub enum AppMsg {
     GoingOffline,
     /// User submitted a new interpretation — broadcast it to all live peers.
     ShareInterp(InterpEntry),
+    /// A new community interpretation arrived via p2panda LogSync.
+    SyncInterpReceived(ReceivedInterp),
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -142,6 +145,10 @@ pub struct AppModel {
     peer_nicknames: HashMap<String, String>,
     /// Unread message counts per peer (cleared when their page is opened).
     unread_messages: HashMap<String, usize>,
+
+    /// Channel to the background LogSync task for publishing new interpretations.
+    /// `None` until the network is up.
+    sync_publish_tx: Option<tokio::sync::mpsc::Sender<SyncPublishMsg>>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -244,6 +251,7 @@ impl AsyncComponent for AppModel {
             chat_logs,
             peer_nicknames,
             unread_messages: HashMap::new(),
+            sync_publish_tx: None,
         };
 
         if let Some(birth) = model.config.birth.clone() {
@@ -271,6 +279,7 @@ impl AsyncComponent for AppModel {
                 };
                 info!("network up, node ···{}", model.node_id_text);
                 let _ = net.publish_announce().await;
+                model.sync_publish_tx = try_spawn_sync(&model.config, &net, &sender).await;
                 model.network = Some(net);
                 start_network_command(&sender, rx);
                 sender.input(AppMsg::NetworkReady);
@@ -323,6 +332,7 @@ impl AsyncComponent for AppModel {
                         hex::encode_upper(&nid.0[..4])
                     };
                     let _ = net.publish_announce().await;
+                    self.sync_publish_tx = try_spawn_sync(&self.config, &net, &sender).await;
                     self.network = Some(net);
                     start_network_command(&sender, rx);
                     sender.input(AppMsg::NetworkReady);
@@ -561,13 +571,36 @@ impl AsyncComponent for AppModel {
                 }
             }
             AppMsg::ShareInterp(entry) => {
-                let msg = ChannelMsg::InterpShare { entries: vec![entry] };
+                // Fast path: send directly to already-connected peers.
+                let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
                 for (peer_id, channel) in &self.connected_channels {
                     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                     if let Err(e) = channel.send_msg(&msg).await {
                         warn!(peer = %peer_hex, "interp share failed: {e}");
                     }
                 }
+                // Slow path: publish to the p2panda log for offline catch-up sync.
+                if let Some(tx) = &self.sync_publish_tx {
+                    if entry.author_sig.len() == 64 {
+                        let mut sig = [0u8; 64];
+                        sig.copy_from_slice(&entry.author_sig);
+                        let _ = tx.try_send(SyncPublishMsg::Publish {
+                            interp_key: entry.interp_key,
+                            body: entry.body,
+                            author_sig: sig,
+                        });
+                    }
+                }
+            }
+            AppMsg::SyncInterpReceived(interp) => {
+                debug!(
+                    key = %interp.interp_key,
+                    author = %hex::encode(&interp.author_pk[..4]),
+                    "new interpretation received via sync"
+                );
+                // The sync background task already called insert_received.
+                // Nothing more to do here — the next time the user opens
+                // an aspect view it will query the refreshed store.
             }
         }
     }
@@ -1087,6 +1120,71 @@ async fn try_spawn_network(
         Ok(pair) => Some(pair),
         Err(e) => { error!("network spawn failed: {e}"); None }
     }
+}
+
+/// Message type for sending publish requests to the background sync task.
+pub(crate) enum SyncPublishMsg {
+    Publish { interp_key: String, body: String, author_sig: [u8; 64] },
+}
+
+/// Spawn the LogSync background task and return a channel for publishing.
+///
+/// Opens a second connection to the same SQLite file so the sync task can
+/// call `insert_received` without conflicting with the main-thread store
+/// (WAL mode allows concurrent readers + one writer).
+async fn try_spawn_sync(
+    config: &LocalConfig,
+    net: &ZodiaNetwork,
+    sender: &AsyncComponentSender<AppModel>,
+) -> Option<tokio::sync::mpsc::Sender<SyncPublishMsg>> {
+    use std::sync::{Arc, Mutex};
+    use zodia_core::topic_key_global;
+
+    let store_path = config.data_dir().join("interpretations.db");
+    let sync_store = match ZodiaStore::open(&store_path) {
+        Ok(s) => Arc::new(Mutex::new(s)),
+        Err(e) => { warn!("sync store open failed: {e}"); return None; }
+    };
+
+    let panda_key = config.identity.to_panda_key();
+    let topic = topic_key_global().0;
+
+    let node = match ZodiaSyncNode::spawn(
+        panda_key,
+        net.endpoint(),
+        net.gossip(),
+        sync_store,
+        topic,
+    ).await {
+        Ok(n) => n,
+        Err(e) => { warn!("sync node spawn failed: {e}"); return None; }
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SyncPublishMsg>(32);
+    let sender_bg = sender.clone();
+
+    tokio::spawn(async move {
+        let mut node = node;
+        loop {
+            tokio::select! {
+                Some(msg) = rx.recv() => {
+                    match msg {
+                        SyncPublishMsg::Publish { interp_key, body, author_sig } => {
+                            if let Err(e) = node.publish(&interp_key, &body, &author_sig).await {
+                                warn!("sync publish: {e}");
+                            }
+                        }
+                    }
+                }
+                Some(interp) = node.received.recv() => {
+                    sender_bg.input(AppMsg::SyncInterpReceived(interp));
+                }
+                else => break,
+            }
+        }
+    });
+
+    Some(tx)
 }
 
 fn start_network_command(

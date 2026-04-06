@@ -16,6 +16,7 @@ zodia-crypto.workspace = true
 zodia-config.workspace = true
 zodia-store.workspace = true
 zodia-av.workspace = true
+zodia-sync.workspace = true
 blake3.workspace = true
 relm4 = { version = "0.10", features = ["macros", "libadwaita"] }
 gtk4 = "0.10"

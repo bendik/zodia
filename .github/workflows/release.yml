@@ -157,13 +157,6 @@ jobs:
             --search-path "${BREW}/lib" \
             --overwrite-dir
 
-          # Bundle icon themes so symbolic icons render
-          mkdir -p "$APP/Contents/Resources/share/icons"
-          for theme in hicolor Adwaita; do
-            [ -d "${BREW}/share/icons/$theme" ] && \
-              cp -r "${BREW}/share/icons/$theme" "$APP/Contents/Resources/share/icons/"
-          done
-
           # Launcher: sets XDG_DATA_DIRS and pixbuf module path then execs the real binary
           cat > "$APP/Contents/MacOS/zodia" <<SH
           #!/bin/sh
@@ -182,7 +175,7 @@ jobs:
         shell: msys2 {0}
         run: |
           DIST=zodia-windows
-          mkdir -p "$DIST/share/icons" "$DIST/share/glib-2.0"
+          mkdir -p "$DIST/share/glib-2.0"
           cp target/${{ matrix.target }}/release/zodia.exe "$DIST/"
 
           # Copy every mingw64 DLL the binary transitively depends on
@@ -190,12 +183,6 @@ jobs:
             | grep '/mingw64/' \
             | awk '{print $3}' \
             | xargs -I{} cp -n {} "$DIST/"
-
-          # Icon themes
-          for theme in hicolor Adwaita; do
-            [ -d "/mingw64/share/icons/$theme" ] && \
-              cp -r "/mingw64/share/icons/$theme" "$DIST/share/icons/"
-          done
 
           # GLib compiled schemas
           [ -d "/mingw64/share/glib-2.0/schemas" ] && \

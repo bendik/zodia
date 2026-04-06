@@ -72,8 +72,6 @@ pub struct NetworkConfig {
 ///
 /// Cheap to clone — all inner components are reference-counted.
 pub struct ZodiaNetwork {
-    // Kept alive for the interpretation index sync (LogSync wiring — coming in zodia-sync)
-    #[allow(dead_code)]
     gossip: Gossip,
     /// One handle per degree-bucket topic derived from the peer's natal chart.
     topic_handles: Vec<GossipHandle>,
@@ -263,6 +261,16 @@ impl ZodiaNetwork {
     pub fn node_id(&self) -> PeerId {
         let bytes: [u8; 32] = *self.endpoint.node_id().as_bytes();
         PeerId(bytes)
+    }
+
+    /// Clone of the iroh `Endpoint` — pass to `ZodiaSyncNode::spawn`.
+    pub fn endpoint(&self) -> Endpoint {
+        self.endpoint.clone()
+    }
+
+    /// Clone of the gossip engine — pass to `ZodiaSyncNode::spawn`.
+    pub fn gossip(&self) -> Gossip {
+        self.gossip.clone()
     }
 
     /// A clone of the event sender — allows other subsystems (e.g. the AV
