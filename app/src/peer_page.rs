@@ -96,7 +96,7 @@ pub fn build_peer_page(
     let (messages_widget, msg_list, call_btn, send_btn, entry) = build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
     let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
-    msg_page.set_icon_name(Some("mail-unread-symbolic"));
+    msg_page.set_icon_name(Some("chat-message-new-symbolic"));
 
     // Scroll to bottom whenever the Messages tab becomes visible.
     {

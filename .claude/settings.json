@@ -14,7 +14,13 @@
       "Read(//home/bl/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/**)",
       "Read(//usr/share/icons/Adwaita/**)",
       "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/list-add-symbolic.svg /srv/homes/bl/repos/zodia/app/icons/scalable/actions/)",
-      "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/sidebar-show-symbolic.svg /srv/homes/bl/repos/zodia/app/icons/scalable/actions/)"
+      "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/sidebar-show-symbolic.svg /srv/homes/bl/repos/zodia/app/icons/scalable/actions/)",
+      "Bash(grep -n \"symbol\\\\|☉\\\\|☽\\\\|♄\\\\|♃\\\\|♂\\\\|♀\\\\|⊕\\\\|♅\\\\|♆\\\\|♇\\\\|glyph\" /srv/homes/bl/repos/zodia/core/src/*.rs)",
+      "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/call-start-symbolic.svg .)",
+      "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/document-edit-symbolic.svg .)",
+      "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/go-next-symbolic.svg .)",
+      "Bash(cp /usr/share/icons/Adwaita/symbolic/actions/mail-send-symbolic.svg .)",
+      "Bash(cp /usr/share/icons/Adwaita/symbolic/status/night-light-symbolic.svg .)"
     ]
   }
 }

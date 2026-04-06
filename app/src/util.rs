@@ -113,7 +113,7 @@ pub fn approximate_aspects(solar_month: u8, natal: &PlanetPositions) -> Vec<Stri
         let Some(natal_lon) = natal.get(planet) else { continue };
         let sep = angular_separation(peer_sun, natal_lon);
         if let Some(kind) = detect_wide(sep) {
-            out.push(format!("☉{}{}", kind.symbol(), planet.symbol()));
+            out.push(format!("☉\u{FE0E}{}{}", kind.symbol(), planet.symbol()));
         }
     }
     out
