@@ -339,6 +339,13 @@ pub(crate) fn spawn_channel_listener(
                 Ok(ChannelMsg::StatusUpdate { status }) => {
                     let _ = tx.send(ZodiaNetEvent::PeerStatusChanged { peer_id: peer_id.clone(), status }).await;
                 }
+                Ok(ChannelMsg::RelayMsg { dest, payload }) => {
+                    let _ = tx.send(ZodiaNetEvent::RelayReceived {
+                        via: peer_id.clone(),
+                        dest: PeerId(dest),
+                        payload,
+                    }).await;
+                }
                 Ok(_) => {} // Tier1Handshake / InterpShare already handled at connect time
                 Err(e) => {
                     debug!(peer = %hex::encode_upper(&peer_id.0[..4]), err = %e, "channel closed");

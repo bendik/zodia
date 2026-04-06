@@ -9,10 +9,12 @@
 //! |  2   | WebRTC offer/answer   | SessionRatchet on the tier-1 channel|
 //! |  3   | name / handle         | SessionRatchet, in-session voluntary |
 
+pub mod ecies;
 pub mod handshake;
 pub mod identity;
 pub mod ratchet;
 
+pub use ecies::{ecies_decrypt, ecies_encrypt};
 pub use handshake::{LocalPrekeys, PeerPrekeys, derive_session_key};
 pub use identity::{IdentityKeypair, PublicIdentity};
 pub use ratchet::{RatchetError, SessionRatchet};

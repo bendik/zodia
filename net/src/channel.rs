@@ -79,6 +79,21 @@ pub enum ChannelMsg {
     CallHangup { session_id: [u8; 32] },
     /// Plain-text chat message from the remote peer.
     ChatMsg { text: String },
+    /// Blind-relay envelope: forward `payload` (ECIES-encrypted) to `dest`.
+    ///
+    /// The relay can see `dest` (needed to route) but cannot decrypt `payload`.
+    RelayMsg { dest: [u8; 32], payload: Vec<u8> },
+}
+
+/// The inner message encrypted inside a `RelayMsg` payload.
+///
+/// CBOR-serialised then ECIES-encrypted to the destination's relay key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayPayload {
+    /// The original sender's node ID (ed25519 public key bytes).
+    pub from: [u8; 32],
+    /// The plaintext message content.
+    pub text: String,
 }
 
 // ── channel ───────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ pub mod announce;
 pub mod channel;
 pub mod network;
 
-pub use channel::{ChannelMsg, DirectChannel, InterpEntry, PeerStatus};
+pub use channel::{ChannelMsg, DirectChannel, InterpEntry, PeerStatus, RelayPayload};
 pub use network::{NetworkConfig, NetworkError, ZodiaNetwork};
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,10 @@ pub struct Tier1Blob {
     pub prekey: [u8; 32],
     /// Ephemeral X25519 key — generated fresh for this Tier-1 handshake
     pub ephemeral: [u8; 32],
+    /// Stable X25519 relay key — senders encrypt blind-relay payloads to this
+    /// key so a forwarding peer cannot read the message content.
+    #[serde(default)]
+    pub relay_pk: [u8; 32],
 }
 
 /// Peer identity — the peer's ed25519 public key bytes.
@@ -94,5 +98,10 @@ pub enum ZodiaNetEvent {
     PeerStatusChanged { peer_id: PeerId, status: PeerStatus },
     /// The direct channel to a connected peer has closed (peer went offline).
     PeerChannelClosed { peer_id: PeerId },
+    /// A relay message arrived — `dest` is the intended final recipient.
+    ///
+    /// If `dest` is us: decrypt `payload` with our relay key and handle as chat.
+    /// If `dest` is a connected peer: forward the raw `ChannelMsg::RelayMsg` on.
+    RelayReceived { via: PeerId, dest: PeerId, payload: Vec<u8> },
 }
 

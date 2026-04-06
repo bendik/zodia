@@ -12,6 +12,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
 use p2panda_core::PrivateKey as PandaKey;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 
 /// ed25519 identity keypair for a Zodia peer.
 #[derive(Debug)]
@@ -55,6 +56,22 @@ impl IdentityKeypair {
     /// Both types are backed by the same ed25519 scalar.
     pub fn to_panda_key(&self) -> PandaKey {
         PandaKey::from_bytes(self.inner.as_bytes())
+    }
+
+    /// The stable X25519 public key used for ECIES relay encryption.
+    ///
+    /// Deterministically derived from the identity seed via BLAKE3.
+    /// Senders encrypt relay payloads to this key; only this peer can decrypt.
+    pub fn relay_public_key(&self) -> [u8; 32] {
+        let sk = X25519Secret::from(self.relay_secret_bytes());
+        X25519PublicKey::from(&sk).to_bytes()
+    }
+
+    /// The 32-byte scalar for the relay X25519 key.
+    ///
+    /// Pass to [`crate::ecies_decrypt`] to decrypt relay payloads addressed to us.
+    pub fn relay_secret_bytes(&self) -> [u8; 32] {
+        blake3::derive_key("zodia relay key v1", &self.inner.to_bytes())
     }
 }
 

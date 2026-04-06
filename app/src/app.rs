@@ -25,8 +25,9 @@ use chrono::{NaiveDateTime, TimeZone as _, Timelike as _};
 use zodia_core::{birth_from_coords, compute_synastry, current_jdn, gregorian_to_jdn,
                  Chart, InterpKey};
 use zodia_crypto::IdentityKeypair;
+use zodia_crypto::{ecies_decrypt, ecies_encrypt};
 use zodia_net::{ChannelMsg, DirectChannel, InterpEntry, NetworkConfig, PeerId, PeerStatus,
-                Tier1Blob, ZodiaNetEvent, ZodiaNetwork};
+                RelayPayload, Tier1Blob, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore};
 use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 
@@ -84,6 +85,11 @@ pub enum AppMsg {
     HangUp,
     /// User sent a chat message to a connected peer.
     SendChat { peer_id: PeerId, text: String },
+    /// Send a message to `dest` via `relay` (blind relay path).
+    ///
+    /// The relay peer will forward the ECIES-encrypted payload to `dest` without
+    /// being able to read it.  Both `relay` and `dest` must be connected peers.
+    SendViaRelay { relay: PeerId, dest: PeerId, text: String },
     /// User set or updated a nickname for a connected peer.
     SetNickname { peer_id: PeerId, name: String },
     /// "+" pressed in the Network view — connect and add to sidebar, no navigation.
@@ -400,7 +406,7 @@ impl AsyncComponent for AppModel {
                     info!(peer = %peer_hex, "attempting auto-reconnect");
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
-                            if let Some(our_blob) = make_tier1_blob(&self.config) {
+                            if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
                                 match channel.exchange_tier1(&our_blob).await {
                                     Ok(their_blob) => {
                                         info!(peer = %peer_hex, "auto-reconnect tier-1 exchange ok");
@@ -440,7 +446,7 @@ impl AsyncComponent for AppModel {
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
                             info!(peer = %peer_hex, "tier-1 channel opened");
-                            if let Some(our_blob) = make_tier1_blob(&self.config) {
+                            if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
                                 match channel.exchange_tier1(&our_blob).await {
                                     Ok(their_blob) => {
                                         info!(peer = %peer_hex, "tier-1 exchange complete");
@@ -477,7 +483,7 @@ impl AsyncComponent for AppModel {
                         match net.connect_peer(&peer_id).await {
                             Ok(channel) => {
                                 info!(peer = %peer_hex, "tier-1 channel opened");
-                                if let Some(our_blob) = make_tier1_blob(&self.config) {
+                                if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
                                     match channel.exchange_tier1(&our_blob).await {
                                         Ok(their_blob) => {
                                             info!(peer = %peer_hex, "tier-1 exchange complete");
@@ -570,6 +576,22 @@ impl AsyncComponent for AppModel {
                     }
                 }
             }
+
+            AppMsg::SendViaRelay { relay, dest, text } => {
+                let Some(relay_channel) = self.connected_channels.get(&relay) else { return };
+                let Some(their_blob) = self.connected_peers.get(&dest) else { return };
+                let our_id = self.network.as_ref().map(|n| n.node_id()).unwrap_or(PeerId([0u8; 32]));
+
+                let inner = RelayPayload { from: our_id.0, text: text.clone() };
+                let mut cbor = Vec::new();
+                if ciborium::into_writer(&inner, &mut cbor).is_err() { return };
+                let payload = ecies_encrypt(&their_blob.relay_pk, &cbor);
+                let msg = ChannelMsg::RelayMsg { dest: dest.0, payload };
+                if relay_channel.send_msg(&msg).await.is_ok() {
+                    let _ = self.store.borrow().insert_message(&dest.0, true, &text);
+                    self.chat_logs.entry(dest).or_default().push((true, text));
+                }
+            }
             AppMsg::ShareInterp(entry) => {
                 // Fast path: send directly to already-connected peers.
                 let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
@@ -626,7 +648,7 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 if let Some(net) = &self.network {
                     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
-                    if let Some(our_blob) = make_tier1_blob(&self.config) {
+                    if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
                         match channel.exchange_tier1(&our_blob).await {
                             Ok(their_blob) => {
                                 info!(peer = %peer_hex, "tier-1 exchange complete (incoming)");
@@ -672,6 +694,43 @@ impl AsyncComponent for AppModel {
                 self.peer_status.insert(peer_id, status);
                 self.peer_list_generation += 1;
             }
+            ZodiaNetEvent::RelayReceived { via: _, dest, payload } => {
+                let our_id = self.network.as_ref().map(|n| n.node_id()).unwrap_or(PeerId([0u8; 32]));
+                if dest == our_id {
+                    // We are the final destination — decrypt and deliver as chat.
+                    let sk = self.identity.relay_secret_bytes();
+                    match ecies_decrypt(&sk, &payload) {
+                        Ok(plaintext) => {
+                            match ciborium::from_reader::<RelayPayload, _>(plaintext.as_slice()) {
+                                Ok(rp) => {
+                                    let from = PeerId(rp.from);
+                                    let tag = hex::encode_upper(&from.0[..4]);
+                                    *self.unread_messages.entry(tag).or_insert(0) += 1;
+                                    let _ = self.store.borrow().insert_message(&from.0, false, &rp.text);
+                                    self.chat_logs.entry(from).or_default().push((false, rp.text));
+                                }
+                                Err(e) => warn!("relay: CBOR decode failed: {e}"),
+                            }
+                        }
+                        Err(e) => warn!("relay: ECIES decrypt failed: {e}"),
+                    }
+                } else if let Some(fwd_channel) = self.connected_channels.get(&dest) {
+                    // We are a relay node — forward the opaque payload without decrypting.
+                    let msg = ChannelMsg::RelayMsg { dest: dest.0, payload };
+                    let ch = fwd_channel.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = ch.send_msg(&msg).await {
+                            debug!("relay forward failed: {e}");
+                        }
+                    });
+                } else {
+                    debug!(
+                        dest = %hex::encode_upper(&dest.0[..4]),
+                        "relay: no channel to destination, dropping"
+                    );
+                }
+            }
+
             ZodiaNetEvent::PeerChannelClosed { peer_id } => {
                 self.peer_status.remove(&peer_id);
                 self.connected_channels.remove(&peer_id);
@@ -1199,11 +1258,12 @@ fn start_network_command(
     });
 }
 
-fn make_tier1_blob(config: &LocalConfig) -> Option<Tier1Blob> {
+fn make_tier1_blob(config: &LocalConfig, identity: &IdentityKeypair) -> Option<Tier1Blob> {
     config.birth.as_ref().map(|birth| Tier1Blob {
         birth: birth.clone(),
         prekey:    [0u8; 32],
         ephemeral: [0u8; 32],
+        relay_pk:  identity.relay_public_key(),
     })
 }
 
@@ -1896,6 +1956,7 @@ fn load_peers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::Tier1Blo
                 birth: zodia_core::BirthData::new(jdn, geohash),
                 prekey:    [0u8; 32],
                 ephemeral: [0u8; 32],
+                relay_pk:  [0u8; 32],
             };
             Some((peer_id, blob))
         })
