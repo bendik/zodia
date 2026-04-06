@@ -12,13 +12,9 @@ Zodia announces a coarse astrological fingerprint (solar month + approximate loc
 
 Everything stays between you and the people you choose to connect with thanks to [p2panda](https://p2panda.org)'s most eloquent networking toolbox.
 
-## Data & privacy
+## Privacy
 
-**Your data is yours.** Zodia stores birth details, chat history, and interpretations locally on your device only. Nothing is uploaded to any server.
-
-**You choose what you share.** The Tier-0 announce reveals only your solar month and a rough location prefix (~600 km). Exact birth data is only exchanged over a direct encrypted connection, and only after you explicitly connect with someone.
-
-**Connections are your responsibility.** Because there is no central authority, Zodia cannot verify the identity of peers. Any information you share over a connection is shared at your own discretion. The software is provided as-is, without warranty of any kind — see the license.
+Everything is stored locally. Zodia announces only your solar month and a rough location (~600 km) to the gossip network. Exact birth data is only exchanged after you explicitly choose to connect with someone. Because there is no central authority, Zodia cannot verify peer identities — share at your own discretion.
 
 ## Building from source
 
