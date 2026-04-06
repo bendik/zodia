@@ -10,13 +10,13 @@ use zodia_core::BirthData;
 
 // ── wire types ────────────────────────────────────────────────────────────────
 
-/// A Tier-0 announce blob broadcast to the gossip swarm.
+/// Anonymous announce blob broadcast to the gossip swarm.
 ///
-/// Contains only the coarse birth fingerprint and an ed25519 pubkey.
+/// Contains only a coarse birth fingerprint and the ed25519 pubkey.
 /// No name, no face, no exact time.  Signed so every receiver can verify
 /// that the blob was produced by whoever holds that keypair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tier0Blob {
+pub struct AnnounceBlob {
     /// 3-char geohash prefix (~600 km)
     pub geohash_prefix: String,
     /// Solar month (0–11)
@@ -27,20 +27,18 @@ pub struct Tier0Blob {
     pub sig: Vec<u8>,
 }
 
-/// A Tier-1 blob exchanged over the iroh QUIC connection after mutual consent.
+/// Exact birth data + key material exchanged after mutual consent.
 ///
-/// Transport is already noise-encrypted (iroh TLS), so this is sent in the
-/// clear at the application layer — confidentiality comes from the channel.
-///
+/// Sent over the iroh QUIC connection (transport-encrypted by QUIC TLS).
 /// After exchange, both sides run a 3-way X3DH to derive the session key
-/// that seeds the message ratchet for all subsequent tier messages.
+/// that seeds the message ratchet for all subsequent exchanges.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tier1Blob {
+pub struct ConsentBlob {
     /// Exact birth data (city-level geohash + exact JDN)
     pub birth: BirthData,
     /// Static X25519 prekey — rotated periodically, not per-session
     pub prekey: [u8; 32],
-    /// Ephemeral X25519 key — generated fresh for this Tier-1 handshake
+    /// Ephemeral X25519 key — generated fresh for this exchange
     pub ephemeral: [u8; 32],
     /// Stable X25519 relay key — senders encrypt blind-relay payloads to this
     /// key so a forwarding peer cannot read the message content.
@@ -72,15 +70,15 @@ impl PeerId {
 /// Typed events emitted by the network layer to the application.
 #[derive(Debug)]
 pub enum ZodiaNetEvent {
-    /// A new peer appeared on the gossip swarm with a valid Tier-0 blob.
-    PeerDiscovered { peer_id: PeerId, blob: Tier0Blob },
+    /// A new peer appeared on the gossip swarm with a valid announce blob.
+    PeerDiscovered { peer_id: PeerId, blob: AnnounceBlob },
     /// A previously seen peer has gone offline (gossip departure).
     PeerLeft { peer_id: PeerId },
-    /// The peer has sent their Tier-1 blob over the direct channel.
-    Tier1Received { peer_id: PeerId, blob: Tier1Blob },
-    /// The peer is requesting a Tier-1 connection.
+    /// The peer has sent their consent blob over the direct channel.
+    ConsentReceived { peer_id: PeerId, blob: ConsentBlob },
+    /// The peer is requesting a consent exchange.
     SessionRequested { peer_id: PeerId },
-    /// The peer has accepted our Tier-1 connection request.
+    /// The peer has accepted our consent exchange request.
     SessionAccepted { peer_id: PeerId },
     /// An established peer is requesting a voice call.
     CallOffer { from: PeerId, session_id: [u8; 32] },
@@ -90,7 +88,7 @@ pub enum ZodiaNetEvent {
     CallRejected { from: PeerId },
     /// The remote peer ended an active call.
     CallHungUp { from: PeerId },
-    /// An incoming Tier-1 QUIC connection was accepted from a remote peer.
+    /// An incoming QUIC connection was accepted from a remote peer.
     IncomingChannel { peer_id: PeerId, channel: DirectChannel },
     /// A plain-text chat message received from a connected peer.
     ChatReceived { from: PeerId, text: String },
@@ -104,4 +102,3 @@ pub enum ZodiaNetEvent {
     /// If `dest` is a connected peer: forward the raw `ChannelMsg::RelayMsg` on.
     RelayReceived { via: PeerId, dest: PeerId, payload: Vec<u8> },
 }
-

@@ -9,7 +9,7 @@
 //!                         tabs reactive without blocking the GTK thread
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use libadwaita as adw;
@@ -26,8 +26,8 @@ use zodia_core::{birth_from_coords, compute_synastry, current_jdn, gregorian_to_
                  Chart, InterpKey};
 use zodia_crypto::IdentityKeypair;
 use zodia_crypto::{ecies_decrypt, ecies_encrypt};
-use zodia_net::{ChannelMsg, DirectChannel, InterpEntry, NetworkConfig, PeerId, PeerStatus,
-                RelayPayload, Tier1Blob, ZodiaNetEvent, ZodiaNetwork};
+use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
+                NetworkConfig, PeerId, PeerStatus, RelayPayload, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore};
 use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 
@@ -80,6 +80,10 @@ pub enum AppMsg {
     /// User tapped a peer row — connect (if needed) then open their page.
     OpenPeer(PeerId),
     CallPeer(PeerId),
+    /// User approved an incoming consent request.
+    AcceptConsent,
+    /// User declined an incoming consent request.
+    RejectConsent,
     AcceptCall,
     RejectCall,
     HangUp,
@@ -122,7 +126,7 @@ pub struct AppModel {
     /// Peers seen on the gossip swarm (Tier-0), ordered by discovery time.
     discovered_peers: Vec<DiscoveredPeer>,
     /// Peers whose Tier-1 exchange has completed.
-    connected_peers: HashMap<PeerId, Tier1Blob>,
+    connected_peers: HashMap<PeerId, ConsentBlob>,
     /// Active QUIC channels — presence means the channel is open.
     connected_channels: HashMap<PeerId, DirectChannel>,
     /// Explicit presence state received from each peer over their channel.
@@ -151,6 +155,10 @@ pub struct AppModel {
     peer_nicknames: HashMap<String, String>,
     /// Unread message counts per peer (cleared when their page is opened).
     unread_messages: HashMap<String, usize>,
+
+    /// Incoming consent requests waiting for user approval, in arrival order.
+    /// The first entry is the one currently shown in the consent bar.
+    pending_consents: VecDeque<(PeerId, DirectChannel)>,
 
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
@@ -200,6 +208,11 @@ pub struct AppWidgets {
     call_status: gtk::Label,
     accept_btn: gtk::Button,
     hangup_btn: gtk::Button,
+
+    consent_bar: gtk::Box,
+    consent_status: gtk::Label,
+    consent_accept_btn: gtk::Button,
+    consent_reject_btn: gtk::Button,
 }
 
 // ── async component ───────────────────────────────────────────────────────────
@@ -257,6 +270,7 @@ impl AsyncComponent for AppModel {
             chat_logs,
             peer_nicknames,
             unread_messages: HashMap::new(),
+            pending_consents: VecDeque::new(),
             sync_publish_tx: None,
         };
 
@@ -406,14 +420,14 @@ impl AsyncComponent for AppModel {
                     info!(peer = %peer_hex, "attempting auto-reconnect");
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
-                            if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
-                                match channel.exchange_tier1(&our_blob).await {
+                            if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
+                                match channel.exchange_consent(&our_blob).await {
                                     Ok(their_blob) => {
-                                        info!(peer = %peer_hex, "auto-reconnect tier-1 exchange ok");
+                                        info!(peer = %peer_hex, "auto-reconnect consent exchange ok");
                                         self.connected_peers.insert(peer_id.clone(), their_blob);
                                         self.peer_list_generation += 1;
                                     }
-                                    Err(e) => warn!("auto-reconnect tier-1 exchange: {e}"),
+                                    Err(e) => warn!("auto-reconnect consent exchange: {e}"),
                                 }
                             }
                             net.accept_channel(peer_id.clone(), channel.clone());
@@ -445,11 +459,11 @@ impl AsyncComponent for AppModel {
                     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                     match net.connect_peer(&peer_id).await {
                         Ok(channel) => {
-                            info!(peer = %peer_hex, "tier-1 channel opened");
-                            if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
-                                match channel.exchange_tier1(&our_blob).await {
+                            info!(peer = %peer_hex, "consent channel opened");
+                            if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
+                                match channel.exchange_consent(&our_blob).await {
                                     Ok(their_blob) => {
-                                        info!(peer = %peer_hex, "tier-1 exchange complete");
+                                        info!(peer = %peer_hex, "consent exchange complete");
                                         do_interp_sync(
                                             &channel, &their_blob,
                                             self.chart.as_ref(), &self.store,
@@ -459,7 +473,7 @@ impl AsyncComponent for AppModel {
                                         save_peers(self.config.data_dir(), &self.connected_peers);
                                         self.peer_list_generation += 1;
                                     }
-                                    Err(e) => warn!("tier-1 exchange: {e}"),
+                                    Err(e) => warn!("consent exchange: {e}"),
                                 }
                             }
                             net.accept_channel(peer_id.clone(), channel.clone());
@@ -482,11 +496,11 @@ impl AsyncComponent for AppModel {
                         let peer_hex = tag.clone();
                         match net.connect_peer(&peer_id).await {
                             Ok(channel) => {
-                                info!(peer = %peer_hex, "tier-1 channel opened");
-                                if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
-                                    match channel.exchange_tier1(&our_blob).await {
+                                info!(peer = %peer_hex, "consent channel opened");
+                                if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
+                                    match channel.exchange_consent(&our_blob).await {
                                         Ok(their_blob) => {
-                                            info!(peer = %peer_hex, "tier-1 exchange complete");
+                                            info!(peer = %peer_hex, "consent exchange complete");
                                             do_interp_sync(
                                                 &channel, &their_blob,
                                                 self.chart.as_ref(), &self.store,
@@ -496,7 +510,7 @@ impl AsyncComponent for AppModel {
                                             save_peers(self.config.data_dir(), &self.connected_peers);
                                             self.peer_list_generation += 1;
                                         }
-                                        Err(e) => warn!("tier-1 exchange: {e}"),
+                                        Err(e) => warn!("consent exchange: {e}"),
                                     }
                                 }
                                 net.accept_channel(peer_id.clone(), channel.clone());
@@ -524,6 +538,43 @@ impl AsyncComponent for AppModel {
                         }
                         Err(e) => error!("start audio session: {e}"),
                     }
+                }
+            }
+
+            AppMsg::AcceptConsent => {
+                if let Some((peer_id, channel)) = self.pending_consents.pop_front() {
+                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                    if let Some(net) = &self.network {
+                        if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
+                            match channel.exchange_consent(&our_blob).await {
+                                Ok(their_blob) => {
+                                    info!(peer = %peer_hex, "consent exchange complete");
+                                    do_interp_sync(
+                                        &channel, &their_blob,
+                                        self.chart.as_ref(), &self.store,
+                                        &self.identity, &peer_hex,
+                                    ).await;
+                                    self.connected_peers.insert(peer_id.clone(), their_blob);
+                                    save_peers(self.config.data_dir(), &self.connected_peers);
+                                    self.peer_list_generation += 1;
+                                }
+                                Err(e) => warn!(peer = %peer_hex, "consent exchange failed: {e}"),
+                            }
+                        }
+                        net.accept_channel(peer_id.clone(), channel.clone());
+                        send_status_active(&channel);
+                        self.connected_channels.insert(peer_id, channel);
+                    }
+                    self.peer_list_generation += 1;
+                }
+            }
+
+            AppMsg::RejectConsent => {
+                if let Some((peer_id, _channel)) = self.pending_consents.pop_front() {
+                    // Dropping _channel closes the QUIC connection.
+                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                    info!(peer = %peer_hex, "consent request declined");
+                    self.peer_list_generation += 1;
                 }
             }
 
@@ -646,27 +697,10 @@ impl AsyncComponent for AppModel {
                 self.peer_list_generation += 1;
             }
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
-                if let Some(net) = &self.network {
-                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
-                    if let Some(our_blob) = make_tier1_blob(&self.config, &self.identity) {
-                        match channel.exchange_tier1(&our_blob).await {
-                            Ok(their_blob) => {
-                                info!(peer = %peer_hex, "tier-1 exchange complete (incoming)");
-                                do_interp_sync(
-                                    &channel, &their_blob,
-                                    self.chart.as_ref(), &self.store,
-                                    &self.identity, &peer_hex,
-                                ).await;
-                                self.connected_peers.insert(peer_id.clone(), their_blob);
-                                self.peer_list_generation += 1;
-                            }
-                            Err(e) => warn!("tier-1 exchange (incoming): {e}"),
-                        }
-                    }
-                    net.accept_channel(peer_id.clone(), channel.clone());
-                    send_status_active(&channel);
-                    self.connected_channels.insert(peer_id, channel);
-                }
+                let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                info!(peer = %peer_hex, "incoming consent request — waiting for user approval");
+                self.pending_consents.push_back((peer_id, channel));
+                self.peer_list_generation += 1; // triggers update_view → consent bar refresh
             }
             ZodiaNetEvent::CallOffer { from, session_id } => {
                 self.call_state = CallState::Ringing { peer_id: from, session_id };
@@ -894,6 +928,27 @@ impl AsyncComponent for AppModel {
                     .join("\n");
                 widgets.notif_label.set_text(&lines);
             }
+        }
+
+        // ── consent bar ──────────────────────────────────────────────────────
+
+        if let Some((peer_id, _)) = self.pending_consents.front() {
+            let tag = hex::encode_upper(&peer_id.0[..4]);
+            // Show solar glyph if we've seen their announce blob.
+            let glyph = self.discovered_peers.iter()
+                .find(|p| &p.peer_id == peer_id)
+                .map(|p| sign_glyph(p.solar_month).to_string())
+                .unwrap_or_default();
+            let more = self.pending_consents.len().saturating_sub(1);
+            let label = if more == 0 {
+                format!("{glyph}  ···{tag} wants to connect")
+            } else {
+                format!("{glyph}  ···{tag} wants to connect  (+{more} more)")
+            };
+            widgets.consent_status.set_text(&label);
+            widgets.consent_bar.set_visible(true);
+        } else {
+            widgets.consent_bar.set_visible(false);
         }
 
         // ── call bar ─────────────────────────────────────────────────────────
@@ -1258,8 +1313,8 @@ fn start_network_command(
     });
 }
 
-fn make_tier1_blob(config: &LocalConfig, identity: &IdentityKeypair) -> Option<Tier1Blob> {
-    config.birth.as_ref().map(|birth| Tier1Blob {
+fn make_consent_blob(config: &LocalConfig, identity: &IdentityKeypair) -> Option<ConsentBlob> {
+    config.birth.as_ref().map(|birth| ConsentBlob {
         birth: birth.clone(),
         prekey:    [0u8; 32],
         ephemeral: [0u8; 32],
@@ -1271,7 +1326,7 @@ fn make_tier1_blob(config: &LocalConfig, identity: &IdentityKeypair) -> Option<T
 
 async fn do_interp_sync(
     channel: &DirectChannel,
-    their_blob: &Tier1Blob,
+    their_blob: &ConsentBlob,
     our_chart: Option<&Chart>,
     store: &Rc<RefCell<ZodiaStore>>,
     identity: &Rc<IdentityKeypair>,
@@ -1290,7 +1345,7 @@ async fn do_interp_sync(
 }
 
 fn collect_entries_for_peer(
-    their_blob: &Tier1Blob,
+    their_blob: &ConsentBlob,
     our_chart: Option<&Chart>,
     store: &Rc<RefCell<ZodiaStore>>,
     _identity: &Rc<IdentityKeypair>,
@@ -1385,6 +1440,7 @@ fn build_widgets(
         content_stack, peers_content,
         notif_btn, notif_label,
         net_status_label,
+        consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
     ) = build_main_page(model, sender);
     outer_stack.add_named(&main_view, Some("main"));
@@ -1435,6 +1491,10 @@ fn build_widgets(
         notif_btn,
         notif_label,
         net_status_label,
+        consent_bar,
+        consent_status,
+        consent_accept_btn,
+        consent_reject_btn,
         call_bar,
         call_status,
         accept_btn,
@@ -1642,12 +1702,13 @@ fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (
-    adw::ToolbarView,                                   // outermost wrapper (call_bar bottom)
+    adw::ToolbarView,                                   // outermost wrapper
     gtk::Box, gtk::Box,                                 // chart_container, sky_container
     adw::OverlaySplitView, gtk::ListBox,                 // split_view, nav_list
     gtk::Stack, gtk::Box,                               // content_stack, peers_content
     gtk::MenuButton, gtk::Label,                        // notif_btn, notif_label
     gtk::Label,                                         // net_status_label
+    gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // consent bar
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
 ) {
     // ── Notification bell (sidebar header) ───────────────────────────────────
@@ -1868,6 +1929,35 @@ fn build_main_page(
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.set_content(Some(&split_view));
 
+    // Consent request bar — shown when a peer wants to connect.
+    let consent_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    consent_bar.add_css_class("toolbar");
+    consent_bar.set_margin_start(8);
+    consent_bar.set_margin_end(8);
+    consent_bar.set_visible(false);
+
+    let consent_status = gtk::Label::new(None);
+    consent_status.set_hexpand(true);
+    consent_status.set_halign(gtk::Align::Start);
+    consent_bar.append(&consent_status);
+
+    let consent_accept_btn = gtk::Button::with_label("Connect  ✓");
+    consent_accept_btn.add_css_class("suggested-action");
+    consent_accept_btn.add_css_class("pill");
+    let s = sender.clone();
+    consent_accept_btn.connect_clicked(move |_| { s.input(AppMsg::AcceptConsent); });
+    consent_bar.append(&consent_accept_btn);
+
+    let consent_reject_btn = gtk::Button::with_label("Decline  ✕");
+    consent_reject_btn.add_css_class("destructive-action");
+    consent_reject_btn.add_css_class("pill");
+    let s = sender.clone();
+    consent_reject_btn.connect_clicked(move |_| { s.input(AppMsg::RejectConsent); });
+    consent_bar.append(&consent_reject_btn);
+
+    toolbar_view.add_bottom_bar(&consent_bar);
+
+    // Call bar — shown during active/ringing/outgoing calls.
     let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     call_bar.add_css_class("toolbar");
     call_bar.set_margin_start(8);
@@ -1905,6 +1995,7 @@ fn build_main_page(
         content_stack, peers_content,
         notif_btn, notif_label,
         net_status_label,
+        consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
     )
 }
@@ -1939,7 +2030,7 @@ fn load_nicknames(data_dir: &std::path::Path) -> HashMap<String, String> {
 
 /// Load previously connected peers from `peers.tsv`.
 /// Format: `{peer_id_hex64}\t{jdn}\t{geohash}`
-fn load_peers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::Tier1Blob> {
+fn load_peers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::ConsentBlob> {
     let Ok(content) = std::fs::read_to_string(data_dir.join("peers.tsv")) else {
         return HashMap::new();
     };
@@ -1952,7 +2043,7 @@ fn load_peers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::Tier1Blo
             let id_bytes: Vec<u8> = hex::decode(id_hex).ok()?;
             let id_arr: [u8; 32] = id_bytes.try_into().ok()?;
             let peer_id = PeerId(id_arr);
-            let blob = zodia_net::Tier1Blob {
+            let blob = zodia_net::ConsentBlob {
                 birth: zodia_core::BirthData::new(jdn, geohash),
                 prekey:    [0u8; 32],
                 ephemeral: [0u8; 32],
@@ -1963,7 +2054,7 @@ fn load_peers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::Tier1Blo
         .collect()
 }
 
-fn save_peers(data_dir: &std::path::Path, peers: &HashMap<PeerId, zodia_net::Tier1Blob>) {
+fn save_peers(data_dir: &std::path::Path, peers: &HashMap<PeerId, zodia_net::ConsentBlob>) {
     let content: String = peers.iter()
         .map(|(id, blob)| format!("{}\t{}\t{}\n", hex::encode(&id.0), blob.birth.jdn, blob.birth.geohash))
         .collect();

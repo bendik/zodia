@@ -47,7 +47,7 @@ impl IdentityKeypair {
     }
 
     /// The underlying ed25519-dalek `SigningKey` — needed by zodia-net for
-    /// `Tier0Blob::sign` and for constructing the `NetworkConfig`.
+    /// `AnnounceBlob::sign` and for constructing the `NetworkConfig`.
     pub fn signing_key(&self) -> &SigningKey {
         &self.inner
     }

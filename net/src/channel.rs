@@ -1,14 +1,14 @@
 //! Direct peer-to-peer channel over an iroh QUIC connection.
 //!
-//! Used for all post-tier-0 exchanges:
-//!   - Tier 1: `Tier1Blob` exchange + X3DH key agreement
+//! Used for all post-announce exchanges:
+//!   - Consent exchange: `ConsentBlob` + X3DH key agreement
 //!   - Call signaling: `ChannelMsg` over reliable QUIC streams
 //!   - Audio transport: raw QUIC datagrams (unreliable, low-latency)
 //!
 //! Reliable messages use a length-prefix (4 bytes, big-endian u32) over fresh
 //! bidirectional QUIC streams — one stream per message to isolate HoL blocking.
 
-use crate::Tier1Blob;
+use crate::ConsentBlob;
 use bytes::Bytes;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
@@ -63,8 +63,8 @@ pub enum PeerStatus {
 /// Typed messages exchanged over reliable QUIC streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelMsg {
-    /// Tier-1 handshake: exchange exact birth data + X25519 prekeys.
-    Tier1Handshake(Tier1Blob),
+    /// Consent exchange: share exact birth data + X25519 prekeys.
+    ConsentHandshake(ConsentBlob),
     /// Post-handshake: swap top community interpretations for each other's keys.
     InterpShare { entries: Vec<InterpEntry> },
     /// Explicit presence update — sent on connect (Active) and before quit (Away).
@@ -198,7 +198,7 @@ impl DirectChannel {
     // ── interpretation sync ───────────────────────────────────────────────────
 
     /// Mutual interpretation exchange — call concurrently on both sides after
-    /// the Tier-1 handshake completes.
+    /// the consent exchange completes.
     ///
     /// Each peer sends their top signed community entries for the other's
     /// relevant aspect keys.  Returns the entries received from the remote peer.
@@ -219,13 +219,13 @@ impl DirectChannel {
         }
     }
 
-    // ── tier-1 handshake ──────────────────────────────────────────────────────
+    // ── consent exchange ──────────────────────────────────────────────────────
 
-    /// Mutual Tier-1 blob exchange.
+    /// Mutual consent blob exchange.
     ///
     /// Both sides call this concurrently.  QUIC bidirectional streams let
     /// simultaneous send/receive proceed without deadlocking.
-    pub async fn exchange_tier1(&self, ours: &Tier1Blob) -> Result<Tier1Blob, ChannelError> {
+    pub async fn exchange_consent(&self, ours: &ConsentBlob) -> Result<ConsentBlob, ChannelError> {
         let encoded = cbor_encode(ours);
         let (send_res, recv_res) = tokio::join!(self.send_raw(&encoded), self.recv_raw());
         send_res?;

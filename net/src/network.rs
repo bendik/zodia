@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::channel::{ChannelMsg, DirectChannel};
-use crate::{PeerId, Tier0Blob, ZodiaNetEvent};
+use crate::{AnnounceBlob, PeerId, ZodiaNetEvent};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
@@ -44,8 +44,8 @@ pub const RELAY_URL: &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
 /// Leave as `None` until the bootstrap node is deployed; mDNS still works locally.
 const BOOTSTRAP_NODE_ID: Option<[u8; 32]> = Some([176, 45, 141, 10, 244, 112, 14, 59, 107, 231, 19, 72, 114, 30, 215, 65, 72, 50, 80, 56, 10, 112, 192, 16, 171, 119, 103, 105, 89, 230, 178, 181]);
 
-/// Protocol identifier for direct peer-to-peer Tier-1 consent exchanges.
-pub const TIER1_PROTOCOL: &[u8] = b"zodia/tier1/1";
+/// Protocol identifier for direct peer-to-peer consent exchanges.
+pub const CONSENT_PROTOCOL: &[u8] = b"zodia/tier1/1";
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -77,7 +77,7 @@ pub struct ZodiaNetwork {
     topic_handles: Vec<GossipHandle>,
     endpoint: Endpoint,
     /// Pre-constructed, signed announce blob for this peer.
-    my_blob: Tier0Blob,
+    my_blob: AnnounceBlob,
     event_tx: mpsc::Sender<ZodiaNetEvent>,
     // Keep discovery components alive (their drop = shutdown).
     address_book: AddressBook,
@@ -169,17 +169,17 @@ impl ZodiaNetwork {
             topic_handles.push(handle);
         }
 
-        let my_blob = Tier0Blob::sign(birth, &config.signing_key);
+        let my_blob = AnnounceBlob::sign(birth, &config.signing_key);
         let (event_tx, event_rx) = mpsc::channel(256);
 
         // Register the Tier-1 ALPN so incoming connections are accepted.
         // Without this registration iroh refuses the TLS handshake with
         // "error 120: peer doesn't support any known protocol".
         endpoint
-            .accept(TIER1_PROTOCOL, Tier1Handler { event_tx: event_tx.clone() })
+            .accept(CONSENT_PROTOCOL, ConsentHandler { event_tx: event_tx.clone() })
             .await
             .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
-        debug!("tier-1 ALPN registered");
+        debug!("consent ALPN registered");
 
         // Dedup set shared across all topic listeners — a peer may be
         // discoverable via several shared topics and we only want one event.
@@ -215,7 +215,7 @@ impl ZodiaNetwork {
                 .await
                 .map_err(|_| NetworkError::Publish)?;
         }
-        info!(topics = self.topic_handles.len(), "tier-0 announce published");
+        info!(topics = self.topic_handles.len(), "announce published");
         Ok(())
     }
 
@@ -234,23 +234,23 @@ impl ZodiaNetwork {
         for attempt in 0..3u8 {
             if attempt > 0 {
                 let delay = DELAYS_MS[(attempt - 1) as usize];
-                debug!(attempt, delay_ms = delay, "retrying tier-1 connection");
+                debug!(attempt, delay_ms = delay, "retrying consent connection");
                 sleep(Duration::from_millis(delay)).await;
             }
-            debug!(attempt, "opening tier-1 QUIC connection");
-            match self.endpoint.connect(node_id, TIER1_PROTOCOL).await {
+            debug!(attempt, "opening consent QUIC connection");
+            match self.endpoint.connect(node_id, CONSENT_PROTOCOL).await {
                 Ok(conn) => {
                     // Clear any stale mark so the next connect attempt is not
                     // blocked by a previously recorded failure.
                     let _ = self.address_book
                         .report(node_id, ConnectionOutcome::Successful)
                         .await;
-                    info!(attempt, "tier-1 channel open");
+                    info!(attempt, "consent channel open");
                     return Ok(crate::channel::DirectChannel::from_connection(conn));
                 }
                 Err(e) => {
                     last_err = e.to_string();
-                    warn!(attempt, err = %last_err, "tier-1 connect failed");
+                    warn!(attempt, err = %last_err, "consent connect failed");
                 }
             }
         }
@@ -291,16 +291,16 @@ impl ZodiaNetwork {
     }
 }
 
-// ── tier-1 protocol handler ───────────────────────────────────────────────────
+// ── consent protocol handler ──────────────────────────────────────────────────
 
-/// Accepts incoming `TIER1_PROTOCOL` QUIC connections and emits an
+/// Accepts incoming `CONSENT_PROTOCOL` QUIC connections and emits an
 /// `IncomingChannel` event so the app layer can register the channel.
 #[derive(Debug, Clone)]
-struct Tier1Handler {
+struct ConsentHandler {
     event_tx: mpsc::Sender<ZodiaNetEvent>,
 }
 
-impl ProtocolHandler for Tier1Handler {
+impl ProtocolHandler for ConsentHandler {
     async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), AcceptError> {
         let peer_id = PeerId(*conn.remote_id().as_bytes());
         let channel = DirectChannel::from_connection(conn);
@@ -346,7 +346,7 @@ pub(crate) fn spawn_channel_listener(
                         payload,
                     }).await;
                 }
-                Ok(_) => {} // Tier1Handshake / InterpShare already handled at connect time
+                Ok(_) => {} // ConsentHandshake / InterpShare already handled at connect time
                 Err(e) => {
                     debug!(peer = %hex::encode_upper(&peer_id.0[..4]), err = %e, "channel closed");
                     let _ = tx.send(ZodiaNetEvent::PeerChannelClosed { peer_id: peer_id.clone() }).await;
@@ -367,7 +367,7 @@ fn spawn_gossip_listener(
     tokio::spawn(async move {
         while let Some(result) = sub.next().await {
             match result {
-                Ok(bytes) => match Tier0Blob::from_cbor(&bytes) {
+                Ok(bytes) => match AnnounceBlob::from_cbor(&bytes) {
                     Ok(blob) if blob.verify().is_ok() => {
                         // Dedup: a peer may appear on several shared topics.
                         let is_new = seen.lock().map(|mut s| s.insert(blob.pubkey)).unwrap_or(true);

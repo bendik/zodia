@@ -22,7 +22,7 @@ use libadwaita::prelude::*;
 use relm4::AsyncComponentSender;
 use zodia_core::{Chart, compute_positions, compute_synastry};
 use zodia_crypto::IdentityKeypair;
-use zodia_net::{PeerId, Tier1Blob};
+use zodia_net::{ConsentBlob, PeerId};
 use zodia_store::ZodiaStore;
 
 use crate::app::{AppModel, AppMsg};
@@ -39,7 +39,7 @@ use crate::util::sign_glyph;
 #[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_peer_page(
     peer_id: &PeerId,
-    their_blob: &Tier1Blob,
+    their_blob: &ConsentBlob,
     our_chart: &Chart,
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,

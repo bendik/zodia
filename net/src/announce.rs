@@ -1,11 +1,11 @@
-//! Tier-0 announce blob — signing and verification.
+//! Anonymous announce blob — signing and verification.
 //!
 //! We use ed25519-dalek directly rather than p2panda-core's opaque `Signature`
 //! wrapper so that verification from raw bytes is straightforward.  The key
 //! bytes are identical to what p2panda-core uses internally (both back onto
 //! the same ed25519 scalar), so the node identity is consistent end-to-end.
 
-use crate::Tier0Blob;
+use crate::AnnounceBlob;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer, Verifier};
 use serde::Serialize;
 use thiserror::Error;
@@ -30,8 +30,8 @@ struct AnnouncePayload<'a> {
     pubkey: [u8; 32],
 }
 
-impl Tier0Blob {
-    /// Sign a Tier-0 blob using the identity signing key.
+impl AnnounceBlob {
+    /// Sign an announce blob using the identity signing key.
     pub fn sign(birth: &BirthData, signing_key: &SigningKey) -> Self {
         let prefix = &birth.geohash[..3.min(birth.geohash.len())];
         let month  = solar_month(birth.jdn);
@@ -40,7 +40,7 @@ impl Tier0Blob {
         let payload = AnnouncePayload { geohash_prefix: prefix, solar_month: month, pubkey };
         let sig = signing_key.sign(&cbor_encode(&payload));
 
-        Tier0Blob {
+        AnnounceBlob {
             geohash_prefix: prefix.to_string(),
             solar_month: month,
             pubkey,
