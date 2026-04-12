@@ -17,5 +17,6 @@
     <file>scalable/actions/list-add-symbolic.svg</file>
     <file>scalable/actions/sidebar-show-symbolic.svg</file>
     <file>scalable/actions/chat-message-new-symbolic.svg</file>
+    <file>scalable/actions/x-office-calendar-symbolic.svg</file>
   </gresource>
 </gresources>

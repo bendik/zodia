@@ -139,8 +139,9 @@ fn list_page(
             let identity_c = Rc::clone(&identity);
             let sender_c = sender.clone();
             let key = item.key.clone();
+            let ctx = item.transit_context.clone();
             row.connect_activated(move |_| {
-                nav_c.push(&detail_page(&key, Rc::clone(&store_c), Rc::clone(&identity_c), sender_c.clone()));
+                nav_c.push(&detail_page(&key, ctx.clone(), Rc::clone(&store_c), Rc::clone(&identity_c), sender_c.clone()));
             });
 
             aspect_group.add(&row);
@@ -160,8 +161,13 @@ fn list_page(
 // ── detail page ───────────────────────────────────────────────────────────────
 
 /// Build the interpretation detail page for `key`.
+///
+/// `transit_context` is an optional human-readable date-range string
+/// (e.g. `"Active: 8 Apr – 16 Apr 2026"`) shown at the top of the page for
+/// transit aspects.  Pass `None` for natal/synastry pages.
 pub fn detail_page(
     key: &InterpKey,
+    transit_context: Option<String>,
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
@@ -188,6 +194,19 @@ pub fn detail_page(
     clamp.set_margin_end(16);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+
+    // ── transit timing ────────────────────────────────────────────────────────
+    if let Some(ctx) = transit_context {
+        let timing_group = adw::PreferencesGroup::new();
+        timing_group.set_title("Timing");
+        let timing_row = adw::ActionRow::new();
+        timing_row.set_title(&ctx);
+        let icon = gtk::Image::from_icon_name("x-office-calendar-symbolic");
+        icon.add_css_class("dim-label");
+        timing_row.add_prefix(&icon);
+        timing_group.add(&timing_row);
+        content.append(&timing_group);
+    }
 
     // ── existing interpretations ──────────────────────────────────────────────
 

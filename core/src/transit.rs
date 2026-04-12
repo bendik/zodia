@@ -79,6 +79,62 @@ impl TransitSet {
     }
 }
 
+// ── window ───────────────────────────────────────────────────────────────────
+
+/// Find the JDN range during which `transiting` is within the default orb of
+/// `kind` aspect to `natal_lon`.
+///
+/// Scans backward then forward from `jdn` in 1-day steps, capping at ±90 days.
+/// Returns `(start_jdn, end_jdn)`.
+pub fn transit_window(
+    transiting: Planet,
+    natal_lon: f64,
+    kind: AspectKind,
+    jdn: f64,
+) -> (f64, f64) {
+    let orb_limit = kind.default_orb();
+
+    let in_orb = |t: f64| -> bool {
+        crate::ephemeris::compute_positions(t)
+            .ok()
+            .and_then(|pos| pos.get(transiting))
+            .map(|lon| {
+                (angular_separation(lon, natal_lon) - kind.angle()).abs() <= orb_limit
+            })
+            .unwrap_or(false)
+    };
+
+    let start = {
+        let mut t = jdn;
+        loop {
+            let prev = t - 1.0;
+            if prev < jdn - 90.0 {
+                break jdn - 90.0;
+            }
+            if !in_orb(prev) {
+                break t;
+            }
+            t = prev;
+        }
+    };
+
+    let end = {
+        let mut t = jdn;
+        loop {
+            let next = t + 1.0;
+            if next > jdn + 90.0 {
+                break jdn + 90.0;
+            }
+            if !in_orb(next) {
+                break t;
+            }
+            t = next;
+        }
+    };
+
+    (start, end)
+}
+
 // ── computation ──────────────────────────────────────────────────────────────
 
 /// Aspects from every transiting planet to every natal planet.

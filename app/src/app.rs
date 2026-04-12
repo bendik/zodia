@@ -808,7 +808,12 @@ impl AsyncComponent for AppModel {
 
                 if let Ok(ts) = chart.transits_at(current_jdn()) {
                     let tav = AspectView::transits(
-                        aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
+                        aspect_list::transit_items(
+                            &ts.transit_aspects,
+                            &ts.house_transits,
+                            &chart.positions,
+                            ts.transit_jdn,
+                        ),
                         Rc::clone(&self.store),
                         Rc::clone(&self.identity),
                         sender.clone(),
@@ -1459,7 +1464,12 @@ fn build_widgets(
 
         if let Ok(ts) = chart.transits_at(current_jdn()) {
             let tav = AspectView::transits(
-                aspect_list::transit_items(&ts.transit_aspects, &ts.house_transits),
+                aspect_list::transit_items(
+                    &ts.transit_aspects,
+                    &ts.house_transits,
+                    &chart.positions,
+                    ts.transit_jdn,
+                ),
                 Rc::clone(&model.store),
                 Rc::clone(&model.identity),
                 sender.clone(),
