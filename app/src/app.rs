@@ -28,7 +28,7 @@ use zodia_crypto::IdentityKeypair;
 use zodia_crypto::{ecies_decrypt, ecies_encrypt};
 use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
                 NetworkConfig, PeerId, PeerStatus, RelayPayload, ZodiaNetEvent, ZodiaNetwork};
-use zodia_store::{StoreError, ZodiaStore};
+use zodia_store::{StoreError, ZodiaStore, BaselineStore};
 use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 
 use crate::aspect_list;
@@ -42,6 +42,7 @@ use crate::util::{approximate_aspects, sign_glyph};
 pub struct AppInit {
     pub config: LocalConfig,
     pub store: ZodiaStore,
+    pub baseline: BaselineStore,
 }
 
 // ── call state ────────────────────────────────────────────────────────────────
@@ -119,6 +120,7 @@ pub struct AppModel {
     chart: Option<Chart>,
 
     store: Rc<RefCell<ZodiaStore>>,
+    baseline: Rc<BaselineStore>,
 
     network: Option<ZodiaNetwork>,
     node_id_text: String,
@@ -237,6 +239,7 @@ impl AsyncComponent for AppModel {
         let identity = Rc::new(IdentityKeypair::from_seed(init.config.identity.seed()));
         let has_birth = init.config.birth.is_some();
         let store = Rc::new(RefCell::new(init.store));
+        let baseline = Rc::new(init.baseline);
 
         let peer_nicknames = load_nicknames(init.config.data_dir());
         let persisted_peers = load_peers(init.config.data_dir());
@@ -254,6 +257,7 @@ impl AsyncComponent for AppModel {
             on_setup_page: !has_birth,
             chart: None,
             store,
+            baseline,
             network: None,
             node_id_text: String::new(),
             discovered_peers: Vec::new(),
@@ -780,6 +784,13 @@ impl AsyncComponent for AppModel {
                     });
                 }
             }
+            ZodiaNetEvent::InterpReceived { from, entries } => {
+                let peer_hex = hex::encode_upper(&from.0[..4]);
+                let n = import_interps(&entries, &self.store, &peer_hex);
+                if n > 0 {
+                    info!(peer = %peer_hex, "imported {n} live interpretations from peer");
+                }
+            }
             _ => {}
         }
     }
@@ -800,6 +811,7 @@ impl AsyncComponent for AppModel {
                     aspect_list::natal_items(&chart.natal_aspects()),
                     chart,
                     Rc::clone(&self.store),
+                    Rc::clone(&self.baseline),
                     Rc::clone(&self.identity),
                     sender.clone(),
                 );
@@ -815,6 +827,7 @@ impl AsyncComponent for AppModel {
                             ts.transit_jdn,
                         ),
                         Rc::clone(&self.store),
+                        Rc::clone(&self.baseline),
                         Rc::clone(&self.identity),
                         sender.clone(),
                     );
@@ -848,6 +861,7 @@ impl AsyncComponent for AppModel {
                             peer_page::build_peer_page(
                                 &peer_id, their_blob, chart,
                                 Rc::clone(&self.store),
+                                Rc::clone(&self.baseline),
                                 Rc::clone(&self.identity),
                                 &sender,
                                 nickname,
@@ -1456,6 +1470,7 @@ fn build_widgets(
             aspect_list::natal_items(&chart.natal_aspects()),
             chart,
             Rc::clone(&model.store),
+            Rc::clone(&model.baseline),
             Rc::clone(&model.identity),
             sender.clone(),
         );
@@ -1471,6 +1486,7 @@ fn build_widgets(
                     ts.transit_jdn,
                 ),
                 Rc::clone(&model.store),
+                Rc::clone(&model.baseline),
                 Rc::clone(&model.identity),
                 sender.clone(),
             );

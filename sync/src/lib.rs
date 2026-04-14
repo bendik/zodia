@@ -151,8 +151,6 @@ pub struct ZodiaSyncNode {
     panda_key: PandaKey,
     /// In-memory p2panda operation store.
     sync_store: SyncStore,
-    /// Topic map shared with LogSync (updated when new authors are seen).
-    topic_map: InterpTopicMap,
     /// LogSync handle for our single sync topic.
     handle: InterpSyncHandle,
     /// Interpretations received from remote peers, ready for the app to consume.
@@ -301,7 +299,6 @@ impl ZodiaSyncNode {
         Ok(Self {
             panda_key,
             sync_store,
-            topic_map,
             handle,
             received: recv_rx,
         })
