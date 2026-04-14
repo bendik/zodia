@@ -21,7 +21,7 @@ use rusqlite::{Connection, OptionalExtension, params, types::Value};
 use thiserror::Error;
 use zodia_core::InterpKey;
 
-pub use seed::BaselineData;
+pub use seed::{BaselineData, BaselineStore};
 
 pub mod seed;
 
@@ -314,13 +314,6 @@ impl ZodiaStore {
         Ok(n as u64)
     }
 
-    /// True if no interpretations exist at all (used to decide whether to seed).
-    pub fn is_empty(&self) -> Result<bool, StoreError> {
-        let n: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM interpretations", [], |r| r.get(0))?;
-        Ok(n == 0)
-    }
-
     // ── affirmations ──────────────────────────────────────────────────────────
 
     /// Record an affirmation.  Returns `Ok(true)` if newly inserted, `Ok(false)`
@@ -393,48 +386,36 @@ impl ZodiaStore {
         Ok(rows)
     }
 
-    // ── seeding ───────────────────────────────────────────────────────────────
+    // ── migration ─────────────────────────────────────────────────────────────
 
-    /// Populate the store from baseline data if it is currently empty.
-    pub fn seed_if_empty(&self, data: &seed::BaselineData) -> Result<u32, StoreError> {
-        if !self.is_empty()? {
-            return Ok(0);
-        }
-        self.seed_unconditional(data)
-    }
-
-    /// Insert all baseline entries, skipping any whose log_id already exists.
-    pub fn seed_unconditional(&self, data: &seed::BaselineData) -> Result<u32, StoreError> {
-        let mut count = 0u32;
-        for (sig, body) in &data.natal {
-            self.insert_raw_sig(&format!("natal:{sig}"), "natal", body)?;
-            count += 1;
-        }
-        for (sig, body) in &data.synastry {
-            self.insert_raw_sig(&format!("synastry:{sig}"), "synastry", body)?;
-            count += 1;
-        }
-        for (sig, body) in &data.transit {
-            self.insert_raw_sig(&format!("transit:{sig}"), "transit", body)?;
-            count += 1;
-        }
-        for (sig, body) in &data.house_transit {
-            self.insert_raw_sig(&format!("house_transit:{sig}"), "house_transit", body)?;
-            count += 1;
-        }
-        Ok(count)
-    }
-
-    fn insert_raw_sig(&self, sig: &str, kind: &str, body: &str) -> Result<(), StoreError> {
-        let log_id = derive_log_id(sig, body);
-        let now = unix_secs();
-        self.conn.execute(
-            "INSERT OR IGNORE INTO interpretations
-             (log_id, interp_key, interp_kind, body, author_pk, received_at, is_baseline)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, 1)",
-            params![log_id.as_slice(), sig, kind, body, now as i64],
+    /// Delete all legacy seeded baseline rows. Idempotent — safe every startup.
+    pub fn scrub_baseline(&self) -> Result<u64, StoreError> {
+        let n = self.conn.execute(
+            "DELETE FROM interpretations WHERE is_baseline = 1",
+            [],
         )?;
-        Ok(())
+        Ok(n as u64)
+    }
+}
+
+// ── BaselineStore: row synthesis ──────────────────────────────────────────────
+
+impl seed::BaselineStore {
+    /// Synthesise an `InterpRow` for the baseline entry for `key`, if present.
+    ///
+    /// The `log_id` uses the same BLAKE3 derivation as the old seeder, so any
+    /// affirmations already recorded in legacy databases remain consistent.
+    pub fn row_for_key(&self, key: &InterpKey) -> Option<InterpRow> {
+        let body = self.lookup(key)?;
+        let sig = key.to_sig();
+        Some(InterpRow {
+            log_id: derive_log_id(&sig, body),
+            body: body.to_owned(),
+            author_pk: None,
+            received_at: 0,
+            is_baseline: true,
+            affirmation_count: 0,
+        })
     }
 }
 

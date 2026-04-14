@@ -17,7 +17,7 @@ use relm4::AsyncComponentSender;
 use zodia_core::InterpKey;
 use zodia_crypto::IdentityKeypair;
 use zodia_net::InterpEntry;
-use zodia_store::ZodiaStore;
+use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
 use crate::aspect_list::AspectItem;
@@ -33,10 +33,11 @@ impl AspectView {
     pub fn new(
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
+        baseline: Rc<BaselineStore>,
         identity: Rc<IdentityKeypair>,
         sender: AsyncComponentSender<AppModel>,
     ) -> Self {
-        Self::build(items, store, identity, sender, None, "Aspects")
+        Self::build(items, store, baseline, identity, sender, None, "Aspects")
     }
 
     /// Natal chart view — prepends a placements section above the aspect list.
@@ -44,26 +45,29 @@ impl AspectView {
         items: Vec<AspectItem>,
         chart: &zodia_core::Chart,
         store: Rc<RefCell<ZodiaStore>>,
+        baseline: Rc<BaselineStore>,
         identity: Rc<IdentityKeypair>,
         sender: AsyncComponentSender<AppModel>,
     ) -> Self {
         let preamble = crate::placements::build_placements_group(chart);
-        Self::build(items, store, identity, sender, Some(preamble.upcast::<gtk::Widget>()), "Aspects")
+        Self::build(items, store, baseline, identity, sender, Some(preamble.upcast::<gtk::Widget>()), "Aspects")
     }
 
     /// Transit view — group title is "Transits".
     pub fn transits(
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
+        baseline: Rc<BaselineStore>,
         identity: Rc<IdentityKeypair>,
         sender: AsyncComponentSender<AppModel>,
     ) -> Self {
-        Self::build(items, store, identity, sender, None, "Transits")
+        Self::build(items, store, baseline, identity, sender, None, "Transits")
     }
 
     fn build(
         items: Vec<AspectItem>,
         store: Rc<RefCell<ZodiaStore>>,
+        baseline: Rc<BaselineStore>,
         identity: Rc<IdentityKeypair>,
         sender: AsyncComponentSender<AppModel>,
         preamble: Option<gtk::Widget>,
@@ -71,7 +75,7 @@ impl AspectView {
     ) -> Self {
         let nav = adw::NavigationView::new();
         nav.set_vexpand(true);
-        nav.push(&list_page(&items, &nav, Rc::clone(&store), Rc::clone(&identity), sender, preamble, group_title));
+        nav.push(&list_page(&items, &nav, Rc::clone(&store), Rc::clone(&baseline), Rc::clone(&identity), sender, preamble, group_title));
         Self { nav }
     }
 
@@ -86,6 +90,7 @@ fn list_page(
     items: &[AspectItem],
     nav: &adw::NavigationView,
     store: Rc<RefCell<ZodiaStore>>,
+    baseline: Rc<BaselineStore>,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
     preamble: Option<gtk::Widget>,
@@ -111,12 +116,7 @@ fn list_page(
         aspect_group.add(&row);
     } else {
         for item in items {
-            let top_body = store
-                .borrow()
-                .top_body(&item.key)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
+            let top_body = resolve_top_body(&store.borrow(), &baseline, &item.key);
 
             let row = adw::ActionRow::new();
             row.set_title(&item.key.plain_name());
@@ -136,12 +136,13 @@ fn list_page(
 
             let nav_c = nav.clone();
             let store_c = Rc::clone(&store);
+            let baseline_c = Rc::clone(&baseline);
             let identity_c = Rc::clone(&identity);
             let sender_c = sender.clone();
             let key = item.key.clone();
             let ctx = item.transit_context.clone();
             row.connect_activated(move |_| {
-                nav_c.push(&detail_page(&key, ctx.clone(), Rc::clone(&store_c), Rc::clone(&identity_c), sender_c.clone()));
+                nav_c.push(&detail_page(&key, ctx.clone(), Rc::clone(&store_c), Rc::clone(&baseline_c), Rc::clone(&identity_c), sender_c.clone()));
             });
 
             aspect_group.add(&row);
@@ -169,6 +170,7 @@ pub fn detail_page(
     key: &InterpKey,
     transit_context: Option<String>,
     store: Rc<RefCell<ZodiaStore>>,
+    baseline: Rc<BaselineStore>,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
 ) -> adw::NavigationPage {
@@ -213,7 +215,13 @@ pub fn detail_page(
     let interp_group = adw::PreferencesGroup::new();
     interp_group.set_title("Interpretations");
 
-    let existing = store.borrow().all_for_key(key).unwrap_or_default();
+    // Community entries from DB + in-memory baseline appended at the end.
+    let mut existing = store.borrow().all_for_key(key).unwrap_or_default();
+    if !existing.iter().any(|r| r.is_baseline) {
+        if let Some(row) = baseline.row_for_key(key) {
+            existing.push(row);
+        }
+    }
 
     if existing.is_empty() {
         let row = adw::ActionRow::new();
@@ -232,21 +240,26 @@ pub fn detail_page(
 
             let affirm_btn = gtk::Button::from_icon_name("emblem-favorite-symbolic");
             affirm_btn.add_css_class("flat");
-            affirm_btn.set_tooltip_text(Some("Affirm this interpretation"));
             affirm_btn.set_valign(gtk::Align::Center);
 
-            let store_c = Rc::clone(&store);
-            let identity_c = Rc::clone(&identity);
-            let log_id = row_data.log_id;
-            let row_ref = interp_row.clone();
-            affirm_btn.connect_clicked(move |_| {
-                let author_pk = identity_c.public_key();
-                if let Ok(true) = store_c.borrow().affirm(&log_id, &author_pk) {
-                    if let Ok(n) = store_c.borrow().affirmation_count(&log_id) {
-                        row_ref.set_subtitle(&format!("{n} ♡  ·  affirmed"));
+            if row_data.is_baseline {
+                affirm_btn.set_sensitive(false);
+                affirm_btn.set_tooltip_text(Some("Baseline — not affirmable"));
+            } else {
+                affirm_btn.set_tooltip_text(Some("Affirm this interpretation"));
+                let store_c = Rc::clone(&store);
+                let identity_c = Rc::clone(&identity);
+                let log_id = row_data.log_id;
+                let row_ref = interp_row.clone();
+                affirm_btn.connect_clicked(move |_| {
+                    let author_pk = identity_c.public_key();
+                    if let Ok(true) = store_c.borrow().affirm(&log_id, &author_pk) {
+                        if let Ok(n) = store_c.borrow().affirmation_count(&log_id) {
+                            row_ref.set_subtitle(&format!("{n} ♡  ·  affirmed"));
+                        }
                     }
-                }
-            });
+                });
+            }
 
             interp_row.add_suffix(&affirm_btn);
             interp_group.add(&interp_row);
@@ -313,6 +326,13 @@ pub fn detail_page(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Best interpretation text for `key`: community DB result first, baseline fallback.
+fn resolve_top_body(store: &ZodiaStore, baseline: &BaselineStore, key: &InterpKey) -> String {
+    store.top_body(key).ok().flatten()
+        .or_else(|| baseline.lookup(key).map(str::to_owned))
+        .unwrap_or_default()
+}
 
 pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();

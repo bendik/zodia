@@ -15,7 +15,7 @@ mod util;
 use app::{AppInit, AppModel};
 use relm4::RelmApp;
 use zodia_config::LocalConfig;
-use zodia_store::{ZodiaStore, seed::BaselineData};
+use zodia_store::{ZodiaStore, BaselineStore, seed::BaselineData};
 
 fn main() {
     // ── tracing ───────────────────────────────────────────────────────────────
@@ -43,17 +43,30 @@ fn main() {
         Ok(s) => s,
         Err(e) => { eprintln!("fatal: could not open store: {e}"); std::process::exit(1); }
     };
-    if let Some(toml) = baseline::load(config.data_dir()) {
-        match BaselineData::from_toml(&toml) {
+    // Load baseline into memory — never written to the database.
+    let baseline = match baseline::load(config.data_dir()) {
+        Some(toml) => match BaselineData::from_toml(&toml) {
             Ok(b) => {
-                if let Ok(n) = store.seed_if_empty(&b) {
-                    if n > 0 { tracing::info!("seeded {n} baseline interpretations"); }
-                }
+                let bs = BaselineStore::from_data(&b);
+                tracing::info!("baseline loaded ({} entries in memory)", bs.len());
+                bs
             }
-            Err(e) => tracing::warn!("baseline parse failed: {e}"),
+            Err(e) => {
+                tracing::warn!("baseline parse failed: {e}");
+                BaselineStore::empty()
+            }
+        },
+        None => {
+            tracing::info!("no baseline available");
+            BaselineStore::empty()
         }
-    } else {
-        tracing::info!("no baseline available; store starts empty");
+    };
+
+    // One-time migration: remove any baseline rows seeded into old databases.
+    match store.scrub_baseline() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("scrubbed {n} legacy baseline rows from DB"),
+        Err(e) => tracing::warn!("scrub_baseline failed: {e}"),
     }
 
     // ── Bundled icons ─────────────────────────────────────────────────────────
@@ -73,7 +86,7 @@ fn main() {
     }
 
     apply_css();
-    app.run_async::<AppModel>(AppInit { config, store });
+    app.run_async::<AppModel>(AppInit { config, store, baseline });
 }
 
 fn apply_css() {

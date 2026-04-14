@@ -23,7 +23,7 @@ use relm4::AsyncComponentSender;
 use zodia_core::{Chart, compute_positions, compute_synastry};
 use zodia_crypto::IdentityKeypair;
 use zodia_net::{ConsentBlob, PeerId};
-use zodia_store::ZodiaStore;
+use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
 use crate::aspect_list::{natal_items, synastry_items};
@@ -42,6 +42,7 @@ pub fn build_peer_page(
     their_blob: &ConsentBlob,
     our_chart: &Chart,
     store: Rc<RefCell<ZodiaStore>>,
+    baseline: Rc<BaselineStore>,
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
@@ -72,10 +73,11 @@ pub fn build_peer_page(
             natal_items(&chart.natal_aspects()),
             chart,
             Rc::clone(&store),
+            Rc::clone(&baseline),
             Rc::clone(&identity),
             sender.clone(),
         ),
-        None => AspectView::new(vec![], Rc::clone(&store), Rc::clone(&identity), sender.clone()),
+        None => AspectView::new(vec![], Rc::clone(&store), Rc::clone(&baseline), Rc::clone(&identity), sender.clone()),
     };
     their_av.widget().set_vexpand(true);
 
@@ -87,7 +89,7 @@ pub fn build_peer_page(
     their_page.set_icon_name(Some("weather-clear-symbolic"));
 
     // Synastry tab
-    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&identity), sender.clone());
+    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&baseline), Rc::clone(&identity), sender.clone());
     syn_av.widget().set_vexpand(true);
     let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
     syn_page.set_icon_name(Some("synastry-symbolic"));

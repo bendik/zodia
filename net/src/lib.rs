@@ -101,4 +101,8 @@ pub enum ZodiaNetEvent {
     /// If `dest` is us: decrypt `payload` with our relay key and handle as chat.
     /// If `dest` is a connected peer: forward the raw `ChannelMsg::RelayMsg` on.
     RelayReceived { via: PeerId, dest: PeerId, payload: Vec<u8> },
+    /// A peer pushed one or more new interpretations to us over their live
+    /// Tier-1 channel (i.e. they just submitted a new interpretation while
+    /// both peers were connected).
+    InterpReceived { from: PeerId, entries: Vec<InterpEntry> },
 }

@@ -6,10 +6,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/zodia-bootstrap --key-file /var/lib/zodia/bootstrap.key --port 17434
+ExecStart=/usr/local/bin/zodia-bootstrap --key-file /var/lib/zodia/bootstrap.key --port 17434 --no-ipv6
 Restart=on-failure
 RestartSec=10
-Environment=ZODIA_LOG=info
+# Suppress noisy iroh internals; keep p2panda and zodia at info.
+# iroh_quinn_udp=error  — silences sendmsg/recvmsg transport noise
+# iroh_quinn_proto=error — silences QUIC protocol-level connection churn
+# iroh=warn             — keeps relay connect/disconnect visible
+Environment=ZODIA_LOG=iroh_quinn_udp=error,iroh_quinn_proto=error,iroh=warn,p2panda_net=warn,info
 
 # Hardening
 DynamicUser=yes

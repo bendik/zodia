@@ -9,6 +9,7 @@
 //!   ./zodia-bootstrap [--key-file /etc/zodia/bootstrap.key] [--port 17434]
 
 use std::fs;
+use std::net::Ipv6Addr;
 use std::path::PathBuf;
 
 use ed25519_dalek::SigningKey;
@@ -22,8 +23,13 @@ use zodia_core::topic_key_global;
 /// Must match `NETWORK_ID` in `net/src/network.rs`.
 const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-/// iroh relay for NAT traversal.  Same value used by all Zodia nodes.
-pub const RELAY_URL: &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
+/// iroh relay servers — must stay in sync with `net/src/network.rs`.
+/// iroh picks the lowest-latency one as its home relay automatically.
+pub const RELAY_EU:      &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
+pub const RELAY_NA_EAST: &str = "https://use1-1.relay.n0.iroh-canary.iroh.link.";
+pub const RELAY_NA_WEST: &str = "https://usw1-1.relay.n0.iroh-canary.iroh.link.";
+pub const RELAY_AP:      &str = "https://aps1-1.relay.n0.iroh-canary.iroh.link.";
+pub const ALL_RELAYS:    &[&str] = &[RELAY_EU, RELAY_NA_EAST, RELAY_NA_WEST, RELAY_AP];
 
 const DEFAULT_PORT: u16 = 17434;
 
@@ -32,12 +38,17 @@ const DEFAULT_PORT: u16 = 17434;
 struct Args {
     key_file: PathBuf,
     port:     u16,
+    /// Bind the IPv6 socket to loopback only.  Use on hosts without IPv6
+    /// routing to suppress `sendmsg: Network is unreachable` noise from iroh's
+    /// QUIC address discovery probes.
+    no_ipv6:  bool,
 }
 
 fn parse_args() -> Args {
     let mut args = Args {
         key_file: PathBuf::from("bootstrap.key"),
         port:     DEFAULT_PORT,
+        no_ipv6:  false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -45,6 +56,7 @@ fn parse_args() -> Args {
         match raw[i].as_str() {
             "--key-file" => { i += 1; args.key_file = PathBuf::from(&raw[i]); }
             "--port"     => { i += 1; args.port = raw[i].parse().expect("port must be a number"); }
+            "--no-ipv6"  => { args.no_ipv6 = true; }
             other        => { eprintln!("unknown arg: {other}"); std::process::exit(1); }
         }
         i += 1;
@@ -94,7 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  node_id : {}  ║", hex::encode(public_key.as_bytes()));
     println!("║  port    : {:<47} ║", args.port);
-    println!("║  relay   : {:<47} ║", RELAY_URL);
+    for url in ALL_RELAYS {
+        println!("║  relay   : {:<47} ║", url);
+    }
     println!("╠══════════════════════════════════════════════════════════╣");
     println!("║  Paste into net/src/network.rs:                         ║");
     println!("║  BOOTSTRAP_NODE_ID = Some({:?});", public_key.as_bytes());
@@ -103,17 +117,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let address_book = AddressBook::builder().spawn().await?;
 
-    let endpoint = Endpoint::builder(address_book.clone())
+    // On hosts without IPv6 routing, bind the v6 socket to loopback only so
+    // iroh's QUIC address discovery probes don't flood logs with
+    // "Network is unreachable" errors.  Pass --no-ipv6 to enable.
+    let bind_ip_v6 = if args.no_ipv6 { Ipv6Addr::LOCALHOST } else { Ipv6Addr::UNSPECIFIED };
+    let bind_port_v6 = if args.no_ipv6 { 0 } else { args.port };
+
+    let mut ep_builder = Endpoint::builder(address_book.clone())
         .config(IrohConfig {
             bind_port_v4: args.port,
-            bind_port_v6: args.port,
+            bind_ip_v6,
+            bind_port_v6,
             ..IrohConfig::default()
         })
         .network_id(NETWORK_ID)
-        .private_key(panda_key)
-        .relay_url(RELAY_URL.parse()?)
-        .spawn()
-        .await?;
+        .private_key(panda_key);
+    for url in ALL_RELAYS {
+        ep_builder = ep_builder.relay_url(url.parse()?);
+    }
+    let endpoint = ep_builder.spawn().await?;
 
     // Passive mDNS — respond to queries but don't broadcast (public server).
     let _mdns = MdnsDiscovery::builder(address_book.clone(), endpoint.clone())
