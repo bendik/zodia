@@ -177,7 +177,7 @@ pub struct AppWidgets {
     chart_container: gtk::Box,
     sky_container: gtk::Box,
 
-    /// Sidebar + content split layout.
+    /// Overlay split view — sidebar on the left, content stack on the right.
     split_view: adw::OverlaySplitView,
     /// Single nav ListBox (Chart / Sky / Network / peers) — one selection source.
     nav_list: gtk::ListBox,
@@ -877,7 +877,11 @@ impl AsyncComponent for AppModel {
                         widgets.peer_actions.insert(tag.clone(), (call_btn, send_btn, entry));
                         widgets.peer_titles.insert(tag, switcher_title);
                     }
-                    if widgets.split_view.is_collapsed() {
+                    // On narrow windows, hide the sidebar so the peer page
+                    // has full width.  The ToggleButton in the peer header
+                    // brings it back.
+                    let w = widgets.split_view.width();
+                    if w > 0 && w < 720 {
                         widgets.split_view.set_show_sidebar(false);
                     }
                 }
@@ -1464,6 +1468,26 @@ fn build_widgets(
     ) = build_main_page(model, sender);
     outer_stack.add_named(&main_view, Some("main"));
 
+    // ── Responsive sidebar collapse via adw::Breakpoint ──────────────────────
+    // Below 720 px: collapse the sidebar (burger button appears in headers).
+    // Above 720 px: sidebar is always visible side-by-side.
+    // adw::OverlaySplitView doesn't auto-collapse; we drive `collapsed` through
+    // a breakpoint so it integrates with the ADW adaptive layout system.
+    {
+        let bp = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            720.0,
+            adw::LengthUnit::Px,
+        ));
+        bp.add_setter(&split_view, "collapsed", Some(&true.to_value()));
+        let sv = split_view.clone();
+        bp.connect_unapply(move |_| {
+            // Returning to wide layout: make the sidebar visible again.
+            sv.set_show_sidebar(true);
+        });
+        root.add_breakpoint(bp);
+    }
+
     // Populate aspect views for returning users with an existing chart.
     if let Some(chart) = &model.chart {
         let nav = AspectView::natal(
@@ -1821,9 +1845,11 @@ fn build_main_page(
     content_stack.set_transition_duration(150);
 
     // Sidebar toggle button — shown only when the split view is collapsed
-    // (narrow window / mobile). Each content header gets one clone.
+    // (narrow window).  Uses a hamburger icon so it's visually familiar.
+    // On macOS the left side of the header bar is occupied by the window
+    // decoration traffic-light buttons, so we don't add it there.
     let make_sidebar_btn = || {
-        let btn = gtk::Button::from_icon_name("sidebar-show-symbolic");
+        let btn = gtk::Button::from_icon_name("open-menu-symbolic");
         btn.set_tooltip_text(Some("Show sidebar"));
         btn.set_visible(false);
         btn
@@ -1835,6 +1861,7 @@ fn build_main_page(
     let chart_header = adw::HeaderBar::new();
     chart_header.set_title_widget(Some(&adw::WindowTitle::new("Chart", "")));
     let chart_sidebar_btn = make_sidebar_btn();
+    #[cfg(not(target_os = "macos"))]
     chart_header.pack_start(&chart_sidebar_btn);
     let chart_toolbar = adw::ToolbarView::new();
     chart_toolbar.add_top_bar(&chart_header);
@@ -1847,6 +1874,7 @@ fn build_main_page(
     let sky_header = adw::HeaderBar::new();
     sky_header.set_title_widget(Some(&adw::WindowTitle::new("Sky", "")));
     let sky_sidebar_btn = make_sidebar_btn();
+    #[cfg(not(target_os = "macos"))]
     sky_header.pack_start(&sky_sidebar_btn);
     let sky_toolbar = adw::ToolbarView::new();
     sky_toolbar.add_top_bar(&sky_header);
@@ -1878,6 +1906,7 @@ fn build_main_page(
     let network_header = adw::HeaderBar::new();
     network_header.set_title_widget(Some(&adw::WindowTitle::new("Network", "")));
     let network_sidebar_btn = make_sidebar_btn();
+    #[cfg(not(target_os = "macos"))]
     network_header.pack_start(&network_sidebar_btn);
     let network_toolbar = adw::ToolbarView::new();
     network_toolbar.add_top_bar(&network_header);
@@ -1894,7 +1923,10 @@ fn build_main_page(
     split_view.set_min_sidebar_width(200.0);
     split_view.set_max_sidebar_width(280.0);
 
-    // Show/hide sidebar toggle buttons when the view collapses/expands.
+    // Burger button visibility is driven by the collapsed state.
+    // The `collapsed` property itself is driven by an adw::Breakpoint attached
+    // to the root window in build_widgets — that is where we have access to
+    // the window and can register the breakpoint.
     {
         let btns = [
             chart_sidebar_btn.clone(),

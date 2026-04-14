@@ -128,7 +128,8 @@ pub fn build_peer_page(
     header.set_show_end_title_buttons(false);
 
     // Sidebar toggle — visible only when the split view is collapsed.
-    let sidebar_btn = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    // Not shown on macOS where window decoration buttons occupy the left side.
+    let sidebar_btn = gtk::Button::from_icon_name("open-menu-symbolic");
     sidebar_btn.set_tooltip_text(Some("Show sidebar"));
     sidebar_btn.set_visible(split_view.is_collapsed());
     {
@@ -139,6 +140,7 @@ pub fn build_peer_page(
         });
         sidebar_btn.connect_clicked(move |_| sv.set_show_sidebar(true));
     }
+    #[cfg(not(target_os = "macos"))]
     header.pack_start(&sidebar_btn);
 
     let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
