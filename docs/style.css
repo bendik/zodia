@@ -1,0 +1,210 @@
+:root {
+  --bg:       #08060f;
+  --surface:  #14112a;
+  --border:   #2a2450;
+  --gold:     #c9a84c;
+  --gold-dim: #8a6e30;
+  --text:     #e8e0d0;
+  --muted:    #6a5e48;
+  --radius:   12px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+header {
+  text-align: center;
+  padding: 88px 24px 64px;
+}
+
+.app-icon {
+  width: 128px;
+  height: 128px;
+  border-radius: 26px;
+  margin-bottom: 28px;
+  box-shadow: 0 8px 48px rgba(201, 168, 76, 0.22);
+}
+
+h1 {
+  font-size: 3.2rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin: 0 0 14px;
+  color: var(--text);
+}
+
+.tagline {
+  font-size: 1.05rem;
+  color: var(--muted);
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+/* ── Downloads ──────────────────────────────────────────────────────────── */
+
+.downloads {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  padding: 0 24px 88px;
+}
+
+.btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 14px 32px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: opacity 0.15s, box-shadow 0.15s;
+  min-width: 200px;
+  min-height: 64px;
+}
+
+.btn:hover { opacity: 0.88; }
+
+.btn-flathub {
+  background: #4a86cf;
+  color: #fff;
+  box-shadow: 0 2px 16px rgba(74, 134, 207, 0.30);
+}
+
+.btn-mac {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-mac:hover {
+  border-color: var(--gold-dim);
+  box-shadow: 0 2px 16px rgba(201, 168, 76, 0.12);
+}
+
+.btn .label { font-size: 1rem; font-weight: 600; }
+.btn .sub   { font-size: 0.72rem; color: var(--muted); font-weight: 400; }
+.btn-flathub .sub { color: rgba(255,255,255,0.65); }
+
+/* ── Screenshots ────────────────────────────────────────────────────────── */
+
+.screenshots {
+  padding: 0 24px 88px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.section-label {
+  display: block;
+  text-align: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 32px;
+}
+
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.gallery figure {
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.gallery img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.gallery figcaption {
+  padding: 10px 14px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* ── Features ───────────────────────────────────────────────────────────── */
+
+.features {
+  padding: 0 24px 88px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 20px;
+}
+
+.feature {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 24px;
+}
+
+.feature h3 {
+  color: var(--gold);
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.feature p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+
+footer {
+  display: flex;
+  justify-content: center;
+  gap: 28px;
+  padding: 28px 24px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+footer a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+footer a:hover { color: var(--gold); }
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+
+@media (max-width: 520px) {
+  h1 { font-size: 2.4rem; }
+  .downloads { flex-direction: column; }
+  .btn { width: 100%; max-width: 320px; }
+}

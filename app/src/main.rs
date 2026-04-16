@@ -70,7 +70,7 @@ fn main() {
         .expect("failed to register bundled icon resources");
 
     // ── GTK / ADW application ─────────────────────────────────────────────────
-    let app = RelmApp::new("net.zodia.app");
+    let app = RelmApp::new("io.github.bendik.Zodia");
 
     // Add the bundled icon resource path to the default icon theme so GTK
     // resolves our icons on every platform including macOS.

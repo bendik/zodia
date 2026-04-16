@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Zodia
+Comment=Natal charts, transits, and crowd-sourced aspect interpretations
+Exec=zodia
+Icon=io.github.bendik.Zodia
+Type=Application
+Terminal=false
+Categories=Network;Science;Utility;
+Keywords=astrology;natal;chart;horoscope;transit;aspects;p2p;
+StartupWMClass=io.github.bendik.Zodia

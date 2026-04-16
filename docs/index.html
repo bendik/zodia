@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zodia — Astrological peer network</title>
+  <meta name="description" content="Natal charts, transits, and crowd-sourced aspect interpretations with your peers. Peer-to-peer, end-to-end encrypted, no accounts.">
+  <meta property="og:title" content="Zodia">
+  <meta property="og:description" content="Natal charts, transits, and crowd-sourced aspect interpretations with your peers.">
+  <meta property="og:image" content="https://bendik.github.io/zodia/icon.svg">
+  <meta property="og:url" content="https://bendik.github.io/zodia/">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header>
+    <img src="icon.svg" alt="Zodia icon" class="app-icon">
+    <h1>Zodia</h1>
+    <p class="tagline">Natal charts, transits, and crowd-sourced aspect interpretations with your peers</p>
+  </header>
+
+  <section class="downloads">
+    <a href="https://flathub.org/apps/io.github.bendik.Zodia" class="btn btn-flathub">
+      <span class="label">Get it on Flathub</span>
+      <span class="sub">Linux · Flatpak</span>
+    </a>
+    <a href="https://github.com/bendik/zodia/releases/latest/download/zodia-aarch64-apple-darwin.zip"
+       class="btn btn-mac">
+      <span class="label">↓ Download for Apple Silicon</span>
+      <span class="sub">macOS · M1 / M2 / M3</span>
+    </a>
+  </section>
+
+  <section class="screenshots">
+    <span class="section-label">Screenshots</span>
+    <div class="gallery">
+      <figure>
+        <img src="screenshots/network.png"
+             alt="Network view showing discovered peers"
+             loading="lazy">
+        <figcaption>Discover peers on your local network or globally over the internet</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/chart.png"
+             alt="Natal chart with aspect list and interpretations"
+             loading="lazy">
+        <figcaption>Natal chart with live transits and crowd-sourced aspect interpretations</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/synastry.png"
+             alt="Synastry view between two connected users"
+             loading="lazy">
+        <figcaption>Synastry and composite placements with a connected peer</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="features">
+    <span class="section-label">Features</span>
+    <div class="feature-grid">
+      <div class="feature">
+        <h3>Charts &amp; Transits</h3>
+        <p>Full natal chart with planetary placements, house cusps, and aspects.
+           Live transit tracking shows what is active right now. A curated baseline
+           interpretation set is bundled and always available offline.</p>
+      </div>
+      <div class="feature">
+        <h3>Peer Discovery</h3>
+        <p>Nearby users appear automatically over mDNS. A global relay connects
+           you to users anywhere on the internet. Charts are compared the moment
+           two people connect — no accounts, no sign-up.</p>
+      </div>
+      <div class="feature">
+        <h3>Voice Calls</h3>
+        <p>Talk directly with connected peers over encrypted QUIC. No central
+           server relays the audio. Your birth data and conversation history
+           never leave your device.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <a href="https://github.com/bendik/zodia">GitHub</a>
+    <span>AGPL-3.0-or-later</span>
+    <a href="https://github.com/bendik/zodia/issues">Report an issue</a>
+  </footer>
+
+</body>
+</html>

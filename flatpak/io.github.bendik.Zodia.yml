@@ -1,0 +1,45 @@
+id: io.github.bendik.Zodia
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: zodia
+
+finish-args:
+  - --share=network          # p2p overlay and iroh relay
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio      # voice calls (mic + speaker via PulseAudio/PipeWire)
+  - --talk-name=org.freedesktop.Notifications
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/io.github.bendik.Zodia/cargo
+    CARGO_NET_OFFLINE: 'true'
+
+modules:
+  - name: zodia
+    buildsystem: simple
+    build-commands:
+      # Cargo reads pre-fetched crates from the registry cache populated by
+      # cargo-sources.json (see sources below).
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release -p zodia-app
+      - install -Dm755 target/release/zodia                             /app/bin/zodia
+      - install -Dm644 app/data/io.github.bendik.Zodia.desktop         /app/share/applications/io.github.bendik.Zodia.desktop
+      - install -Dm644 app/data/io.github.bendik.Zodia.metainfo.xml    /app/share/metainfo/io.github.bendik.Zodia.metainfo.xml
+      - install -Dm644 app/data/io.github.bendik.Zodia.svg             /app/share/icons/hicolor/scalable/apps/io.github.bendik.Zodia.svg
+    sources:
+      - type: git
+        url: https://github.com/bendik/zodia.git
+        # Fill in tag and commit SHA after running: git tag v0.4.0 && git push --tags
+        tag: v0.4.0
+        # commit: <40-char SHA here>
+
+      # cargo-sources.json is generated from Cargo.lock — see flatpak/README.
+      # Run once (or after any dependency change):
+      #   python3 flatpak-cargo-generator.py ../Cargo.lock -o cargo-sources.json
+      - cargo-sources.json
