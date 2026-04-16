@@ -9,6 +9,10 @@ Type=simple
 ExecStart=/usr/local/bin/zodia-bootstrap --key-file /var/lib/zodia/bootstrap.key --port 17434 --no-ipv6
 Restart=on-failure
 RestartSec=10
+# Restart once per day to flush iroh's in-memory path table and the
+# address book.  This clears stale peers and the MaxPathIdReached
+# accumulation bug present in iroh 0.96.
+RuntimeMaxSec=86400
 # Suppress noisy iroh internals; keep p2panda and zodia at info.
 # iroh_quinn_udp=error  — silences sendmsg/recvmsg transport noise
 # iroh_quinn_proto=error — silences QUIC protocol-level connection churn

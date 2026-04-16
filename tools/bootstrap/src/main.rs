@@ -159,13 +159,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("subscribed to global Zodia topic — ready for peers");
 
+    let mut msg_total:  u64 = 0;
+    let mut msg_period: u64 = 0;
+
+    // Log a heartbeat every 5 minutes so operators can verify the node is
+    // active and seeing traffic even when nothing else is logged.
+    let mut stats_tick = tokio::time::interval(tokio::time::Duration::from_secs(300));
+    stats_tick.tick().await; // consume the immediate first tick
+
     loop {
-        match rx.next().await {
-            Some(Ok(msg)) => {
-                tracing::debug!(bytes = msg.len(), "gossip message relayed");
+        tokio::select! {
+            msg = rx.next() => match msg {
+                Some(Ok(msg)) => {
+                    msg_total  += 1;
+                    msg_period += 1;
+                    tracing::debug!(bytes = msg.len(), "gossip message relayed");
+                }
+                Some(Err(e)) => tracing::warn!("gossip error: {e}"),
+                None         => break,
+            },
+            _ = stats_tick.tick() => {
+                tracing::info!(
+                    total     = msg_total,
+                    per_5min  = msg_period,
+                    "bootstrap heartbeat",
+                );
+                msg_period = 0;
             }
-            Some(Err(e)) => tracing::warn!("gossip error: {e}"),
-            None         => break,
         }
     }
 
