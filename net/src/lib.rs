@@ -106,3 +106,58 @@ pub enum ZodiaNetEvent {
     /// both peers were connected).
     InterpReceived { from: PeerId, entries: Vec<InterpEntry> },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zodia_core::BirthData;
+
+    fn sample_consent_blob() -> ConsentBlob {
+        ConsentBlob {
+            birth: BirthData::new(2451545.0, "u4pruydqqvj"),
+            prekey:    [0x11u8; 32],
+            ephemeral: [0x22u8; 32],
+            relay_pk:  [0x33u8; 32],
+        }
+    }
+
+    #[test]
+    fn consent_blob_cbor_round_trip() {
+        let blob = sample_consent_blob();
+        let mut buf = Vec::new();
+        ciborium::into_writer(&blob, &mut buf).unwrap();
+        let decoded: ConsentBlob = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(blob.birth.jdn, decoded.birth.jdn);
+        assert_eq!(blob.birth.geohash, decoded.birth.geohash);
+        assert_eq!(blob.prekey, decoded.prekey);
+        assert_eq!(blob.ephemeral, decoded.ephemeral);
+        assert_eq!(blob.relay_pk, decoded.relay_pk);
+    }
+
+    #[test]
+    fn consent_blob_relay_pk_serde_default() {
+        // ConsentBlob with relay_pk = all zeros should survive a CBOR round-trip
+        // and the #[serde(default)] attribute means missing field → zero array.
+        let blob = ConsentBlob {
+            birth: BirthData::new(2451545.0, "u4pru"),
+            prekey:    [0x11u8; 32],
+            ephemeral: [0x22u8; 32],
+            relay_pk:  [0u8; 32],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&blob, &mut buf).unwrap();
+        let decoded: ConsentBlob = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(decoded.relay_pk, [0u8; 32]);
+    }
+
+    #[test]
+    fn peer_id_to_node_id_round_trips() {
+        use ed25519_dalek::SigningKey;
+        // Use a fixed seed — no rand dependency needed.
+        let key = SigningKey::from_bytes(&[0x55u8; 32]);
+        let bytes: [u8; 32] = *key.verifying_key().as_bytes();
+        let peer_id = PeerId(bytes);
+        let node_id = peer_id.to_node_id();
+        assert_eq!(node_id.as_bytes(), &bytes);
+    }
+}

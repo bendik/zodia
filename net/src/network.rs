@@ -50,8 +50,14 @@ pub const RELAY_AP:       &str = "https://aps1-1.relay.n0.iroh-canary.iroh.link.
 pub const ALL_RELAYS: &[&str] = &[RELAY_EU, RELAY_NA_EAST, RELAY_NA_WEST, RELAY_AP];
 
 /// Bootstrap node public key (hex-decoded bytes).
-/// Set this to the `node_id` printed by `zodia-bootstrap` on first run.
-/// Leave as `None` until the bootstrap node is deployed; mDNS still works locally.
+///
+/// CRITICAL: This node must be running `zodia-bootstrap` compiled with the same
+/// `NETWORK_ID` (`zodia-network-2024…`).  If it is unreachable the PSI-Hash
+/// Discovery walkers stall until their timeout, then fall back to whatever the
+/// address book already contains (i.e. mDNS-discovered LAN peers).  Internet-wide
+/// discovery is effectively dead without a reachable bootstrap node.
+///
+/// Set to `None` to rely on mDNS-only discovery (LAN only).
 const BOOTSTRAP_NODE_ID: Option<[u8; 32]> = Some([176, 45, 141, 10, 244, 112, 14, 59, 107, 231, 19, 72, 114, 30, 215, 65, 72, 50, 80, 56, 10, 112, 192, 16, 171, 119, 103, 105, 89, 230, 178, 181]);
 
 /// Protocol identifier for direct peer-to-peer consent exchanges.
@@ -228,7 +234,9 @@ impl ZodiaNetwork {
                 .await
                 .map_err(|_| NetworkError::Publish)?;
         }
-        info!(topics = self.topic_handles.len(), "announce published");
+        // Note: published to the gossip overlay, not directly to peer count.
+        // If the overlay has no peers yet the message is silently discarded.
+        debug!(topics = self.topic_handles.len(), "announce published to gossip overlay");
         Ok(())
     }
 

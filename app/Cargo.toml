@@ -28,7 +28,6 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 gio = "0.21"
 hex = "0.4"
-ureq = { version = "2", features = ["json"] }
 tzf-rs = "0.4"
 chrono = "0.4"
 chrono-tz = "0.10"

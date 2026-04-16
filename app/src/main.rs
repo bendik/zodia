@@ -7,8 +7,8 @@ mod app;
 mod aspect_list;
 mod aspect_view;
 mod baseline;
-mod peer_list;
-mod peer_page;
+mod stargazer_list;
+mod stargazer_page;
 mod placements;
 mod util;
 
@@ -43,21 +43,15 @@ fn main() {
         Ok(s) => s,
         Err(e) => { eprintln!("fatal: could not open store: {e}"); std::process::exit(1); }
     };
-    // Load baseline into memory — never written to the database.
-    let baseline = match baseline::load(config.data_dir()) {
-        Some(toml) => match BaselineData::from_toml(&toml) {
-            Ok(b) => {
-                let bs = BaselineStore::from_data(&b);
-                tracing::info!("baseline loaded ({} entries in memory)", bs.len());
-                bs
-            }
-            Err(e) => {
-                tracing::warn!("baseline parse failed: {e}");
-                BaselineStore::empty()
-            }
-        },
-        None => {
-            tracing::info!("no baseline available");
+    // Load baseline into memory — bundled in binary, never written to the database.
+    let baseline = match BaselineData::from_toml(baseline::load()) {
+        Ok(b) => {
+            let bs = BaselineStore::from_data(&b);
+            tracing::info!("baseline loaded ({} entries in memory)", bs.len());
+            bs
+        }
+        Err(e) => {
+            tracing::warn!("baseline parse failed: {e}");
             BaselineStore::empty()
         }
     };

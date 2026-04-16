@@ -1,8 +1,8 @@
-//! Connected-peer navigation page.
+//! Connected-stargazer navigation page.
 //!
 //! Added as a named child of the main `gtk::Stack` when a Tier-1 exchange
 //! completes.  Shows three tabs:
-//!   - **Their Chart** — peer's planet placements + their natal aspects.
+//!   - **Their Chart** — stargazer's planet placements + their natal aspects.
 //!   - **Synastry**    — cross-chart aspects between the two of you.
 //!   - **Messages**    — live text chat over the Tier-1 QUIC channel.
 //!
@@ -30,14 +30,14 @@ use crate::aspect_list::{natal_items, synastry_items};
 use crate::aspect_view::AspectView;
 use crate::util::sign_glyph;
 
-/// Build the `adw::ToolbarView` for a connected peer.
+/// Build the `adw::ToolbarView` for a connected stargazer.
 ///
 /// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title)`.
-/// `call_btn` and `send_btn` should be set insensitive when the peer is offline.
+/// `call_btn` and `send_btn` should be set insensitive when the stargazer is offline.
 /// `switcher_title` is retained by the caller so the title can be updated when
 /// the nickname changes.
 #[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
-pub fn build_peer_page(
+pub fn build_stargazer_page(
     peer_id: &PeerId,
     their_blob: &ConsentBlob,
     our_chart: &Chart,
@@ -232,7 +232,7 @@ fn build_messages_tab(
     call_btn.set_tooltip_text(Some("Start voice call"));
     let pid_c = peer_id.clone();
     let sc = sender.clone();
-    call_btn.connect_clicked(move |_| sc.input(AppMsg::CallPeer(pid_c.clone())));
+    call_btn.connect_clicked(move |_| sc.input(AppMsg::CallStargazer(pid_c.clone())));
     input_row.append(&call_btn);
 
     let entry = gtk::Entry::new();

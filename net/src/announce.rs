@@ -84,3 +84,108 @@ fn cbor_encode<T: Serialize>(value: &T) -> Vec<u8> {
         .expect("CBOR encoding is infallible for in-memory writes");
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use zodia_core::BirthData;
+
+    fn test_birth() -> BirthData {
+        // 2000-01-01 12:00 UT, geohash "u4pru" (Oslo area)
+        BirthData::new(2451545.0, "u4pru")
+    }
+
+    fn test_key() -> SigningKey {
+        // Deterministic seed for reproducible tests.
+        SigningKey::from_bytes(&[0x42u8; 32])
+    }
+
+    fn test_key2() -> SigningKey {
+        SigningKey::from_bytes(&[0xABu8; 32])
+    }
+
+    #[test]
+    fn sign_and_verify_succeeds() {
+        let key = test_key();
+        let birth = test_birth();
+        let blob = AnnounceBlob::sign(&birth, &key);
+        blob.verify().expect("fresh blob should verify");
+    }
+
+    #[test]
+    fn cbor_round_trip() {
+        let key = test_key();
+        let birth = test_birth();
+        let blob = AnnounceBlob::sign(&birth, &key);
+        let bytes = blob.to_cbor();
+        let decoded = AnnounceBlob::from_cbor(&bytes).expect("round-trip decode failed");
+        assert_eq!(blob.geohash_prefix, decoded.geohash_prefix);
+        assert_eq!(blob.solar_month, decoded.solar_month);
+        assert_eq!(blob.pubkey, decoded.pubkey);
+        assert_eq!(blob.sig, decoded.sig);
+    }
+
+    #[test]
+    fn tampered_signature_is_rejected() {
+        let key = test_key();
+        let birth = test_birth();
+        let mut blob = AnnounceBlob::sign(&birth, &key);
+        // Flip a byte in the signature.
+        blob.sig[0] ^= 0xFF;
+        let err = blob.verify().expect_err("tampered sig should fail");
+        assert!(matches!(err, AnnounceError::BadSignature));
+    }
+
+    #[test]
+    fn tampered_pubkey_is_rejected() {
+        let key = test_key();
+        let birth = test_birth();
+        let mut blob = AnnounceBlob::sign(&birth, &key);
+        // Replace the pubkey with an all-zero key (not a valid curve point).
+        blob.pubkey = [0u8; 32];
+        let err = blob.verify().expect_err("bad pubkey should fail");
+        assert!(matches!(err, AnnounceError::BadPublicKey | AnnounceError::BadSignature));
+    }
+
+    #[test]
+    fn mismatched_key_signature_is_rejected() {
+        let key1 = test_key();
+        let key2 = test_key2();
+        let birth = test_birth();
+        // Sign with key1 but embed key2's pubkey.
+        let mut blob = AnnounceBlob::sign(&birth, &key1);
+        blob.pubkey = key2.verifying_key().to_bytes();
+        let err = blob.verify().expect_err("wrong key should fail");
+        assert!(matches!(err, AnnounceError::BadSignature));
+    }
+
+    #[test]
+    fn truncated_cbor_is_rejected() {
+        let key = test_key();
+        let birth = test_birth();
+        let blob = AnnounceBlob::sign(&birth, &key);
+        let bytes = blob.to_cbor();
+        // Truncate to half the bytes.
+        let truncated = &bytes[..bytes.len() / 2];
+        assert!(AnnounceBlob::from_cbor(truncated).is_err());
+    }
+
+    #[test]
+    fn solar_month_field_matches_birth() {
+        let key = test_key();
+        // JDN 2451545.0 = 2000-01-01 — sun is in Capricorn (month 9 in 0-indexed)
+        let birth = BirthData::new(2451545.0, "u4pru");
+        let blob = AnnounceBlob::sign(&birth, &key);
+        assert_eq!(blob.solar_month, zodia_core::solar_month(birth.jdn));
+    }
+
+    #[test]
+    fn geohash_prefix_is_three_chars() {
+        let key = test_key();
+        let birth = BirthData::new(2451545.0, "u4pruydqqvj");
+        let blob = AnnounceBlob::sign(&birth, &key);
+        assert_eq!(blob.geohash_prefix.len(), 3);
+        assert_eq!(&blob.geohash_prefix, &birth.geohash[..3]);
+    }
+}
