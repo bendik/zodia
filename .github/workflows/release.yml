@@ -24,8 +24,12 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
 
-          - os: macos-13
-            target: x86_64-apple-darwin
+          # - os: macos-13
+          #   target: x86_64-apple-darwin
+
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            container: archlinux:latest
 
           - os: windows-latest
             target: x86_64-pc-windows-gnu
@@ -88,9 +92,19 @@ jobs:
           echo "RUSTFLAGS=-L /mingw64/lib" >> "$GITHUB_ENV"
       # ── Rust toolchain ────────────────────────────────────────────────────
       - name: Install Rust toolchain
+        if: runner.os != 'Windows'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # Windows must use the GNU toolchain; stable defaults to MSVC which can't
+      # link against MinGW .a files and fails with LNK1181 on gio-2.0.lib.
+      - name: Install Rust toolchain (Windows GNU)
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-gnu
 
       # ── Cargo registry cache ───────────────────────────────────────────────
       - name: Cache cargo registry
