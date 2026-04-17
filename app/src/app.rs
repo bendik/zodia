@@ -34,6 +34,7 @@ use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
+use crate::notify;
 use crate::stargazer_list::DiscoveredStargazer;
 use crate::stargazer_page::{self, append_chat_row};
 use crate::util::{approximate_aspects, sign_glyph};
@@ -309,6 +310,9 @@ impl AsyncComponent for AppModel {
 
         let widgets = build_widgets(&root, &model, &sender);
 
+        // Register GIO actions used by interactive notification buttons.
+        notify::register_actions(&sender);
+
         // Send Away to all connected peers when the window is closed.
         {
             let s = sender.clone();
@@ -539,6 +543,16 @@ impl AsyncComponent for AppModel {
             AppMsg::ConnectionComplete { peer_id, their_blob, channel, navigate, is_new } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                 if is_new {
+                    let name = self.stargazer_nicknames.get(&peer_hex)
+                        .cloned()
+                        .unwrap_or_else(|| format!("···{peer_hex}"));
+                    notify::send(
+                        &format!("connected-{peer_hex}"),
+                        "Connected",
+                        &format!("Now exchanging charts with {name}"),
+                        "network-wireless-symbolic",
+                        &[],
+                    );
                     // Run interp sync on the component thread (uses Rc types).
                     do_interp_sync(
                         &channel, &their_blob,
@@ -624,6 +638,7 @@ impl AsyncComponent for AppModel {
             AppMsg::AcceptConsent => {
                 if let Some((peer_id, channel)) = self.pending_consents.pop_front() {
                     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                    notify::withdraw(&format!("consent-{peer_hex}"));
                     if let Some(net) = &self.network {
                         if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
                             match channel.exchange_consent(&our_blob).await {
@@ -653,6 +668,7 @@ impl AsyncComponent for AppModel {
                 if let Some((peer_id, _channel)) = self.pending_consents.pop_front() {
                     // Dropping _channel closes the QUIC connection.
                     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                    notify::withdraw(&format!("consent-{peer_hex}"));
                     info!(peer = %peer_hex, "consent request declined");
                     self.stargazer_list_generation += 1;
                 }
@@ -662,6 +678,7 @@ impl AsyncComponent for AppModel {
                 if let CallState::Ringing { peer_id, session_id } = &self.call_state {
                     let peer_id = peer_id.clone();
                     let session_id = *session_id;
+                    notify::withdraw(&format!("call-{}", hex::encode_upper(&peer_id.0[..4])));
                     if let Some(channel) = self.connected_channels.get(&peer_id) {
                         match AudioSession::start(channel).await {
                             Ok(session) => {
@@ -679,6 +696,7 @@ impl AsyncComponent for AppModel {
             AppMsg::RejectCall => {
                 if let CallState::Ringing { peer_id, session_id } = &self.call_state {
                     let session_id = *session_id;
+                    notify::withdraw(&format!("call-{}", hex::encode_upper(&peer_id.0[..4])));
                     if let Some(channel) = self.connected_channels.get(peer_id) {
                         let _ = channel.send_msg(&ChannelMsg::CallReject { session_id }).await;
                     }
@@ -788,25 +806,63 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                 info!(peer = %peer_hex, "incoming consent request — waiting for user approval");
+                let name = self.stargazer_nicknames.get(&peer_hex)
+                    .cloned()
+                    .unwrap_or_else(|| format!("···{peer_hex}"));
+                notify::send(
+                    &format!("consent-{peer_hex}"),
+                    "Chart exchange request",
+                    &format!("{name} wants to exchange charts"),
+                    "mail-unread-symbolic",
+                    &[("Accept", "app.accept-consent"), ("Decline", "app.reject-consent")],
+                );
                 self.pending_consents.push_back((peer_id, channel));
                 self.stargazer_list_generation += 1; // triggers update_view → consent bar refresh
             }
             ZodiaNetEvent::CallOffer { from, session_id } => {
+                let peer_hex = hex::encode_upper(&from.0[..4]);
+                let name = self.stargazer_nicknames.get(&peer_hex)
+                    .cloned()
+                    .unwrap_or_else(|| format!("···{peer_hex}"));
+                notify::send(
+                    &format!("call-{peer_hex}"),
+                    "Incoming call",
+                    &format!("{name} is calling"),
+                    "call-start-symbolic",
+                    &[("Accept", "app.accept-call"), ("Decline", "app.reject-call")],
+                );
                 self.call_state = CallState::Ringing { peer_id: from, session_id };
             }
             ZodiaNetEvent::CallAccepted { from, .. } => {
                 self.call_state = CallState::Active { peer_id: from };
             }
             ZodiaNetEvent::CallRejected { .. } => {
+                if let Some(pid) = self.call_state.active_peer() {
+                    notify::withdraw(&format!("call-{}", hex::encode_upper(&pid.0[..4])));
+                }
                 self.active_audio = None;
                 self.call_state = CallState::Idle;
             }
             ZodiaNetEvent::CallHungUp { .. } => {
+                if let Some(pid) = self.call_state.active_peer() {
+                    notify::withdraw(&format!("call-{}", hex::encode_upper(&pid.0[..4])));
+                }
                 self.active_audio = None;
                 self.call_state = CallState::Idle;
             }
             ZodiaNetEvent::ChatReceived { from, text } => {
                 let tag = hex::encode_upper(&from.0[..4]);
+                let name = self.stargazer_nicknames.get(&tag)
+                    .cloned()
+                    .unwrap_or_else(|| format!("···{tag}"));
+                let preview: String = text.chars().take(80).collect();
+                notify::send(
+                    &format!("chat-{tag}"),
+                    &name,
+                    &preview,
+                    "chat-message-new-symbolic",
+                    &[],
+                );
                 *self.unread_messages.entry(tag).or_insert(0) += 1;
                 let _ = self.store.borrow().insert_message(&from.0, false, &text);
                 self.chat_logs.entry(from).or_default().push((false, text));

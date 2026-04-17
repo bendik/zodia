@@ -7,6 +7,7 @@ mod app;
 mod aspect_list;
 mod aspect_view;
 mod baseline;
+mod notify;
 mod stargazer_list;
 mod stargazer_page;
 mod placements;
