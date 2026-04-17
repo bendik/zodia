@@ -80,26 +80,54 @@ h1 {
 
 .btn:hover { opacity: 0.88; }
 
+.btn-featured {
+  min-width: 240px;
+  min-height: 72px;
+  font-size: 1.05rem;
+  box-shadow: 0 4px 24px rgba(201, 168, 76, 0.18);
+}
+
 .btn-flathub {
   background: #4a86cf;
   color: #fff;
   box-shadow: 0 2px 16px rgba(74, 134, 207, 0.30);
 }
 
-.btn-mac {
+.btn-flathub.btn-featured {
+  box-shadow: 0 4px 24px rgba(74, 134, 207, 0.40);
+}
+
+.btn-mac,
+.btn-platform {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
 }
 
-.btn-mac:hover {
+.btn-mac:hover,
+.btn-platform:hover {
   border-color: var(--gold-dim);
   box-shadow: 0 2px 16px rgba(201, 168, 76, 0.12);
+}
+
+.btn-mac.btn-featured,
+.btn-platform.btn-featured {
+  background: var(--gold);
+  color: #08060f;
+  border: none;
+}
+
+.btn-mac.btn-featured:hover,
+.btn-platform.btn-featured:hover {
+  opacity: 0.9;
+  box-shadow: 0 4px 24px rgba(201, 168, 76, 0.35);
 }
 
 .btn .label { font-size: 1rem; font-weight: 600; }
 .btn .sub   { font-size: 0.72rem; color: var(--muted); font-weight: 400; }
 .btn-flathub .sub { color: rgba(255,255,255,0.65); }
+.btn-featured.btn-mac .sub,
+.btn-featured.btn-platform .sub { color: rgba(8,6,15,0.60); }
 
 /* ── Screenshots ────────────────────────────────────────────────────────── */
 

@@ -29,6 +29,7 @@ jobs:
 
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            container: fedora:43
 
           - os: windows-latest
             target: x86_64-pc-windows-gnu
@@ -50,17 +51,18 @@ jobs:
             curl \
             git
 
-      # ── Linux aarch64 (native Ubuntu arm64 runner, no container) ─────────────
+      # ── Linux aarch64 (Fedora container on arm64 runner) ─────────────────────
       - name: Install system deps (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libopus-dev \
-            libasound2-dev \
-            pkg-config
+          dnf install -y \
+            gcc \
+            gtk4-devel \
+            libadwaita-devel \
+            opus-devel \
+            alsa-lib-devel \
+            pkgconf-pkg-config \
+            git
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: Install system deps (macOS)
