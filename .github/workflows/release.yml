@@ -29,7 +29,6 @@ jobs:
 
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            container: archlinux:latest
 
           - os: windows-latest
             target: x86_64-pc-windows-gnu
@@ -37,9 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Linux (Arch container) ─────────────────────────────────────────────
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
+      # ── Linux x86_64 (Arch container) ────────────────────────────────────────
+      - name: Install system deps (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           pacman -Sy --noconfirm \
             base-devel \
@@ -50,6 +49,18 @@ jobs:
             pkgconf \
             curl \
             git
+
+      # ── Linux aarch64 (native Ubuntu arm64 runner, no container) ─────────────
+      - name: Install system deps (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libopus-dev \
+            libasound2-dev \
+            pkg-config
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: Install system deps (macOS)
