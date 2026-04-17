@@ -70,6 +70,16 @@
   </keywords>
 
   <releases>
+    <release version="0.4.3" date="2026-04-17">
+      <description>
+        <p>Flatpak: GNOME runtime 50, notification portal, inline cargo config.</p>
+      </description>
+    </release>
+    <release version="0.4.2" date="2026-04-17">
+      <description>
+        <p>aarch64 Linux build target; fix Windows GNU linker setup.</p>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-04-17">
       <description>
         <p>Desktop notifications for incoming chart requests, calls, and messages.</p>
