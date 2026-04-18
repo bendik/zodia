@@ -8,7 +8,7 @@
 //!   4. Network events   — `CommandOutput = ZodiaNetEvent` keeps all three
 //!                         tabs reactive without blocking the GTK thread
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1870,8 +1870,14 @@ fn build_setup_page(
     let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
 
     // ── City autocomplete popover ─────────────────────────────────────────────
-    // Key: autohide(false) so the popover never installs a focus-grab.
-    // All popover children are non-focusable so keyboard input stays in city_row.
+    // autohide(false): popover never installs a focus-grab, so every keystroke
+    // stays in city_row.  All popover children are non-focusable for the same
+    // reason.
+    //
+    // Crash guard: `selecting` is set to true for the duration of
+    // connect_row_activated so that the set_text() call inside it does not cause
+    // connect_changed to remove rows from city_list while GTK is still mid-
+    // activation on one of them (reentrancy → panic).
     let city_list = gtk::ListBox::new();
     city_list.set_selection_mode(gtk::SelectionMode::None);
     city_list.add_css_class("boxed-list");
@@ -1890,20 +1896,35 @@ fn build_setup_page(
     city_popover.set_has_arrow(false);
     city_popover.set_parent(&city_row);
 
-    let city_hits: Rc<RefCell<Vec<zodia_core::CityHit>>> = Rc::new(RefCell::new(Vec::new()));
-
-    // Row click: fill coordinates and show confirmation row, then dismiss.
+    // Match the popover width to the entry row once it is laid out on screen.
     {
-        let hits    = city_hits.clone();
-        let loc     = selected_loc.clone();
-        let pop     = city_popover.clone();
-        let city_r  = city_row.clone();
-        let coord_r = coord_row.clone();
+        let scroll = city_scroll.clone();
+        let row    = city_row.clone();
+        city_row.connect_map(move |_| {
+            let w = row.allocated_width();
+            if w > 0 { scroll.set_min_content_width(w); }
+        });
+    }
+
+    let city_hits: Rc<RefCell<Vec<zodia_core::CityHit>>> = Rc::new(RefCell::new(Vec::new()));
+    // True while a row is being activated — tells connect_changed to skip.
+    let selecting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
+    // Row click: guard against reentrancy, fill coordinates, dismiss.
+    {
+        let hits      = city_hits.clone();
+        let loc       = selected_loc.clone();
+        let pop       = city_popover.clone();
+        let city_r    = city_row.clone();
+        let coord_r   = coord_row.clone();
+        let selecting = selecting.clone();
         city_list.connect_row_activated(move |_, row| {
             let idx = row.index() as usize;
-            let guard = hits.borrow();
-            if let Some(hit) = guard.get(idx) {
+            let hit = hits.borrow().get(idx).cloned();
+            if let Some(hit) = hit {
+                selecting.set(true);
                 city_r.set_text(&format!("{}, {}", hit.name, hit.country));
+                selecting.set(false);
                 *loc.borrow_mut() = Some((hit.lat as f64, hit.lon as f64));
                 coord_r.set_subtitle(&format!("{:.4}°  {:.4}°", hit.lat, hit.lon));
                 coord_r.set_sensitive(true);
@@ -1912,14 +1933,17 @@ fn build_setup_page(
         });
     }
 
-    // Text change: rebuild suggestions; clear any prior selection.
+    // Text change: skip when a selection is in progress to avoid reentrancy.
     {
-        let hits    = city_hits.clone();
-        let list    = city_list.clone();
-        let pop     = city_popover.clone();
-        let loc     = selected_loc.clone();
-        let coord_r = coord_row.clone();
+        let hits      = city_hits.clone();
+        let list      = city_list.clone();
+        let pop       = city_popover.clone();
+        let loc       = selected_loc.clone();
+        let coord_r   = coord_row.clone();
+        let selecting = selecting.clone();
         city_row.connect_changed(move |entry| {
+            if selecting.get() { return; }
+
             *loc.borrow_mut() = None;
             coord_r.set_subtitle("—");
             coord_r.set_sensitive(false);
@@ -1950,7 +1974,7 @@ fn build_setup_page(
         });
     }
 
-    // Escape: dismiss popover without clearing the typed text.
+    // Escape: dismiss without clearing text.
     {
         let pop = city_popover.clone();
         let key_ctrl = gtk::EventControllerKey::new();
@@ -1965,7 +1989,7 @@ fn build_setup_page(
         city_row.add_controller(key_ctrl);
     }
 
-    // Focus-out: dismiss popover (autohide is off so we manage this ourselves).
+    // Focus-out: dismiss (autohide is off, we manage dismissal manually).
     {
         let pop = city_popover.clone();
         let focus_ctrl = gtk::EventControllerFocus::new();
@@ -1973,8 +1997,8 @@ fn build_setup_page(
         city_row.add_controller(focus_ctrl);
     }
 
-    // Unparent the popover when the EntryRow is destroyed, otherwise GTK warns
-    // about finalized widgets that still have children attached.
+    // Unparent on destroy — set_parent() makes the popover a named child,
+    // GTK warns if it is still attached when the parent is finalized.
     {
         let pop = city_popover.clone();
         city_row.connect_destroy(move |_| { pop.unparent(); });
