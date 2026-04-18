@@ -61,6 +61,7 @@ jobs:
             libadwaita-devel \
             opus-devel \
             alsa-lib-devel \
+            sqlite-devel \
             pkgconf-pkg-config \
             git
 
