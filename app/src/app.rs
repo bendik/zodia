@@ -185,6 +185,9 @@ pub struct AppModel {
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
     sync_publish_tx: Option<tokio::sync::mpsc::Sender<SyncPublishMsg>>,
+
+    /// Most recent community interpretation contributions, for the network tab.
+    recent_interps: Vec<zodia_store::RecentInterp>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -300,7 +303,10 @@ impl AsyncComponent for AppModel {
             pending_consents: VecDeque::new(),
             pending_outgoing_consent: None,
             sync_publish_tx: None,
+            recent_interps: Vec::new(),
         };
+        model.recent_interps = model.store.borrow()
+            .recent_community_interps(12).unwrap_or_default();
 
         if let Some(birth) = model.config.birth.clone() {
             if let Ok(chart) = Chart::compute(birth.clone()) {
@@ -742,6 +748,10 @@ impl AsyncComponent for AppModel {
                 }
             }
             AppMsg::ShareInterp(entry) => {
+                // Reload activity feed (insert_signed already ran in aspect_view).
+                self.recent_interps = self.store.borrow()
+                    .recent_community_interps(12).unwrap_or_default();
+                self.stargazer_list_generation += 1;
                 // Fast path: send directly to already-connected peers.
                 let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
                 for (peer_id, channel) in &self.connected_channels {
@@ -769,9 +779,10 @@ impl AsyncComponent for AppModel {
                     author = %hex::encode(&interp.author_pk[..4]),
                     "new interpretation received via sync"
                 );
-                // The sync background task already called insert_received.
-                // Nothing more to do here — the next time the user opens
-                // an aspect view it will query the refreshed store.
+                // Reload activity feed and trigger a network view refresh.
+                self.recent_interps = self.store.borrow()
+                    .recent_community_interps(12).unwrap_or_default();
+                self.stargazer_list_generation += 1;
             }
         }
     }
@@ -1189,6 +1200,11 @@ fn rebuild_sidebar_stargazers(
     let mut sorted: Vec<&PeerId> = model.connected_stargazers.keys().collect();
     sorted.sort_by_key(|id| hex::encode_upper(&id.0[..4]));
 
+    // Show the "Connected" section header only when there are connected peers.
+    if let Some(header) = widgets.nav_list.row_at_index(3) {
+        header.set_visible(!sorted.is_empty());
+    }
+
     for peer_id in sorted {
         let their_blob   = &model.connected_stargazers[peer_id];
         let peer_hex     = hex::encode_upper(&peer_id.0[..4]);
@@ -1332,6 +1348,27 @@ fn rebuild_sidebar_stargazers(
 /// Rebuild the "Network" content pane — shows discoverable peers not yet connected.
 /// The net_status_label at the top of peers_content is a persistent widget and
 /// is NOT touched here; it is updated separately in update_view.
+/// Format a canonical interp key into a readable `(kind, description)` pair.
+/// "natal:jupiter_trine_venus" → ("Natal", "Jupiter trine Venus")
+fn format_interp_key(key: &str) -> (String, String) {
+    let (kind, rest) = key.split_once(':').unwrap_or(("", key));
+    let kind_label = match kind {
+        "natal"         => "Natal",
+        "synastry"      => "Synastry",
+        "transit"       => "Transit",
+        "house_transit" => "House transit",
+        other           => other,
+    };
+    let desc = rest.replace('_', " ");
+    // Capitalise first character only.
+    let mut chars = desc.chars();
+    let desc = match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None    => desc,
+    };
+    (kind_label.to_string(), desc)
+}
+
 fn rebuild_network_view(
     widgets: &mut AppWidgets,
     model: &AppModel,
@@ -1359,48 +1396,77 @@ fn rebuild_network_view(
             "Other Zodia users will appear here as they are discovered.",
         ));
         widgets.stargazers_content.append(&status);
-        return;
+    } else {
+        let group = adw::PreferencesGroup::new();
+        let n = discoverable.len();
+        group.set_title(&format!(
+            "{n} user{} on the network",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        for dp in &discoverable {
+            let glyph = sign_glyph(dp.solar_month);
+            let aspects = if dp.approximate_aspects.is_empty() {
+                "—".to_string()
+            } else {
+                dp.approximate_aspects.join("  ")
+            };
+            let row = adw::ActionRow::new();
+            row.set_title(&aspects);
+            row.set_subtitle(&dp.geohash_prefix);
+
+            let glyph_lbl = gtk::Label::new(Some(glyph));
+            glyph_lbl.set_valign(gtk::Align::Center);
+            row.add_prefix(&glyph_lbl);
+            row.set_activatable(false);
+
+            let add_btn = gtk::Button::new();
+            add_btn.set_icon_name("list-add-symbolic");
+            add_btn.add_css_class("flat");
+            add_btn.set_valign(gtk::Align::Center);
+            add_btn.set_tooltip_text(Some("Exchange charts"));
+            let pid = dp.peer_id.clone();
+            let s = sender.clone();
+            add_btn.connect_clicked(move |_| s.input(AppMsg::ProposeConsent(pid.clone())));
+            row.add_suffix(&add_btn);
+
+            group.add(&row);
+        }
+        widgets.stargazers_content.append(&group);
     }
 
-    let group = adw::PreferencesGroup::new();
-    let n = discoverable.len();
-    group.set_title(&format!(
-        "{n} user{} on the network",
-        if n == 1 { "" } else { "s" }
-    ));
+    // ── Recent contributions ──────────────────────────────────────────────────
+    if !model.recent_interps.is_empty() {
+        let contrib_group = adw::PreferencesGroup::new();
+        contrib_group.set_title("Recent Contributions");
+        contrib_group.set_description(Some("Interpretations shared across the network"));
 
-    for dp in &discoverable {
-        let glyph = sign_glyph(dp.solar_month);
-        let aspects = if dp.approximate_aspects.is_empty() {
-            "—".to_string()
-        } else {
-            dp.approximate_aspects.join("  ")
-        };
-        let row = adw::ActionRow::new();
-        row.set_title(&aspects);
-        row.set_subtitle(&dp.geohash_prefix);
+        for interp in &model.recent_interps {
+            let (kind, desc) = format_interp_key(&interp.interp_key);
 
-        // Glyph in a plain Label prefix so it goes through the same text
-        // rendering path as the sidebar — not through Pango markup.
-        let glyph_lbl = gtk::Label::new(Some(glyph));
-        glyph_lbl.set_valign(gtk::Align::Center);
-        row.add_prefix(&glyph_lbl);
-        row.set_activatable(false);
+            let row = adw::ActionRow::new();
+            row.set_title(&desc);
 
-        // "+" button — initiates Tier-1 connection; peer moves to sidebar on success.
-        let add_btn = gtk::Button::new();
-        add_btn.set_icon_name("list-add-symbolic");
-        add_btn.add_css_class("flat");
-        add_btn.set_valign(gtk::Align::Center);
-        add_btn.set_tooltip_text(Some("Exchange charts"));
-        let pid = dp.peer_id.clone();
-        let s = sender.clone();
-        add_btn.connect_clicked(move |_| s.input(AppMsg::ProposeConsent(pid.clone())));
-        row.add_suffix(&add_btn);
+            let preview = if interp.body.len() > 120 {
+                format!("{}…", &interp.body[..120])
+            } else {
+                interp.body.clone()
+            };
+            row.set_subtitle(&preview);
+            row.set_subtitle_lines(2);
+            row.set_activatable(false);
 
-        group.add(&row);
+            // Kind badge (Natal / Synastry / Transit / House transit) as prefix.
+            let kind_lbl = gtk::Label::new(Some(&kind));
+            kind_lbl.add_css_class("caption");
+            kind_lbl.add_css_class("dim-label");
+            kind_lbl.set_valign(gtk::Align::Center);
+            row.add_prefix(&kind_lbl);
+
+            contrib_group.add(&row);
+        }
+        widgets.stargazers_content.append(&contrib_group);
     }
-    widgets.stargazers_content.append(&group);
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

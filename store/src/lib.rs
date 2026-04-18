@@ -50,6 +50,15 @@ pub struct CommunityEntry {
     pub author_sig: [u8; 64],
 }
 
+/// A recently contributed community interpretation for the network activity feed.
+#[derive(Debug, Clone)]
+pub struct RecentInterp {
+    /// Canonical key string, e.g. `"natal:jupiter_trine_venus"`.
+    pub interp_key: String,
+    pub body: String,
+    pub received_at: u64,
+}
+
 // ── store ─────────────────────────────────────────────────────────────────────
 
 pub struct ZodiaStore {
@@ -298,6 +307,26 @@ impl ZodiaStore {
                     received_at: row.get::<_, i64>(3)? as u64,
                     is_baseline: row.get::<_, i32>(4)? != 0,
                     affirmation_count: row.get::<_, i64>(5)? as u64,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Most recently received/authored community interpretations, newest first.
+    pub fn recent_community_interps(&self, limit: usize) -> Result<Vec<RecentInterp>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT interp_key, body, received_at FROM interpretations
+             WHERE is_baseline = 0 AND author_sig IS NOT NULL
+             ORDER BY received_at DESC
+             LIMIT ?",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(RecentInterp {
+                    interp_key: row.get(0)?,
+                    body: row.get(1)?,
+                    received_at: row.get::<_, i64>(2)? as u64,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
