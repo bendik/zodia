@@ -1819,7 +1819,7 @@ fn build_setup_page(
     content.append(&subtitle);
 
     let date_group = adw::PreferencesGroup::new();
-    date_group.set_title("Birth Date & Time");
+    date_group.set_title("Birth Date &amp; Time");
     date_group.set_description(Some("Enter your local birth time — timezone is resolved automatically from the birth location."));
 
     let year_row = adw::SpinRow::with_range(1900.0, 2100.0, 1.0);
@@ -1971,6 +1971,13 @@ fn build_setup_page(
         let focus_ctrl = gtk::EventControllerFocus::new();
         focus_ctrl.connect_leave(move |_| { pop.popdown(); });
         city_row.add_controller(focus_ctrl);
+    }
+
+    // Unparent the popover when the EntryRow is destroyed, otherwise GTK warns
+    // about finalized widgets that still have children attached.
+    {
+        let pop = city_popover.clone();
+        city_row.connect_destroy(move |_| { pop.unparent(); });
     }
 
     let setup_status = gtk::Label::new(None);
