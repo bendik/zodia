@@ -1790,77 +1790,121 @@ fn build_setup_page(
     city_row.set_title("City");
     loc_group.add(&city_row);
 
-    let lat_row = adw::EntryRow::new();
-    lat_row.set_title("Latitude  (e.g. 51.5)");
-    loc_group.add(&lat_row);
-
-    let lon_row = adw::EntryRow::new();
-    lon_row.set_title("Longitude  (e.g. -0.1)");
-    loc_group.add(&lon_row);
+    // Read-only coordinate confirmation — hidden until a city is chosen.
+    let coord_row = adw::ActionRow::new();
+    coord_row.set_title("Coordinates");
+    coord_row.set_subtitle("—");
+    coord_row.set_selectable(false);
+    coord_row.set_sensitive(false);
+    loc_group.add(&coord_row);
 
     content.append(&loc_group);
 
+    // Coordinates resolved from the city datalist selection.
+    let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
+
     // ── City autocomplete popover ─────────────────────────────────────────────
+    // Key: autohide(false) so the popover never installs a focus-grab.
+    // All popover children are non-focusable so keyboard input stays in city_row.
     let city_list = gtk::ListBox::new();
     city_list.set_selection_mode(gtk::SelectionMode::None);
     city_list.add_css_class("boxed-list");
+    city_list.set_focusable(false);
+
     let city_scroll = gtk::ScrolledWindow::new();
     city_scroll.set_child(Some(&city_list));
-    city_scroll.set_max_content_height(280);
+    city_scroll.set_max_content_height(240);
     city_scroll.set_propagate_natural_height(true);
-    city_scroll.set_min_content_width(280);
+    city_scroll.set_focusable(false);
 
     let city_popover = gtk::Popover::new();
     city_popover.set_child(Some(&city_scroll));
     city_popover.set_position(gtk::PositionType::Bottom);
-    city_popover.set_autohide(true);
+    city_popover.set_autohide(false);
     city_popover.set_has_arrow(false);
     city_popover.set_parent(&city_row);
 
     let city_hits: Rc<RefCell<Vec<zodia_core::CityHit>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // Row click: fill coordinates and show confirmation row, then dismiss.
     {
-        let hits = city_hits.clone();
-        let lat_r = lat_row.clone();
-        let lon_r = lon_row.clone();
-        let pop   = city_popover.clone();
+        let hits    = city_hits.clone();
+        let loc     = selected_loc.clone();
+        let pop     = city_popover.clone();
+        let city_r  = city_row.clone();
+        let coord_r = coord_row.clone();
         city_list.connect_row_activated(move |_, row| {
             let idx = row.index() as usize;
             let guard = hits.borrow();
             if let Some(hit) = guard.get(idx) {
-                lat_r.set_text(&format!("{:.4}", hit.lat));
-                lon_r.set_text(&format!("{:.4}", hit.lon));
+                city_r.set_text(&format!("{}, {}", hit.name, hit.country));
+                *loc.borrow_mut() = Some((hit.lat as f64, hit.lon as f64));
+                coord_r.set_subtitle(&format!("{:.4}°  {:.4}°", hit.lat, hit.lon));
+                coord_r.set_sensitive(true);
             }
             pop.popdown();
         });
     }
+
+    // Text change: rebuild suggestions; clear any prior selection.
     {
-        let hits = city_hits.clone();
-        let list = city_list.clone();
-        let pop  = city_popover.clone();
+        let hits    = city_hits.clone();
+        let list    = city_list.clone();
+        let pop     = city_popover.clone();
+        let loc     = selected_loc.clone();
+        let coord_r = coord_row.clone();
         city_row.connect_changed(move |entry| {
+            *loc.borrow_mut() = None;
+            coord_r.set_subtitle("—");
+            coord_r.set_sensitive(false);
+
             let text = entry.text();
-            let results = zodia_core::search_cities(text.as_str(), 10);
-            while let Some(child) = list.first_child() {
-                list.remove(&child);
-            }
-            if results.is_empty() {
+            let results = zodia_core::search_cities(text.as_str(), 8);
+            while let Some(child) = list.first_child() { list.remove(&child); }
+
+            if results.is_empty() || text.is_empty() {
                 pop.popdown();
                 *hits.borrow_mut() = results;
                 return;
             }
             for hit in &results {
+                let row = gtk::ListBoxRow::new();
+                row.set_focusable(false);
                 let lbl = gtk::Label::new(Some(&format!("{}, {}", hit.name, hit.country)));
                 lbl.set_halign(gtk::Align::Start);
                 lbl.set_margin_start(12);
                 lbl.set_margin_end(12);
                 lbl.set_margin_top(8);
                 lbl.set_margin_bottom(8);
-                list.append(&lbl);
+                row.set_child(Some(&lbl));
+                list.append(&row);
             }
             *hits.borrow_mut() = results;
-            pop.popup();
+            if !pop.is_visible() { pop.popup(); }
         });
+    }
+
+    // Escape: dismiss popover without clearing the typed text.
+    {
+        let pop = city_popover.clone();
+        let key_ctrl = gtk::EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                pop.popdown();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        city_row.add_controller(key_ctrl);
+    }
+
+    // Focus-out: dismiss popover (autohide is off so we manage this ourselves).
+    {
+        let pop = city_popover.clone();
+        let focus_ctrl = gtk::EventControllerFocus::new();
+        focus_ctrl.connect_leave(move |_| { pop.popdown(); });
+        city_row.add_controller(focus_ctrl);
     }
 
     let setup_status = gtk::Label::new(None);
@@ -1874,19 +1918,15 @@ fn build_setup_page(
     content.append(&btn);
 
     let s = sender.clone();
-    let (yr, mr, dr, hr, minr, latr, lonr) = (
+    let (yr, mr, dr, hr, minr) = (
         year_row.clone(), month_row.clone(), day_row.clone(),
         hour_row.clone(), minute_row.clone(),
-        lat_row.clone(), lon_row.clone(),
     );
+    let loc = selected_loc.clone();
     btn.connect_clicked(move |_| {
-        let lat = match latr.text().parse::<f64>() {
-            Ok(v) => v,
-            Err(_) => { s.input(AppMsg::SetupError("Invalid latitude".into())); return; }
-        };
-        let lon = match lonr.text().parse::<f64>() {
-            Ok(v) => v,
-            Err(_) => { s.input(AppMsg::SetupError("Invalid longitude".into())); return; }
+        let (lat, lon) = match *loc.borrow() {
+            Some(v) => v,
+            None => { s.input(AppMsg::SetupError("Select a city from the list".into())); return; }
         };
         s.input(AppMsg::ConfirmBirth {
             year:   yr.value() as i32,
