@@ -49,7 +49,7 @@
   <url type="homepage">https://github.com/bendik/zodia</url>
   <url type="bugtracker">https://github.com/bendik/zodia/issues</url>
 
-  <developer>
+  <developer id="io.github.bendik">
     <name>Bendik Aagaard Lynghaug</name>
   </developer>
 
@@ -95,6 +95,6 @@
   <content_rating type="oars-1.1">
     <!-- Peer-to-peer voice calls and chart exchange between consenting users -->
     <content_attribute id="social-chat">mild</content_attribute>
-    <content_attribute id="social-audio">mild</content_attribute>
+    <content_attribute id="social-audio">moderate</content_attribute>
   </content_rating>
 </component>
