@@ -1391,7 +1391,7 @@ fn rebuild_network_view(
     if discoverable.is_empty() {
         let status = adw::StatusPage::new();
         status.set_icon_name(Some("network-wireless-symbolic"));
-        status.set_title("No other Zodia users nearby");
+        status.set_title("No current online Zodia users found");
         status.set_description(Some(
             "Other Zodia users will appear here as they are discovered.",
         ));
@@ -1852,11 +1852,24 @@ fn build_setup_page(
     let loc_group = adw::PreferencesGroup::new();
     loc_group.set_title("Birth Location");
 
-    let city_row = adw::EntryRow::new();
-    city_row.set_title("City");
-    loc_group.add(&city_row);
+    // ── City autocomplete ─────────────────────────────────────────────────────
+    // gtk::Entry + gtk::EntryCompletion: the native GTK approach.
+    // Keyboard navigation (Up/Down/Enter), popup width matching, and
+    // accessibility are handled by the completion widget automatically.
+    let city_entry = gtk::Entry::new();
+    city_entry.set_hexpand(true);
+    city_entry.set_valign(gtk::Align::Center);
+    city_entry.set_placeholder_text(Some("Start typing a city name…"));
+    city_entry.set_input_purpose(gtk::InputPurpose::Name);
+    city_entry.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI);
 
-    // Read-only coordinate confirmation — hidden until a city is chosen.
+    let city_action_row = adw::ActionRow::new();
+    city_action_row.set_title("City");
+    city_action_row.add_suffix(&city_entry);
+    city_action_row.set_activatable_widget(Some(&city_entry));
+    loc_group.add(&city_action_row);
+
+    // Read-only coordinate confirmation — shown once a city is chosen.
     let coord_row = adw::ActionRow::new();
     coord_row.set_title("Coordinates");
     coord_row.set_subtitle("—");
@@ -1866,142 +1879,75 @@ fn build_setup_page(
 
     content.append(&loc_group);
 
-    // Coordinates resolved from the city datalist selection.
+    // Coordinates resolved from EntryCompletion selection.
     let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
 
-    // ── City autocomplete popover ─────────────────────────────────────────────
-    // autohide(false): popover never installs a focus-grab, so every keystroke
-    // stays in city_row.  All popover children are non-focusable for the same
-    // reason.
-    //
-    // Crash guard: `selecting` is set to true for the duration of
-    // connect_row_activated so that the set_text() call inside it does not cause
-    // connect_changed to remove rows from city_list while GTK is still mid-
-    // activation on one of them (reentrancy → panic).
-    let city_list = gtk::ListBox::new();
-    city_list.set_selection_mode(gtk::SelectionMode::None);
-    city_list.add_css_class("boxed-list");
-    city_list.set_focusable(false);
+    // ListStore columns: 0 = display string, 1 = lat (f64), 2 = lon (f64).
+    let city_store = gtk::ListStore::new(&[
+        glib::Type::STRING,
+        glib::Type::F64,
+        glib::Type::F64,
+    ]);
 
-    let city_scroll = gtk::ScrolledWindow::new();
-    city_scroll.set_child(Some(&city_list));
-    city_scroll.set_max_content_height(240);
-    city_scroll.set_propagate_natural_height(true);
-    city_scroll.set_focusable(false);
+    let completion = gtk::EntryCompletion::new();
+    completion.set_model(Some(&city_store));
+    completion.set_text_column(0);
+    completion.set_minimum_key_length(1);
+    completion.set_popup_completion(true);
+    completion.set_popup_set_width(true);   // popup matches entry width natively
+    // We rebuild the store ourselves on every keystroke; always show all rows.
+    completion.set_match_func(|_, _, _| true);
+    city_entry.set_completion(Some(&completion));
 
-    let city_popover = gtk::Popover::new();
-    city_popover.set_child(Some(&city_scroll));
-    city_popover.set_position(gtk::PositionType::Bottom);
-    city_popover.set_autohide(false);
-    city_popover.set_has_arrow(false);
-    city_popover.set_parent(&city_row);
-
-    // Match the popover width to the entry row once it is laid out on screen.
-    {
-        let scroll = city_scroll.clone();
-        let row    = city_row.clone();
-        city_row.connect_map(move |_| {
-            let w = row.allocated_width();
-            if w > 0 { scroll.set_min_content_width(w); }
-        });
-    }
-
-    let city_hits: Rc<RefCell<Vec<zodia_core::CityHit>>> = Rc::new(RefCell::new(Vec::new()));
-    // True while a row is being activated — tells connect_changed to skip.
+    // Guard: prevents connect_changed from clearing selected_loc when
+    // EntryCompletion updates the entry text after a match selection.
     let selecting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
-    // Row click: guard against reentrancy, fill coordinates, dismiss.
+    // Match selected: capture coordinates, fill the entry, update coord row.
     {
-        let hits      = city_hits.clone();
-        let loc       = selected_loc.clone();
-        let pop       = city_popover.clone();
-        let city_r    = city_row.clone();
-        let coord_r   = coord_row.clone();
-        let selecting = selecting.clone();
-        city_list.connect_row_activated(move |_, row| {
-            let idx = row.index() as usize;
-            let hit = hits.borrow().get(idx).cloned();
-            if let Some(hit) = hit {
-                selecting.set(true);
-                city_r.set_text(&format!("{}, {}", hit.name, hit.country));
-                selecting.set(false);
-                *loc.borrow_mut() = Some((hit.lat as f64, hit.lon as f64));
-                coord_r.set_subtitle(&format!("{:.4}°  {:.4}°", hit.lat, hit.lon));
-                coord_r.set_sensitive(true);
-            }
-            pop.popdown();
+        let loc      = selected_loc.clone();
+        let coord_r  = coord_row.clone();
+        let entry    = city_entry.clone();
+        let sel      = selecting.clone();
+        completion.connect_match_selected(move |_, model, iter| {
+            let display = model.get_value(iter, 0).get::<String>().unwrap_or_default();
+            let lat     = model.get_value(iter, 1).get::<f64>().unwrap_or(0.0);
+            let lon     = model.get_value(iter, 2).get::<f64>().unwrap_or(0.0);
+            sel.set(true);
+            entry.set_text(&display);
+            entry.set_position(-1);
+            sel.set(false);
+            *loc.borrow_mut() = Some((lat, lon));
+            coord_r.set_subtitle(&format!("{:.4}°  {:.4}°", lat, lon));
+            coord_r.set_sensitive(true);
+            glib::Propagation::Stop  // prevent duplicate text insertion by default handler
         });
     }
 
-    // Text change: skip when a selection is in progress to avoid reentrancy.
+    // Text change: rebuild the store; clear coordinates if user is typing freely.
     {
-        let hits      = city_hits.clone();
-        let list      = city_list.clone();
-        let pop       = city_popover.clone();
-        let loc       = selected_loc.clone();
-        let coord_r   = coord_row.clone();
-        let selecting = selecting.clone();
-        city_row.connect_changed(move |entry| {
-            if selecting.get() { return; }
+        let store    = city_store.clone();
+        let loc      = selected_loc.clone();
+        let coord_r  = coord_row.clone();
+        let sel      = selecting.clone();
+        city_entry.connect_changed(move |entry| {
+            if sel.get() { return; }
 
             *loc.borrow_mut() = None;
             coord_r.set_subtitle("—");
             coord_r.set_sensitive(false);
 
             let text = entry.text();
-            let results = zodia_core::search_cities(text.as_str(), 8);
-            while let Some(child) = list.first_child() { list.remove(&child); }
+            store.clear();
+            if text.is_empty() { return; }
 
-            if results.is_empty() || text.is_empty() {
-                pop.popdown();
-                *hits.borrow_mut() = results;
-                return;
-            }
-            for hit in &results {
-                let row = gtk::ListBoxRow::new();
-                row.set_focusable(false);
-                let lbl = gtk::Label::new(Some(&format!("{}, {}", hit.name, hit.country)));
-                lbl.set_halign(gtk::Align::Start);
-                lbl.set_margin_start(12);
-                lbl.set_margin_end(12);
-                lbl.set_margin_top(8);
-                lbl.set_margin_bottom(8);
-                row.set_child(Some(&lbl));
-                list.append(&row);
-            }
-            *hits.borrow_mut() = results;
-            if !pop.is_visible() { pop.popup(); }
-        });
-    }
-
-    // Escape: dismiss without clearing text.
-    {
-        let pop = city_popover.clone();
-        let key_ctrl = gtk::EventControllerKey::new();
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            if key == gtk::gdk::Key::Escape {
-                pop.popdown();
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+            for hit in zodia_core::search_cities(text.as_str(), 8) {
+                let iter = store.append();
+                store.set_value(&iter, 0, &format!("{}, {}", hit.name, hit.country).to_value());
+                store.set_value(&iter, 1, &(hit.lat as f64).to_value());
+                store.set_value(&iter, 2, &(hit.lon as f64).to_value());
             }
         });
-        city_row.add_controller(key_ctrl);
-    }
-
-    // Focus-out: dismiss (autohide is off, we manage dismissal manually).
-    {
-        let pop = city_popover.clone();
-        let focus_ctrl = gtk::EventControllerFocus::new();
-        focus_ctrl.connect_leave(move |_| { pop.popdown(); });
-        city_row.add_controller(focus_ctrl);
-    }
-
-    // Unparent on destroy — set_parent() makes the popover a named child,
-    // GTK warns if it is still attached when the parent is finalized.
-    {
-        let pop = city_popover.clone();
-        city_row.connect_destroy(move |_| { pop.unparent(); });
     }
 
     let setup_status = gtk::Label::new(None);
