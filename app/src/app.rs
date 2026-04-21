@@ -1852,22 +1852,15 @@ fn build_setup_page(
     let loc_group = adw::PreferencesGroup::new();
     loc_group.set_title("Birth Location");
 
-    // ── City autocomplete ─────────────────────────────────────────────────────
-    // gtk::Entry + gtk::EntryCompletion: the native GTK approach.
-    // Keyboard navigation (Up/Down/Enter), popup width matching, and
-    // accessibility are handled by the completion widget automatically.
-    let city_entry = gtk::Entry::new();
-    city_entry.set_hexpand(true);
-    city_entry.set_valign(gtk::Align::Center);
-    city_entry.set_placeholder_text(Some("Start typing a city name…"));
-    city_entry.set_input_purpose(gtk::InputPurpose::Name);
-    city_entry.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI);
-
-    let city_action_row = adw::ActionRow::new();
-    city_action_row.set_title("City");
-    city_action_row.add_suffix(&city_entry);
-    city_action_row.set_activatable_widget(Some(&city_entry));
-    loc_group.add(&city_action_row);
+    // ── City search ───────────────────────────────────────────────────────────
+    // adw::EntryRow for input; matching cities appear as inline ActionRows
+    // inserted into loc_group between the entry and the coord confirmation row.
+    // No popover, no deprecated APIs.
+    let city_row = adw::EntryRow::new();
+    city_row.set_title("City");
+    city_row.set_input_purpose(gtk::InputPurpose::Name);
+    city_row.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI);
+    loc_group.add(&city_row);
 
     // Read-only coordinate confirmation — shown once a city is chosen.
     let coord_row = adw::ActionRow::new();
@@ -1879,74 +1872,75 @@ fn build_setup_page(
 
     content.append(&loc_group);
 
-    // Coordinates resolved from EntryCompletion selection.
     let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
-
-    // ListStore columns: 0 = display string, 1 = lat (f64), 2 = lon (f64).
-    let city_store = gtk::ListStore::new(&[
-        glib::Type::STRING,
-        glib::Type::F64,
-        glib::Type::F64,
-    ]);
-
-    let completion = gtk::EntryCompletion::new();
-    completion.set_model(Some(&city_store));
-    completion.set_text_column(0);
-    completion.set_minimum_key_length(1);
-    completion.set_popup_completion(true);
-    completion.set_popup_set_width(true);   // popup matches entry width natively
-    // We rebuild the store ourselves on every keystroke; always show all rows.
-    completion.set_match_func(|_, _, _| true);
-    city_entry.set_completion(Some(&completion));
-
-    // Guard: prevents connect_changed from clearing selected_loc when
-    // EntryCompletion updates the entry text after a match selection.
+    // Tracks live result rows so they can be cleared on next keystroke or selection.
+    let result_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+    // Guard: prevents connect_changed re-entering when we set entry text on selection.
     let selecting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
-    // Match selected: capture coordinates, fill the entry, update coord row.
     {
-        let loc      = selected_loc.clone();
-        let coord_r  = coord_row.clone();
-        let entry    = city_entry.clone();
-        let sel      = selecting.clone();
-        completion.connect_match_selected(move |_, model, iter| {
-            let display = model.get_value(iter, 0).get::<String>().unwrap_or_default();
-            let lat     = model.get_value(iter, 1).get::<f64>().unwrap_or(0.0);
-            let lon     = model.get_value(iter, 2).get::<f64>().unwrap_or(0.0);
-            sel.set(true);
-            entry.set_text(&display);
-            entry.set_position(-1);
-            sel.set(false);
-            *loc.borrow_mut() = Some((lat, lon));
-            coord_r.set_subtitle(&format!("{:.4}°  {:.4}°", lat, lon));
-            coord_r.set_sensitive(true);
-            glib::Propagation::Stop  // prevent duplicate text insertion by default handler
-        });
-    }
+        let loc     = selected_loc.clone();
+        let coord_r = coord_row.clone();
+        let group   = loc_group.clone();
+        let rows    = result_rows.clone();
+        let sel     = selecting.clone();
+        let entry   = city_row.clone();
 
-    // Text change: rebuild the store; clear coordinates if user is typing freely.
-    {
-        let store    = city_store.clone();
-        let loc      = selected_loc.clone();
-        let coord_r  = coord_row.clone();
-        let sel      = selecting.clone();
-        city_entry.connect_changed(move |entry| {
+        city_row.connect_changed(move |e| {
             if sel.get() { return; }
+
+            // Remove previous result rows, then coord_row so new results slot in before it.
+            {
+                let to_remove: Vec<_> = rows.borrow_mut().drain(..).collect();
+                for r in &to_remove { group.remove(r); }
+            }
+            group.remove(&coord_r);
 
             *loc.borrow_mut() = None;
             coord_r.set_subtitle("—");
             coord_r.set_sensitive(false);
 
-            let text = entry.text();
-            store.clear();
-            if text.is_empty() { return; }
+            let text = e.text();
+            if !text.is_empty() {
+                let mut rs = rows.borrow_mut();
+                for hit in zodia_core::search_cities(text.as_str(), 8) {
+                    let label = format!("{}, {}", hit.name, hit.country);
+                    let lat   = hit.lat as f64;
+                    let lon   = hit.lon as f64;
 
-            for hit in zodia_core::search_cities(text.as_str(), 8) {
-                let iter = store.append();
-                store.set_value(&iter, 0, &format!("{}, {}", hit.name, hit.country).to_value());
-                store.set_value(&iter, 1, &(hit.lat as f64).to_value());
-                store.set_value(&iter, 2, &(hit.lon as f64).to_value());
+                    let row = adw::ActionRow::new();
+                    row.set_title(&label);
+                    row.set_activatable(true);
+
+                    let loc2     = loc.clone();
+                    let coord_r2 = coord_r.clone();
+                    let group2   = group.clone();
+                    let rows2    = rows.clone();   // Rc clone — does not borrow inner Vec
+                    let sel2     = sel.clone();
+                    let entry2   = entry.clone();
+
+                    row.connect_activated(move |_| {
+                        // Clear all result rows from the group.
+                        let to_remove: Vec<_> = rows2.borrow_mut().drain(..).collect();
+                        for r in &to_remove { group2.remove(r); }
+
+                        // Fill entry text (guard prevents connect_changed re-entry).
+                        sel2.set(true);
+                        entry2.set_text(&label);
+                        sel2.set(false);
+
+                        *loc2.borrow_mut() = Some((lat, lon));
+                        coord_r2.set_subtitle(&format!("{:.4}°  {:.4}°", lat, lon));
+                        coord_r2.set_sensitive(true);
+                    });
+
+                    rs.push(row.clone());
+                    group.add(&row);
+                }
             }
+
+            // coord_row always goes last.
+            group.add(&coord_r);
         });
     }
 
