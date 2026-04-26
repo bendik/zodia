@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{BufRead, BufReader, Read, Write as IoWrite},
+    io::{BufRead, BufReader, Write as IoWrite},
     path::PathBuf,
 };
 
@@ -9,35 +9,15 @@ fn main() {
     println!("cargo:rerun-if-changed=data/cities1000.txt");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let data_dir = manifest_dir.join("data");
-    let cities_txt = data_dir.join("cities1000.txt");
+    let cities_txt   = manifest_dir.join("data").join("cities1000.txt");
+    let out_dir      = env::var("OUT_DIR").unwrap();
 
-    if !cities_txt.exists() {
-        fs::create_dir_all(&data_dir).unwrap();
-        eprintln!("cargo:warning=Downloading GeoNames cities1000 (one-time, ~10 MB)...");
-        if let Err(e) = download_cities(&cities_txt) {
-            eprintln!("cargo:warning=Download failed ({e}); city search will be empty.");
-            write_empty(&env::var("OUT_DIR").unwrap());
-            return;
-        }
-        eprintln!("cargo:warning=Saved to core/data/cities1000.txt");
+    if cities_txt.exists() {
+        generate(&cities_txt, &out_dir);
+    } else {
+        eprintln!("cargo:warning=core/data/cities1000.txt not found — city search will be empty.");
+        write_empty(&out_dir);
     }
-
-    generate(&cities_txt, &env::var("OUT_DIR").unwrap());
-}
-
-fn download_cities(dest: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = ureq::get("https://download.geonames.org/export/dump/cities1000.zip")
-        .call()?;
-    let mut zip_bytes = Vec::new();
-    resp.into_reader().read_to_end(&mut zip_bytes)?;
-    let cursor = std::io::Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(cursor)?;
-    let mut file = archive.by_name("cities1000.txt")?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
-    fs::write(dest, &content)?;
-    Ok(())
 }
 
 fn generate(cities_txt: &PathBuf, out_dir: &str) {
@@ -74,7 +54,7 @@ fn generate(cities_txt: &PathBuf, out_dir: &str) {
 fn write_empty(out_dir: &str) {
     let out_path = PathBuf::from(out_dir).join("cities_data.rs");
     fs::write(out_path,
-        "// GeoNames download failed — empty fallback.\n\
+        "// cities1000.txt not found — empty fallback.\n\
          static CITIES: &[(&str, &str, &str, f32, f32)] = &[];\n",
     ).unwrap();
 }
