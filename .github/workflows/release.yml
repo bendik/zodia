@@ -154,30 +154,50 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           APP=Zodia.app
+          SVG=app/data/io.github.bendik.Zodia.svg
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/${{ matrix.target }}/release/zodia "$APP/Contents/MacOS/zodia-bin"
 
+          # ── .icns via ImageMagick + iconutil ──────────────────────────────
+          brew install imagemagick dylibbundler
+          ICONSET=$(mktemp -d)/Zodia.iconset
+          mkdir -p "$ICONSET"
+          render() { magick -background none -density 300 "$SVG" -resize "$1x$1" +profile '*' "${ICONSET}/$2"; }
+          render 16   icon_16x16.png
+          render 32   icon_16x16@2x.png
+          render 32   icon_32x32.png
+          render 64   icon_32x32@2x.png
+          render 128  icon_128x128.png
+          render 256  icon_128x128@2x.png
+          render 256  icon_256x256.png
+          render 512  icon_256x256@2x.png
+          render 512  icon_512x512.png
+          render 1024 icon_512x512@2x.png
+          iconutil -c icns -o "$APP/Contents/Resources/zodia.icns" "$ICONSET"
+
+          # ── Info.plist ────────────────────────────────────────────────────
           cat > "$APP/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>CFBundleName</key><string>Zodia</string>
-            <key>CFBundleDisplayName</key><string>Zodia</string>
-            <key>CFBundleIdentifier</key><string>io.github.bendik.Zodia</string>
-            <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
-            <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleExecutable</key><string>zodia</string>
-            <key>LSMinimumSystemVersion</key><string>13.0</string>
-            <key>NSHighResolutionCapable</key><true/>
-            <key>NSHumanReadableCopyright</key><string>AGPL-3.0-or-later</string>
+            <key>CFBundleName</key>               <string>Zodia</string>
+            <key>CFBundleDisplayName</key>        <string>Zodia</string>
+            <key>CFBundleIdentifier</key>         <string>io.github.bendik.Zodia</string>
+            <key>CFBundleVersion</key>            <string>${{ github.ref_name }}</string>
+            <key>CFBundleShortVersionString</key> <string>${{ github.ref_name }}</string>
+            <key>CFBundlePackageType</key>        <string>APPL</string>
+            <key>CFBundleExecutable</key>         <string>zodia</string>
+            <key>CFBundleIconFile</key>           <string>zodia</string>
+            <key>LSMinimumSystemVersion</key>     <string>13.0</string>
+            <key>NSHighResolutionCapable</key>    <true/>
+            <key>NSHumanReadableCopyright</key>   <string>AGPL-3.0-or-later</string>
           </dict>
           </plist>
           PLIST
 
-          brew install dylibbundler
+          # ── dylibbundler ──────────────────────────────────────────────────
           BREW="$(brew --prefix)"
           dylibbundler \
             --bundle-deps \
@@ -187,7 +207,7 @@ jobs:
             --search-path "${BREW}/lib" \
             --overwrite-dir
 
-          # Launcher: sets XDG_DATA_DIRS and pixbuf module path then execs the real binary
+          # ── Launcher: sets XDG_DATA_DIRS then execs the real binary ───────
           cat > "$APP/Contents/MacOS/zodia" <<SH
           #!/bin/sh
           BUNDLE="\$(cd "\$(dirname "\$0")/../.." && pwd)"
