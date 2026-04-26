@@ -10,7 +10,7 @@ pub mod planet;
 pub mod topic;
 pub mod transit;
 
-pub use cities::{CityHit, search_cities};
+pub use cities::{CityHit, has_cities, search_cities};
 pub use aspects::{Aspect, AspectKind, AspectSet, AspectSig, SynastryAspect,
                   angular_separation, detect_aspect,
                   compute_aspects, compute_synastry};

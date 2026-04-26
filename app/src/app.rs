@@ -1849,39 +1849,40 @@ fn build_setup_page(
 
     content.append(&date_group);
 
-    let loc_group = adw::PreferencesGroup::new();
-    loc_group.set_title("Birth Location");
+    let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
 
-    // ── City search ───────────────────────────────────────────────────────────
-    // adw::EntryRow for input; matching cities appear as inline ActionRows
-    // inserted into loc_group between the entry and the coord confirmation row.
-    // No popover, no deprecated APIs.
+    // ── City search section ───────────────────────────────────────────────────
+    // adw::EntryRow for input; results appear as inline ActionRows in the group.
+    let city_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
+
+    let city_group = adw::PreferencesGroup::new();
+    city_group.set_title("Birth Location");
+
     let city_row = adw::EntryRow::new();
     city_row.set_title("City");
     city_row.set_input_purpose(gtk::InputPurpose::Name);
     city_row.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI);
-    loc_group.add(&city_row);
+    city_group.add(&city_row);
 
-    // Read-only coordinate confirmation — shown once a city is chosen.
     let coord_row = adw::ActionRow::new();
     coord_row.set_title("Coordinates");
     coord_row.set_subtitle("—");
     coord_row.set_selectable(false);
     coord_row.set_sensitive(false);
-    loc_group.add(&coord_row);
+    city_group.add(&coord_row);
 
-    content.append(&loc_group);
+    city_section.append(&city_group);
 
-    let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
-    // Tracks live result rows so they can be cleared on next keystroke or selection.
-    let result_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
-    // Guard: prevents connect_changed re-entering when we set entry text on selection.
-    let selecting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let to_manual_btn = gtk::Button::with_label("Enter coordinates manually");
+    to_manual_btn.add_css_class("flat");
+    city_section.append(&to_manual_btn);
 
     {
+        let result_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+        let selecting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let loc     = selected_loc.clone();
         let coord_r = coord_row.clone();
-        let group   = loc_group.clone();
+        let group   = city_group.clone();
         let rows    = result_rows.clone();
         let sel     = selecting.clone();
         let entry   = city_row.clone();
@@ -1889,7 +1890,6 @@ fn build_setup_page(
         city_row.connect_changed(move |e| {
             if sel.get() { return; }
 
-            // Remove previous result rows, then coord_row so new results slot in before it.
             {
                 let to_remove: Vec<_> = rows.borrow_mut().drain(..).collect();
                 for r in &to_remove { group.remove(r); }
@@ -1915,16 +1915,14 @@ fn build_setup_page(
                     let loc2     = loc.clone();
                     let coord_r2 = coord_r.clone();
                     let group2   = group.clone();
-                    let rows2    = rows.clone();   // Rc clone — does not borrow inner Vec
+                    let rows2    = rows.clone();
                     let sel2     = sel.clone();
                     let entry2   = entry.clone();
 
                     row.connect_activated(move |_| {
-                        // Clear all result rows from the group.
                         let to_remove: Vec<_> = rows2.borrow_mut().drain(..).collect();
                         for r in &to_remove { group2.remove(r); }
 
-                        // Fill entry text (guard prevents connect_changed re-entry).
                         sel2.set(true);
                         entry2.set_text(&label);
                         sel2.set(false);
@@ -1939,10 +1937,82 @@ fn build_setup_page(
                 }
             }
 
-            // coord_row always goes last.
             group.add(&coord_r);
         });
     }
+
+    // ── Manual lat/lon section ────────────────────────────────────────────────
+    let manual_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
+
+    let manual_group = adw::PreferencesGroup::new();
+    manual_group.set_title("Birth Location");
+
+    let lat_row = adw::SpinRow::with_range(-90.0, 90.0, 0.0001);
+    lat_row.set_title("Latitude");
+    lat_row.set_digits(4);
+    manual_group.add(&lat_row);
+
+    let lon_row = adw::SpinRow::with_range(-180.0, 180.0, 0.0001);
+    lon_row.set_title("Longitude");
+    lon_row.set_digits(4);
+    manual_group.add(&lon_row);
+
+    manual_section.append(&manual_group);
+
+    // Keep selected_loc in sync while manual mode is active (only updates when Some).
+    {
+        let loc = selected_loc.clone();
+        lat_row.connect_value_notify(move |row| {
+            if let Some(ref mut v) = *loc.borrow_mut() { v.0 = row.value(); }
+        });
+    }
+    {
+        let loc = selected_loc.clone();
+        lon_row.connect_value_notify(move |row| {
+            if let Some(ref mut v) = *loc.borrow_mut() { v.1 = row.value(); }
+        });
+    }
+
+    // ── Visibility + toggle wiring ────────────────────────────────────────────
+    if zodia_core::has_cities() {
+        // Default: city search visible, manual hidden.
+        manual_section.set_visible(false);
+
+        {
+            let cs   = city_section.clone();
+            let ms   = manual_section.clone();
+            let loc  = selected_loc.clone();
+            let latr = lat_row.clone();
+            let lonr = lon_row.clone();
+            to_manual_btn.connect_clicked(move |_| {
+                cs.set_visible(false);
+                ms.set_visible(true);
+                *loc.borrow_mut() = Some((latr.value(), lonr.value()));
+            });
+        }
+
+        let back_btn = gtk::Button::with_label("Search by city name");
+        back_btn.add_css_class("flat");
+        manual_section.append(&back_btn);
+
+        {
+            let cs  = city_section.clone();
+            let ms  = manual_section.clone();
+            let loc = selected_loc.clone();
+            back_btn.connect_clicked(move |_| {
+                ms.set_visible(false);
+                cs.set_visible(true);
+                *loc.borrow_mut() = None;
+            });
+        }
+    } else {
+        // No city data compiled in: skip straight to manual, no toggle back.
+        city_section.set_visible(false);
+        *selected_loc.borrow_mut() = Some((0.0, 0.0));
+    }
+
+    content.append(&city_section);
+    content.append(&manual_section);
 
     let setup_status = gtk::Label::new(None);
     setup_status.add_css_class("error");
@@ -1963,7 +2033,7 @@ fn build_setup_page(
     btn.connect_clicked(move |_| {
         let (lat, lon) = match *loc.borrow() {
             Some(v) => v,
-            None => { s.input(AppMsg::SetupError("Select a city from the list".into())); return; }
+            None => { s.input(AppMsg::SetupError("Select a birth location".into())); return; }
         };
         s.input(AppMsg::ConfirmBirth {
             year:   yr.value() as i32,

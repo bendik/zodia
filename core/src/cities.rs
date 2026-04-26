@@ -15,6 +15,13 @@ pub struct CityHit {
     pub lon: f32,
 }
 
+/// Returns `true` if city data was compiled in (i.e. `cities1000.txt` was
+/// present at build time). When `false`, [`search_cities`] always returns
+/// an empty Vec and the UI should fall back to direct coordinate input.
+pub fn has_cities() -> bool {
+    !CITIES.is_empty()
+}
+
 /// Return up to `limit` cities whose ASCII name starts with `prefix`
 /// (case-insensitive), in alphabetical order.
 pub fn search_cities(prefix: &str, limit: usize) -> Vec<CityHit> {
