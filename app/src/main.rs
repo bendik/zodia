@@ -79,6 +79,7 @@ fn main() {
         gtk4::IconTheme::for_display(&display)
             .add_resource_path("/net/zodia/app/icons");
     }
+    gtk4::Window::set_default_icon_name("io.github.bendik.Zodia");
 
     apply_css();
     app.run_async::<AppModel>(AppInit { config, store, baseline });

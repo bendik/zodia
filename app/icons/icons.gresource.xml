@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
   <gresource prefix="/net/zodia/app/icons">
+    <file>scalable/apps/io.github.bendik.Zodia.svg</file>
     <file>scalable/actions/weather-clear-symbolic.svg</file>
     <file>scalable/actions/night-light-symbolic.svg</file>
     <file>scalable/actions/system-users-symbolic.svg</file>
