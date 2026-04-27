@@ -9,8 +9,17 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
   build:
     name: Build ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     strategy:
@@ -263,19 +272,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: zodia-${{ matrix.target }}
-          generate_release_notes: true
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
         uses: softprops/action-gh-release@v2
         with:
           files: zodia-${{ matrix.target }}.zip
-          generate_release_notes: false
 
       - name: Upload Windows artifact
         if: runner.os == 'Windows'
         uses: softprops/action-gh-release@v2
         with:
           files: zodia-${{ matrix.target }}.zip
-          generate_release_notes: false
 
