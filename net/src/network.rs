@@ -36,18 +36,14 @@ use zodia_core::{BirthData, compute_positions, topic_key_global, topic_keys_for_
 /// overlay; peers on different IDs are invisible to each other.
 pub const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-/// iroh relay servers for NAT traversal.  Must match the values in tools/bootstrap.
-/// iroh picks the lowest-latency one as the "home" relay and uses the others as fallback.
-pub const RELAY_EU:       &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
-pub const RELAY_NA_EAST:  &str = "https://use1-1.relay.n0.iroh-canary.iroh.link.";
-pub const RELAY_NA_WEST:  &str = "https://usw1-1.relay.n0.iroh-canary.iroh.link.";
-pub const RELAY_AP:       &str = "https://aps1-1.relay.n0.iroh-canary.iroh.link.";
+/// Self-hosted iroh relay for NAT traversal.  Must match the value in tools/bootstrap.
+/// Runs on stargaze.whatdoyouliketodo.com behind Caddy (TLS terminated by Caddy,
+/// iroh-relay listens on localhost:3340 with no TLS).
+pub const RELAY_ZODIA: &str = "https://stargaze.whatdoyouliketodo.com.";
 
 /// All configured relay URLs — used to build the relay map and to hint the
-/// bootstrap node address.  We use the EU node as the canonical hint because
-/// the bootstrap server is in Europe; iroh will migrate to its preferred
-/// home relay automatically after first contact.
-pub const ALL_RELAYS: &[&str] = &[RELAY_EU, RELAY_NA_EAST, RELAY_NA_WEST, RELAY_AP];
+/// bootstrap node address.
+pub const ALL_RELAYS: &[&str] = &[RELAY_ZODIA];
 
 /// Bootstrap node public key (hex-decoded bytes).
 ///
@@ -123,7 +119,7 @@ impl ZodiaNetwork {
         if let Some(id_bytes) = BOOTSTRAP_NODE_ID {
             if let Ok(bootstrap_pk) = NodeId::from_bytes(&id_bytes) {
                 let addr = EndpointAddr::new(from_public_key(bootstrap_pk))
-                    .with_relay_url(RELAY_EU.parse().unwrap());
+                    .with_relay_url(RELAY_ZODIA.parse().unwrap());
                 let _ = address_book
                     .insert_node_info(NodeInfo::from(addr).bootstrap())
                     .await;

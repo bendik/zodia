@@ -23,13 +23,9 @@ use zodia_core::topic_key_global;
 /// Must match `NETWORK_ID` in `net/src/network.rs`.
 const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-/// iroh relay servers — must stay in sync with `net/src/network.rs`.
-/// iroh picks the lowest-latency one as its home relay automatically.
-pub const RELAY_EU:      &str = "https://euc1-1.relay.n0.iroh-canary.iroh.link.";
-pub const RELAY_NA_EAST: &str = "https://use1-1.relay.n0.iroh-canary.iroh.link.";
-pub const RELAY_NA_WEST: &str = "https://usw1-1.relay.n0.iroh-canary.iroh.link.";
-pub const RELAY_AP:      &str = "https://aps1-1.relay.n0.iroh-canary.iroh.link.";
-pub const ALL_RELAYS:    &[&str] = &[RELAY_EU, RELAY_NA_EAST, RELAY_NA_WEST, RELAY_AP];
+/// Self-hosted relay — must stay in sync with net/src/network.rs.
+pub const RELAY_ZODIA: &str = "https://stargaze.whatdoyouliketodo.com.";
+pub const ALL_RELAYS:  &[&str] = &[RELAY_ZODIA];
 
 const DEFAULT_PORT: u16 = 17434;
 

@@ -5,7 +5,7 @@
   <project_license>AGPL-3.0-or-later</project_license>
 
   <name>Zodia</name>
-  <summary>Natal charts, transits, and crowd-sourced aspect interpretations</summary>
+  <summary>Natal charts, transits, and collaborate on crowd-sourced interpretations</summary>
 
   <description>
     <p>
@@ -30,15 +30,13 @@
   <launchable type="desktop-id">io.github.bendik.Zodia.desktop</launchable>
 
   <screenshots>
-    <!-- Replace these URLs with hosted screenshots before submission.
-         Recommended size: 1248×702 or 1600×900 (16:9), window chrome included. -->
     <screenshot type="default">
-      <caption>Network view showing discovered peers</caption>
-      <image type="source">https://bendik.github.io/zodia/screenshots/network.png</image>
-    </screenshot>
-    <screenshot>
       <caption>Natal chart with aspect list and interpretations</caption>
       <image type="source">https://bendik.github.io/zodia/screenshots/chart.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Network view showing discovered peers</caption>
+      <image type="source">https://bendik.github.io/zodia/screenshots/network.png</image>
     </screenshot>
     <screenshot>
       <caption>Synastry view between two connected users</caption>
@@ -71,6 +69,12 @@
   </keywords>
 
   <releases>
+
+    <release version="0.4.10" date="2026-04-27">
+      <description>
+        <p>Add custom iroh relay node for NAT traversal and update release mechanics.</p>
+      </description>
+    </release>
     <release version="0.4.9" date="2026-04-26">
       <description>
         <p>App icon now shown in window titlebar and macOS dock; proper .icns generated for macOS .app bundle.</p>
