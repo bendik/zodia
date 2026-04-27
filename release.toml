@@ -1,0 +1,5 @@
+publish = false
+tag-name = "v{{version}}"
+pre-release-commit-message = "release: bump to v{{version}}"
+pre-release-hook = ["./scripts/release-prep.sh", "{{version}}"]
+post-release-hook = ["./scripts/flatpak-sync.sh", "{{version}}"]

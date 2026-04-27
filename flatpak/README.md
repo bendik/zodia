@@ -1,43 +1,60 @@
 # Flatpak packaging
 
+The Flathub submission lives at `flatpak/flathub/` — a git submodule tracking
+[flathub/io.github.bendik.Zodia](https://github.com/flathub/io.github.bendik.Zodia).
+
 ## One-time setup
 
-Install the required tools and runtimes:
-
+### Runtimes
 ```sh
-flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47
-flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//23.08
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
 ```
 
-Get the cargo sources generator:
-
+### Python deps (for cargo-sources regeneration)
 ```sh
-curl -O https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
-pip3 install aiohttp toml
+pip install aiohttp toml
 ```
 
-## Generate cargo-sources.json
-
-Run this from the `flatpak/` directory whenever `Cargo.lock` changes:
-
+### cargo-release (for the release chore)
 ```sh
-python3 flatpak-cargo-generator.py ../Cargo.lock -o cargo-sources.json
+cargo install cargo-release
 ```
 
-This file is large (~hundreds of entries) and must be committed alongside the manifest.
+## Making a release
+
+1. Write the release description in `app/data/io.github.bendik.Zodia.metainfo.xml`
+   (add a `<release>` entry under `<releases>` — the hook will insert a blank one if missing).
+2. Run:
+   ```sh
+   cargo release <version>
+   ```
+   This will:
+   - Bump `[workspace.package] version` in `Cargo.toml`
+   - Stage the updated metainfo.xml
+   - Commit, tag (`v<version>`), and push to origin
+   - Update the flathub submodule (manifest tag/commit, regenerate `cargo-sources.json`,
+     sync metainfo), commit + push to Flathub, then record the submodule bump in zodia
+
+3. Dry-run first if unsure:
+   ```sh
+   cargo release --dry-run <version>
+   ```
 
 ## Local test build
 
+From the repo root:
 ```sh
-flatpak-builder --user --install --force-clean build-dir io.github.bendik.Zodia.yml
+flatpak-builder --user --install --force-clean build-dir flatpak/flathub/io.github.bendik.Zodia.yml
 flatpak run io.github.bendik.Zodia
 ```
 
-## Flathub submission
+## Manual cargo-sources regeneration
 
-1. Tag the release: `git tag v0.4.0 && git push --tags`
-2. Fill in the commit SHA in the manifest (`commit:` field)
-3. Fork https://github.com/flathub/flathub
-4. Create branch `new-pr/io.github.bendik.Zodia`
-5. Copy `io.github.bendik.Zodia.yml` and `cargo-sources.json` into the branch root
-6. Open a pull request — CI will validate the build automatically
+If you need to regenerate `cargo-sources.json` outside of a release (e.g. after pulling
+a dependency change):
+```sh
+python3 flatpak/flatpak-cargo-generator.py Cargo.lock \
+  -o flatpak/flathub/cargo-sources.json
+```
+Then commit the result inside the submodule and push.
