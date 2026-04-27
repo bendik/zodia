@@ -1,4 +1,4 @@
 publish = false
 tag-name = "v{{version}}"
 pre-release-commit-message = "release: bump to v{{version}}"
-pre-release-hook = ["./scripts/release-prep.sh", "{{version}}"]
+pre-release-hook = ["{{workspace_root}}/scripts/release-prep.sh", "{{version}}"]
