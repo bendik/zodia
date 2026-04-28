@@ -5,7 +5,7 @@
   <project_license>AGPL-3.0-or-later</project_license>
 
   <name>Zodia</name>
-  <summary>Natal charts, transits, and collaborate on crowd-sourced interpretations</summary>
+  <summary>Natal charts, transits &amp; synastry</summary>
 
   <description>
     <p>
@@ -28,6 +28,11 @@
   </description>
 
   <launchable type="desktop-id">io.github.bendik.Zodia.desktop</launchable>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#7b5ea7</color>
+    <color type="primary" scheme_preference="dark">#22174a</color>
+  </branding>
 
   <screenshots>
     <screenshot type="default">
@@ -79,6 +84,12 @@
   </supports>
 
   <releases>
+    <release version="0.4.12" date="2026-04-28">
+      <description>
+        <p>Add brand colors for Flathub; shorten app summary; revert to iroh canary relays; track Cargo.lock for reproducible builds.</p>
+      </description>
+    </release>
+
     <release version="0.4.11" date="2026-04-28">
       <description>
         <p>Updated app screenshots and general maintenance release.</p>
