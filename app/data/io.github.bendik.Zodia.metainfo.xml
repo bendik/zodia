@@ -68,6 +68,16 @@
     <keyword>p2p</keyword>
   </keywords>
 
+  <recommends>
+    <display_length compare="ge">360</display_length>
+  </recommends>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
   <releases>
     <release version="0.4.11" date="2026-04-28">
       <description>
