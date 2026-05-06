@@ -513,6 +513,7 @@ fn kind_str(key: &InterpKey) -> &'static str {
         InterpKey::HouseTransit { .. }   => "house_transit",
         InterpKey::PlacementSign { .. }  => "placement_sign",
         InterpKey::PlacementHouse { .. } => "placement_house",
+        InterpKey::PlacementAngle { .. } => "placement_angle",
     }
 }
 

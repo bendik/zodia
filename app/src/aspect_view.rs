@@ -1,12 +1,12 @@
 //! Aspect + interpretation view.
 //!
-//! `AspectView` is a `SimpleComponent` that renders a list of aspect /
-//! placement / synastry / transit rows (via the `InterpRow` factory) and pushes
-//! a detail page on row activation.  It owns its own `adw::NavigationView`.
+//! `AspectView` is a `SimpleComponent` that renders interpretation rows (via
+//! the `InterpRow` factory) and pushes a multi-tab detail page on row
+//! activation.  It owns its own `adw::NavigationView`.
 //!
-//! Construction goes through [`launch`] which spawns the component, retrieves
-//! the root widget, and detaches the runtime so the caller doesn't need to
-//! hold a `Controller` ref.
+//! The detail page presents one `adw::ViewStack` page per key on the row plus
+//! a synthetic "Combined" page when there are 2+ keys.  Aspects (single key)
+//! get no switcher; placements (sign + house) get [Sign] [House] [Combined].
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,29 +23,24 @@ use zodia_net::InterpEntry;
 use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
-use crate::aspect_list::AspectItem;
+use crate::aspect_list::{AspectItem, KeyEntry};
 use crate::interp_row::{InterpRow, InterpRowInit, InterpRowOut};
 
 // ── public entry point ────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug)]
 pub enum AspectViewKind {
-    /// Natal chart — group title "Aspects", placements preamble.
     Natal,
-    /// Sky / transits — group title "Transits", no preamble.
     Transit,
-    /// Synastry between two charts — group title "Aspects", no preamble.
     Synastry,
 }
 
 pub struct AspectViewInit {
     pub kind:             AspectViewKind,
     pub items:            Vec<AspectItem>,
-    /// Placement rows to render above the aspects group (Natal only).  Ignored
-    /// for other kinds.
+    /// Placement rows rendered above the aspects group (Natal only).
     pub placements_items: Vec<AspectItem>,
-    /// No longer used after PR2 (placements come pre-built from the caller).
-    /// Retained on the type for now in case a later kind needs the chart.
+    /// No longer used after PR2; kept on the type for callers' convenience.
     #[allow(dead_code)]
     pub chart:            Option<Rc<Chart>>,
     pub store:            Rc<RefCell<ZodiaStore>>,
@@ -54,9 +49,8 @@ pub struct AspectViewInit {
     pub parent_sender:    AsyncComponentSender<AppModel>,
 }
 
-/// Convenience: spawn the component, return its root widget, detach the runtime
-/// so the caller doesn't need to hold the `Controller`.  Idiomatic for a child
-/// component embedded in a non-relm4 build function (e.g. `build_widgets`).
+/// Spawn the component and return its root widget; runtime detached so the
+/// caller doesn't have to hold a `Controller`.
 pub fn launch(init: AspectViewInit) -> adw::NavigationView {
     let mut ctl = <AspectView as Component>::builder().launch(init).detach();
     let widget = ctl.widget().clone();
@@ -72,11 +66,8 @@ pub struct AspectView {
     baseline:         Rc<BaselineStore>,
     identity:         Rc<IdentityKeypair>,
     parent_sender:    AsyncComponentSender<AppModel>,
-    /// Aspects factory (always present).  Owned to keep the runtime alive;
-    /// drained via `send` once PR3 wires the reactive `InterpUpdated` path.
     #[allow(dead_code)]
     rows:             FactoryVecDeque<InterpRow>,
-    /// Placements factory (Natal only; empty / unused otherwise).
     #[allow(dead_code)]
     placements_rows:  Option<FactoryVecDeque<InterpRow>>,
 }
@@ -84,7 +75,7 @@ pub struct AspectView {
 #[derive(Debug)]
 pub enum AspectViewMsg {
     OpenDetail {
-        key:             InterpKey,
+        keys:            Vec<KeyEntry>,
         transit_context: Option<String>,
     },
 }
@@ -143,7 +134,7 @@ impl SimpleComponent for AspectView {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        // ── Aspects factory ───────────────────────────────────────────────────
+        // Aspects factory.
         let row_inits: Vec<InterpRowInit> = init.items.iter()
             .map(|it| build_row_init(it, &init.store.borrow(), &init.baseline))
             .collect();
@@ -152,8 +143,8 @@ impl SimpleComponent for AspectView {
         let mut rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
             .launch(adw::PreferencesGroup::new())
             .forward(sender.input_sender(), |out| match out {
-                InterpRowOut::Activate { key, transit_context } =>
-                    AspectViewMsg::OpenDetail { key, transit_context },
+                InterpRowOut::Activate { keys, transit_context } =>
+                    AspectViewMsg::OpenDetail { keys, transit_context },
             });
         {
             let mut g = rows.guard();
@@ -167,7 +158,7 @@ impl SimpleComponent for AspectView {
         let interp_group = rows.widget().clone();
         interp_group.set_title(group_title);
 
-        // ── Placements factory (Natal only) ───────────────────────────────────
+        // Placements factory (Natal only).
         let placements_rows: Option<FactoryVecDeque<InterpRow>> =
             if matches!(init.kind, AspectViewKind::Natal) && !init.placements_items.is_empty() {
                 let p_inits: Vec<InterpRowInit> = init.placements_items.iter()
@@ -176,8 +167,8 @@ impl SimpleComponent for AspectView {
                 let mut p_rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
                     .launch(adw::PreferencesGroup::new())
                     .forward(sender.input_sender(), |out| match out {
-                        InterpRowOut::Activate { key, transit_context } =>
-                            AspectViewMsg::OpenDetail { key, transit_context },
+                        InterpRowOut::Activate { keys, transit_context } =>
+                            AspectViewMsg::OpenDetail { keys, transit_context },
                     });
                 {
                     let mut g = p_rows.guard();
@@ -200,7 +191,6 @@ impl SimpleComponent for AspectView {
         let widgets = view_output!();
         widgets.empty_label.set_visible(items_empty);
 
-        // Prepend placements group above the aspects group.
         if let Some(p_rows) = model.placements_rows.as_ref() {
             widgets.content_box.prepend(p_rows.widget());
         }
@@ -210,9 +200,9 @@ impl SimpleComponent for AspectView {
 
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
-            AspectViewMsg::OpenDetail { key, transit_context } => {
+            AspectViewMsg::OpenDetail { keys, transit_context } => {
                 let page = detail_page(
-                    &key,
+                    &keys,
                     transit_context,
                     Rc::clone(&self.store),
                     Rc::clone(&self.baseline),
@@ -227,13 +217,14 @@ impl SimpleComponent for AspectView {
 
 // ── detail page ───────────────────────────────────────────────────────────────
 
-/// Build the interpretation detail page for `key`.
+/// Build the detail page for a row's keys.
 ///
-/// `transit_context` is an optional human-readable date-range string
-/// (e.g. `"Active: 8 Apr – 16 Apr 2026"`) shown at the top of the page for
-/// transit aspects.  Pass `None` for natal/synastry pages.
+/// - 1 key → no view switcher; the single key's content fills the page.
+/// - 2+ keys → header carries an `adw::ViewSwitcher`; one stack page per key
+///   plus a synthetic "Combined" page that stacks all per-key
+///   Interpretations groups read-only.
 pub fn detail_page(
-    key: &InterpKey,
+    keys: &[KeyEntry],
     transit_context: Option<String>,
     store: Rc<RefCell<ZodiaStore>>,
     baseline: Rc<BaselineStore>,
@@ -241,15 +232,71 @@ pub fn detail_page(
     sender: AsyncComponentSender<AppModel>,
 ) -> adw::NavigationPage {
     let toolbar = adw::ToolbarView::new();
-
-    let header = adw::HeaderBar::new();
+    let header  = adw::HeaderBar::new();
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
-    let title = gtk::Label::new(Some(&key.plain_name()));
-    title.add_css_class("title");
-    header.set_title_widget(Some(&title));
-    toolbar.add_top_bar(&header);
 
+    // Page heading: the first key's plain_name is the most natural title for
+    // both single-key (aspect) and multi-key (placement) rows — placements
+    // lead with the sign reading.
+    let page_title = keys.first()
+        .map(|e| e.key.plain_name())
+        .unwrap_or_default();
+
+    // Build the view stack regardless; if only one key, we hide the switcher
+    // and just show the single page.
+    let stack = adw::ViewStack::new();
+
+    for entry in keys {
+        let page_widget = key_content_page(
+            &entry.key,
+            transit_context.clone(),
+            Rc::clone(&store),
+            Rc::clone(&baseline),
+            Rc::clone(&identity),
+            sender.clone(),
+        );
+        stack.add_titled(&page_widget, Some(&entry.label.to_lowercase()), &entry.label);
+    }
+
+    // Synthetic "Combined" page for 2+ keys.
+    if keys.len() >= 2 {
+        let combined = combined_content_page(
+            keys,
+            transit_context.clone(),
+            &store.borrow(),
+            &baseline,
+        );
+        stack.add_titled(&combined, Some("combined"), "Combined");
+    }
+
+    // Header title widget: switcher when 2+ keys, plain title otherwise.
+    if keys.len() >= 2 {
+        let switcher = adw::ViewSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+        header.set_title_widget(Some(&switcher));
+    } else {
+        let title_lbl = gtk::Label::new(Some(&page_title));
+        title_lbl.add_css_class("title");
+        header.set_title_widget(Some(&title_lbl));
+    }
+
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&stack));
+
+    adw::NavigationPage::new(&toolbar, &page_title)
+}
+
+/// Per-key page content — Interpretations group + Contribute group.
+fn key_content_page(
+    key: &InterpKey,
+    transit_context: Option<String>,
+    store: Rc<RefCell<ZodiaStore>>,
+    baseline: Rc<BaselineStore>,
+    identity: Rc<IdentityKeypair>,
+    sender: AsyncComponentSender<AppModel>,
+) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     scroll.set_vexpand(true);
@@ -263,7 +310,6 @@ pub fn detail_page(
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
 
-    // ── transit timing ────────────────────────────────────────────────────────
     if let Some(ctx) = transit_context {
         let timing_group = adw::PreferencesGroup::new();
         timing_group.set_title("Timing");
@@ -276,13 +322,84 @@ pub fn detail_page(
         content.append(&timing_group);
     }
 
-    // ── existing interpretations ──────────────────────────────────────────────
+    let interp_group = build_interpretations_group(
+        key,
+        &store.borrow(),
+        &baseline,
+        Some(Rc::clone(&identity)),
+        Some(Rc::clone(&store)),
+    );
+    content.append(&interp_group);
 
-    let interp_group = adw::PreferencesGroup::new();
-    interp_group.set_title("Interpretations");
+    let contribute_group = build_contribute_group(
+        key.clone(),
+        Rc::clone(&store),
+        Rc::clone(&identity),
+        sender,
+        interp_group.clone(),
+    );
+    content.append(&contribute_group);
 
-    // Community entries from DB + in-memory baseline appended at the end.
-    let mut existing = store.borrow().all_for_key(key).unwrap_or_default();
+    clamp.set_child(Some(&content));
+    scroll.set_child(Some(&clamp));
+    scroll
+}
+
+/// Synthetic Combined page — stacks the read-only Interpretations group for
+/// each key.  No contribute UI here (contribute happens on the per-key tabs).
+fn combined_content_page(
+    keys: &[KeyEntry],
+    transit_context: Option<String>,
+    store: &ZodiaStore,
+    baseline: &BaselineStore,
+) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_vexpand(true);
+
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(640);
+    clamp.set_margin_top(16);
+    clamp.set_margin_bottom(24);
+    clamp.set_margin_start(16);
+    clamp.set_margin_end(16);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+
+    if let Some(ctx) = transit_context {
+        let timing_group = adw::PreferencesGroup::new();
+        timing_group.set_title("Timing");
+        let timing_row = adw::ActionRow::new();
+        timing_row.set_title(&ctx);
+        timing_group.add(&timing_row);
+        content.append(&timing_group);
+    }
+
+    for entry in keys {
+        let group = build_interpretations_group(&entry.key, store, baseline, None, None);
+        group.set_title(&entry.label);
+        content.append(&group);
+    }
+
+    clamp.set_child(Some(&content));
+    scroll.set_child(Some(&clamp));
+    scroll
+}
+
+/// Build the Interpretations group for `key`.  When `identity` + `store_rc`
+/// are provided, community rows show an active affirm button.  When `None`
+/// (Combined page), affirm is omitted.
+fn build_interpretations_group(
+    key: &InterpKey,
+    store: &ZodiaStore,
+    baseline: &BaselineStore,
+    identity: Option<Rc<IdentityKeypair>>,
+    store_rc: Option<Rc<RefCell<ZodiaStore>>>,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Interpretations");
+
+    let mut existing = store.all_for_key(key).unwrap_or_default();
     if !existing.iter().any(|r| r.is_baseline) {
         if let Some(row) = baseline.row_for_key(key) {
             existing.push(row);
@@ -293,88 +410,96 @@ pub fn detail_page(
         let row = adw::ActionRow::new();
         row.set_title("No interpretations yet");
         row.set_subtitle("Be the first to contribute below.");
-        interp_group.add(&row);
+        group.add(&row);
     } else {
         for row_data in &existing {
-            let interp_row = adw::ActionRow::new();
-            interp_row.set_title(&row_data.body);
-            interp_row.set_subtitle(&if row_data.is_baseline {
+            let r = adw::ActionRow::new();
+            r.set_title(&row_data.body);
+            r.set_subtitle(&if row_data.is_baseline {
                 format!("Baseline  ·  {} ♡", row_data.affirmation_count)
             } else {
                 format!("{} ♡  ·  community", row_data.affirmation_count)
             });
 
-            let affirm_btn = gtk::Button::from_icon_name("emblem-favorite-symbolic");
-            affirm_btn.add_css_class("flat");
-            affirm_btn.set_valign(gtk::Align::Center);
-
-            if row_data.is_baseline {
-                affirm_btn.set_sensitive(false);
-                affirm_btn.set_tooltip_text(Some("Baseline — not affirmable"));
-            } else {
-                affirm_btn.set_tooltip_text(Some("Affirm this interpretation"));
-                let store_c = Rc::clone(&store);
-                let identity_c = Rc::clone(&identity);
-                let log_id = row_data.log_id;
-                let row_ref = interp_row.clone();
-                affirm_btn.connect_clicked(move |_| {
-                    let author_pk = identity_c.public_key();
-                    if let Ok(true) = store_c.borrow().affirm(&log_id, &author_pk) {
-                        if let Ok(n) = store_c.borrow().affirmation_count(&log_id) {
-                            row_ref.set_subtitle(&format!("{n} ♡  ·  affirmed"));
+            if let (Some(ident), Some(st)) = (identity.as_ref(), store_rc.as_ref()) {
+                let affirm_btn = gtk::Button::from_icon_name("emblem-favorite-symbolic");
+                affirm_btn.add_css_class("flat");
+                affirm_btn.set_valign(gtk::Align::Center);
+                if row_data.is_baseline {
+                    affirm_btn.set_sensitive(false);
+                    affirm_btn.set_tooltip_text(Some("Baseline — not affirmable"));
+                } else {
+                    affirm_btn.set_tooltip_text(Some("Affirm this interpretation"));
+                    let store_c    = Rc::clone(st);
+                    let identity_c = Rc::clone(ident);
+                    let log_id     = row_data.log_id;
+                    let row_ref    = r.clone();
+                    affirm_btn.connect_clicked(move |_| {
+                        let author_pk = identity_c.public_key();
+                        if let Ok(true) = store_c.borrow().affirm(&log_id, &author_pk) {
+                            if let Ok(n) = store_c.borrow().affirmation_count(&log_id) {
+                                row_ref.set_subtitle(&format!("{n} ♡  ·  affirmed"));
+                            }
                         }
-                    }
-                });
+                    });
+                }
+                r.add_suffix(&affirm_btn);
             }
 
-            interp_row.add_suffix(&affirm_btn);
-            interp_group.add(&interp_row);
+            group.add(&r);
         }
     }
 
-    content.append(&interp_group);
+    group
+}
 
-    // ── contribute ────────────────────────────────────────────────────────────
+/// Build the Contribute group for `key`.  Submitting appends a new row to
+/// `interp_group` so the user sees their addition without re-rendering.
+fn build_contribute_group(
+    key: InterpKey,
+    store: Rc<RefCell<ZodiaStore>>,
+    identity: Rc<IdentityKeypair>,
+    sender: AsyncComponentSender<AppModel>,
+    interp_group: adw::PreferencesGroup,
+) -> gtk::Box {
+    let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 4);
 
-    let contribute_group = adw::PreferencesGroup::new();
-    contribute_group.set_title("Contribute");
-    contribute_group.set_description(Some(
-        "Optional — add your own reading if you have one.",
-    ));
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Contribute");
+    group.set_description(Some("Optional — add your own reading if you have one."));
 
     let entry = adw::EntryRow::new();
     entry.set_title("Your interpretation…");
-    contribute_group.add(&entry);
-    content.append(&contribute_group);
+    group.add(&entry);
+    wrapper.append(&group);
 
     let submit = gtk::Button::with_label("Share");
     submit.add_css_class("flat");
     submit.set_halign(gtk::Align::End);
     submit.set_margin_top(4);
 
-    let store_c = Rc::clone(&store);
+    let store_c    = Rc::clone(&store);
     let identity_c = Rc::clone(&identity);
-    let entry_c = entry.clone();
-    let key_c = key.clone();
-    let group_c = interp_group.clone();
-    let sender_c = sender.clone();
+    let entry_c    = entry.clone();
+    let group_c    = interp_group.clone();
+    let sender_c   = sender.clone();
     submit.connect_clicked(move |_| {
-        let text = entry_c.text().to_string();
+        let text    = entry_c.text().to_string();
         let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let payload = ZodiaStore::signing_payload(&key_c, trimmed);
+        if trimmed.is_empty() { return; }
+        let payload    = ZodiaStore::signing_payload(&key, trimmed);
         let author_sig = identity_c.sign(&payload);
-        let author_pk = identity_c.public_key();
-        if let Ok(_log_id) = store_c.borrow().insert_signed(&key_c, trimmed, &author_pk, &author_sig) {
+        let author_pk  = identity_c.public_key();
+        if let Ok(_log_id) = store_c.borrow()
+            .insert_signed(&key, trimmed, &author_pk, &author_sig)
+        {
             let new_row = adw::ActionRow::new();
             new_row.set_title(trimmed);
             new_row.set_subtitle("0 ♡  ·  community (just added)");
             group_c.add(&new_row);
             entry_c.set_text("");
             sender_c.input(AppMsg::ShareInterp(InterpEntry {
-                interp_key: key_c.to_sig(),
+                interp_key: key.to_sig(),
                 body: trimmed.to_string(),
                 author_pk,
                 author_sig: author_sig.to_vec(),
@@ -382,12 +507,8 @@ pub fn detail_page(
         }
     });
 
-    content.append(&submit);
-    clamp.set_child(Some(&content));
-    scroll.set_child(Some(&clamp));
-    toolbar.set_content(Some(&scroll));
-
-    adw::NavigationPage::new(&toolbar, &key.plain_name())
+    wrapper.append(&submit);
+    wrapper
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -399,15 +520,20 @@ fn resolve_top_body(store: &ZodiaStore, baseline: &BaselineStore, key: &InterpKe
         .unwrap_or_default()
 }
 
-/// Convert an `AspectItem` into the factory's `InterpRowInit`, resolving the
-/// best available body preview from the community store + baseline.
+/// Convert an `AspectItem` into the factory's `InterpRowInit`.  Body preview is
+/// the first non-empty body across the row's keys (so a placement row shows
+/// whichever of sign/house has content).
 fn build_row_init(it: &AspectItem, store: &ZodiaStore, baseline: &BaselineStore) -> InterpRowInit {
+    let body_preview = it.keys.iter()
+        .map(|e| resolve_top_body(store, baseline, &e.key))
+        .find(|b| !b.is_empty())
+        .unwrap_or_default();
     InterpRowInit {
-        key:             it.key.clone(),
-        title:           it.key.plain_name(),
+        keys:            it.keys.clone(),
+        title:           it.title.clone(),
         symbol_line:     Some(it.symbol_line.clone()),
         meta_line:       it.meta_line.clone(),
         transit_context: it.transit_context.clone(),
-        body_preview:    resolve_top_body(store, baseline, &it.key),
+        body_preview,
     }
 }

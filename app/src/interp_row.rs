@@ -1,40 +1,42 @@
-//! Factory component for a single interpretation row inside an `AspectView`.
+//! Factory component for a single aggregate interpretation row.
 //!
-//! Used uniformly for natal aspects, transit aspects, synastry aspects and
-//! (in PR2) placement variants — anything keyed by an `InterpKey`.  The row
-//! shows a title, an optional glyph suffix, and a body preview pulled from the
-//! community store with baseline fallback.  Tapping the row outputs
-//! `Activate { key, transit_context }` which the parent `AspectView` translates
-//! into a `nav.push(detail_page(...))`.
+//! Each row carries one or more `KeyEntry` items.  Aspects emit one entry; a
+//! planet placement emits two (sign + house); an angle placement emits one.
+//! Tapping the row outputs `Activate { keys, transit_context }` which the
+//! parent `AspectView` forwards to a multi-tab detail page.
+//!
+//! Subtitle preview is the first non-empty body across the row's keys, so a
+//! placement row shows whichever of sign/house has the most content.
 
 use libadwaita as adw;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
 use relm4::factory::{DynamicIndex, FactoryComponent, FactorySender};
 
-use zodia_core::InterpKey;
+use crate::aspect_list::KeyEntry;
 
 // ── init data ─────────────────────────────────────────────────────────────────
 
 pub struct InterpRowInit {
-    pub key:             InterpKey,
-    /// Plain-English row title, e.g. "Jupiter trine Venus".
+    /// One or more keys for this row's detail tabs.
+    pub keys:            Vec<KeyEntry>,
+    /// Plain-English row title, e.g. "Jupiter trine Venus" or "Jupiter in Virgo · House 9".
     pub title:           String,
-    /// Top suffix line — compact glyph string, e.g. "☽ △ ♀".
+    /// Top suffix line — compact glyph string.
     pub symbol_line:     Option<String>,
     /// Bottom suffix line — orb / metadata, stacked under `symbol_line`.
     pub meta_line:       Option<String>,
-    /// Optional date-range context for transit aspects, propagated into the
-    /// detail page so it can show "Active: 8 Apr – 16 Apr 2026".
+    /// Optional date-range context for transit aspects.
     pub transit_context: Option<String>,
-    /// Top-body preview for the subtitle.  Empty string → "No interpretation
-    /// yet — tap to contribute".
+    /// Top-body preview for the subtitle.  Empty → "No interpretation yet —
+    /// tap to contribute".
     pub body_preview:    String,
 }
 
 impl std::fmt::Debug for InterpRowInit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "InterpRowInit({})", self.key.to_sig())
+        let sigs: Vec<String> = self.keys.iter().map(|e| e.key.to_sig()).collect();
+        write!(f, "InterpRowInit({})", sigs.join(" + "))
     }
 }
 
@@ -50,7 +52,7 @@ pub enum InterpRowMsg {
 #[derive(Debug)]
 pub enum InterpRowOut {
     Activate {
-        key:             InterpKey,
+        keys:            Vec<KeyEntry>,
         transit_context: Option<String>,
     },
 }
@@ -58,7 +60,7 @@ pub enum InterpRowOut {
 // ── model ─────────────────────────────────────────────────────────────────────
 
 pub struct InterpRow {
-    pub key:             InterpKey,
+    pub keys:            Vec<KeyEntry>,
     pub title:           String,
     pub symbol_line:     Option<String>,
     pub meta_line:       Option<String>,
@@ -102,7 +104,7 @@ impl FactoryComponent for InterpRow {
 
     fn init_model(init: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
         Self {
-            key:             init.key,
+            keys:            init.keys,
             title:           init.title,
             symbol_line:     init.symbol_line,
             meta_line:       init.meta_line,
@@ -127,8 +129,6 @@ impl FactoryComponent for InterpRow {
         _returned_widget: &gtk::Widget,
         sender: FactorySender<Self>,
     ) -> Self::Widgets {
-        // Suffix box stacks the symbol line on top of the orb / meta line so the
-        // row's title + subtitle have full width to breathe.
         let suffix_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         suffix_box.set_valign(gtk::Align::Center);
 
@@ -147,18 +147,16 @@ impl FactoryComponent for InterpRow {
         suffix_box.append(&meta_lbl);
 
         root.add_suffix(&suffix_box);
-
-        // Trailing chevron.
         root.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
 
-        // Activation → output.
+        // Activation → output (clones the keys vec each tap; cheap for ≤4 entries).
         {
-            let key             = self.key.clone();
+            let keys            = self.keys.clone();
             let transit_context = self.transit_context.clone();
             let s               = sender.clone();
             root.connect_activated(move |_| {
                 let _ = s.output(InterpRowOut::Activate {
-                    key:             key.clone(),
+                    keys:            keys.clone(),
                     transit_context: transit_context.clone(),
                 });
             });
@@ -169,7 +167,7 @@ impl FactoryComponent for InterpRow {
 
     fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
         let InterpRowMsg::Update(init) = msg;
-        self.key             = init.key;
+        self.keys            = init.keys;
         self.title           = init.title;
         self.symbol_line     = init.symbol_line;
         self.meta_line       = init.meta_line;

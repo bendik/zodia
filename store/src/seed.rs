@@ -44,6 +44,8 @@ pub struct BaselineData {
     pub placement_sign:  HashMap<String, String>,
     #[serde(default)]
     pub placement_house: HashMap<String, String>,
+    #[serde(default)]
+    pub placement_angle: HashMap<String, String>,
 }
 
 impl BaselineData {
@@ -74,6 +76,7 @@ impl BaselineStore {
         for (k, v) in &data.house_transit   { map.insert(format!("house_transit:{k}"),   v.clone()); }
         for (k, v) in &data.placement_sign  { map.insert(format!("placement_sign:{k}"),  v.clone()); }
         for (k, v) in &data.placement_house { map.insert(format!("placement_house:{k}"), v.clone()); }
+        for (k, v) in &data.placement_angle { map.insert(format!("placement_angle:{k}"), v.clone()); }
         Self { map }
     }
 

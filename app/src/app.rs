@@ -1427,6 +1427,7 @@ fn format_interp_key(key: &str) -> (String, String) {
         "house_transit"   => "House transit",
         "placement_sign"  => "Placement (sign)",
         "placement_house" => "Placement (house)",
+        "placement_angle" => "Placement (angle)",
         other             => other,
     };
     let desc = rest.replace('_', " ");

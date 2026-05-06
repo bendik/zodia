@@ -25,6 +25,32 @@ pub enum InterpKind {
     PlacementSign,
     /// Natal planet's house placement (e.g. "Jupiter in house 9")
     PlacementHouse,
+    /// Sign placement of an angle (Ascendant or Midheaven)
+    PlacementAngle,
+}
+
+/// Chart angle — Ascendant (rising) or Midheaven (culminating).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Angle {
+    Ascendant,
+    Midheaven,
+}
+
+impl Angle {
+    /// Lowercase short tag used in canonical sigs: `"asc"` / `"mc"`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Angle::Ascendant => "asc",
+            Angle::Midheaven => "mc",
+        }
+    }
+    /// Display name for plain_name and UI.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Angle::Ascendant => "Ascendant",
+            Angle::Midheaven => "Midheaven",
+        }
+    }
 }
 
 /// Fully qualified key for a community interpretation entry.
@@ -65,6 +91,11 @@ pub enum InterpKey {
         /// Natal house number (1–12)
         house:  u8,
     },
+    PlacementAngle {
+        angle: Angle,
+        /// Sign index 0..11.
+        sign:  u8,
+    },
 }
 
 /// Lowercase sign name for sig encoding — `"aries"`..`"pisces"`.
@@ -91,6 +122,8 @@ impl InterpKey {
                 format!("placement_sign:{}:{}", planet.name(), sign_name_lower(*sign)),
             Self::PlacementHouse { planet, house } =>
                 format!("placement_house:{}:{house}", planet.name()),
+            Self::PlacementAngle { angle, sign } =>
+                format!("placement_angle:{}:{}", angle.tag(), sign_name_lower(*sign)),
         }
     }
 
@@ -102,6 +135,7 @@ impl InterpKey {
             Self::HouseTransit { .. }      => InterpKind::HouseTransit,
             Self::PlacementSign  { .. }    => InterpKind::PlacementSign,
             Self::PlacementHouse { .. }    => InterpKind::PlacementHouse,
+            Self::PlacementAngle { .. }    => InterpKind::PlacementAngle,
         }
     }
 
@@ -139,6 +173,9 @@ impl InterpKey {
             }
             Self::PlacementHouse { planet, house } => {
                 format!("{} in House {house}", cap(planet.name()))
+            }
+            Self::PlacementAngle { angle, sign } => {
+                format!("{} in {}", angle.display_name(), cap(sign_name_lower(*sign)))
             }
         }
     }
