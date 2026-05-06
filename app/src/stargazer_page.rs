@@ -69,22 +69,24 @@ pub fn build_stargazer_page(
     // Their Chart tab
     let their_av = match &their_chart {
         Some(chart) => crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
-            kind:          crate::aspect_view::AspectViewKind::Natal,
-            items:         natal_items(&chart.natal_aspects()),
-            chart:         Some(Rc::new(chart.clone())),
-            store:         Rc::clone(&store),
-            baseline:      Rc::clone(&baseline),
-            identity:      Rc::clone(&identity),
-            parent_sender: sender.clone(),
+            kind:             crate::aspect_view::AspectViewKind::Natal,
+            items:            natal_items(&chart.natal_aspects()),
+            placements_items: crate::placements::placement_items(chart),
+            chart:            None,
+            store:            Rc::clone(&store),
+            baseline:         Rc::clone(&baseline),
+            identity:         Rc::clone(&identity),
+            parent_sender:    sender.clone(),
         }),
         None => crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
-            kind:          crate::aspect_view::AspectViewKind::Synastry,
-            items:         vec![],
-            chart:         None,
-            store:         Rc::clone(&store),
-            baseline:      Rc::clone(&baseline),
-            identity:      Rc::clone(&identity),
-            parent_sender: sender.clone(),
+            kind:             crate::aspect_view::AspectViewKind::Synastry,
+            items:            vec![],
+            placements_items: vec![],
+            chart:             None,
+            store:            Rc::clone(&store),
+            baseline:         Rc::clone(&baseline),
+            identity:         Rc::clone(&identity),
+            parent_sender:    sender.clone(),
         }),
     };
     their_av.set_vexpand(true);
@@ -98,13 +100,14 @@ pub fn build_stargazer_page(
 
     // Synastry tab
     let syn_av = crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
-        kind:          crate::aspect_view::AspectViewKind::Synastry,
-        items:         synastry_items(&synastry),
-        chart:         None,
-        store:         Rc::clone(&store),
-        baseline:      Rc::clone(&baseline),
-        identity:      Rc::clone(&identity),
-        parent_sender: sender.clone(),
+        kind:             crate::aspect_view::AspectViewKind::Synastry,
+        items:            synastry_items(&synastry),
+        placements_items: vec![],
+        chart:            None,
+        store:            Rc::clone(&store),
+        baseline:         Rc::clone(&baseline),
+        identity:         Rc::clone(&identity),
+        parent_sender:    sender.clone(),
     });
     syn_av.set_vexpand(true);
     let syn_page = view_stack.add_titled(&syn_av, Some("synastry"), "Synastry");

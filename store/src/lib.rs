@@ -507,10 +507,12 @@ fn derive_log_id(a: &str, b: &str) -> [u8; 32] {
 
 fn kind_str(key: &InterpKey) -> &'static str {
     match key {
-        InterpKey::Natal { .. }        => "natal",
-        InterpKey::Synastry { .. }     => "synastry",
-        InterpKey::Transit { .. }      => "transit",
-        InterpKey::HouseTransit { .. } => "house_transit",
+        InterpKey::Natal { .. }          => "natal",
+        InterpKey::Synastry { .. }       => "synastry",
+        InterpKey::Transit { .. }        => "transit",
+        InterpKey::HouseTransit { .. }   => "house_transit",
+        InterpKey::PlacementSign { .. }  => "placement_sign",
+        InterpKey::PlacementHouse { .. } => "placement_house",
     }
 }
 

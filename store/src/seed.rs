@@ -20,21 +20,30 @@ use crate::StoreError;
 ///
 /// [house_transit]
 /// "saturn:7" = "Relationships are being held to account…"
+///
+/// [placement_sign]
+/// "jupiter:virgo" = "Practical optimism — abundance through diligent care…"
+///
+/// [placement_house]
+/// "jupiter:9" = "Belief expands through travel, study, and far horizons…"
 /// ```
 ///
 /// Keys within each section are the *discriminator* portion of the sig
-/// (without the leading `"natal:"` / `"transit:"` / `"house_transit:"` prefix
-/// that `InterpKey::to_sig()` adds).
+/// (without the leading prefix that `InterpKey::to_sig()` adds).
 #[derive(Debug, Deserialize)]
 pub struct BaselineData {
     #[serde(default)]
-    pub natal:         HashMap<String, String>,
+    pub natal:           HashMap<String, String>,
     #[serde(default)]
-    pub synastry:      HashMap<String, String>,
+    pub synastry:        HashMap<String, String>,
     #[serde(default)]
-    pub transit:       HashMap<String, String>,
+    pub transit:         HashMap<String, String>,
     #[serde(default)]
-    pub house_transit: HashMap<String, String>,
+    pub house_transit:   HashMap<String, String>,
+    #[serde(default)]
+    pub placement_sign:  HashMap<String, String>,
+    #[serde(default)]
+    pub placement_house: HashMap<String, String>,
 }
 
 impl BaselineData {
@@ -59,10 +68,12 @@ impl BaselineStore {
     /// Build from parsed TOML data. O(n), allocates once at startup.
     pub fn from_data(data: &BaselineData) -> Self {
         let mut map = HashMap::new();
-        for (k, v) in &data.natal         { map.insert(format!("natal:{k}"),         v.clone()); }
-        for (k, v) in &data.synastry      { map.insert(format!("synastry:{k}"),      v.clone()); }
-        for (k, v) in &data.transit       { map.insert(format!("transit:{k}"),       v.clone()); }
-        for (k, v) in &data.house_transit { map.insert(format!("house_transit:{k}"), v.clone()); }
+        for (k, v) in &data.natal           { map.insert(format!("natal:{k}"),           v.clone()); }
+        for (k, v) in &data.synastry        { map.insert(format!("synastry:{k}"),        v.clone()); }
+        for (k, v) in &data.transit         { map.insert(format!("transit:{k}"),         v.clone()); }
+        for (k, v) in &data.house_transit   { map.insert(format!("house_transit:{k}"),   v.clone()); }
+        for (k, v) in &data.placement_sign  { map.insert(format!("placement_sign:{k}"),  v.clone()); }
+        for (k, v) in &data.placement_house { map.insert(format!("placement_house:{k}"), v.clone()); }
         Self { map }
     }
 

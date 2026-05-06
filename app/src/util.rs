@@ -21,16 +21,6 @@ pub fn sign_glyph(solar_month: u8) -> &'static str {
     SIGNS.get(solar_month as usize % 12).copied().unwrap_or("?")
 }
 
-/// Zodiac sign name from a sign index (0 = Aries … 11 = Pisces).
-pub fn sign_name(idx: u8) -> &'static str {
-    const NAMES: [&str; 12] = [
-        "Aries", "Taurus", "Gemini", "Cancer",
-        "Leo", "Virgo", "Libra", "Scorpio",
-        "Sagittarius", "Capricorn", "Aquarius", "Pisces",
-    ];
-    NAMES.get(idx as usize % 12).copied().unwrap_or("?")
-}
-
 /// Ecliptic longitude → (sign_index 0–11, formatted degree string "17°23′").
 pub fn lon_to_sign_deg(lon: f64) -> (u8, String) {
     let lon = lon.rem_euclid(360.0);

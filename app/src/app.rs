@@ -1068,33 +1068,34 @@ impl AsyncComponent for AppModel {
 
         if !self.on_setup_page && widgets.chart_container.first_child().is_none() {
             if let Some(chart) = &self.chart {
-                let chart_rc = Rc::new(chart.clone());
                 let nav = aspect_view::launch(aspect_view::AspectViewInit {
-                    kind:          aspect_view::AspectViewKind::Natal,
-                    items:         aspect_list::natal_items(&chart.natal_aspects()),
-                    chart:         Some(Rc::clone(&chart_rc)),
-                    store:         Rc::clone(&self.store),
-                    baseline:      Rc::clone(&self.baseline),
-                    identity:      Rc::clone(&self.identity),
-                    parent_sender: sender.clone(),
+                    kind:             aspect_view::AspectViewKind::Natal,
+                    items:            aspect_list::natal_items(&chart.natal_aspects()),
+                    placements_items: crate::placements::placement_items(chart),
+                    chart:            None,
+                    store:            Rc::clone(&self.store),
+                    baseline:         Rc::clone(&self.baseline),
+                    identity:         Rc::clone(&self.identity),
+                    parent_sender:    sender.clone(),
                 });
                 nav.set_vexpand(true);
                 widgets.chart_container.append(&nav);
 
                 if let Ok(ts) = chart.transits_at(current_jdn()) {
                     let tav = aspect_view::launch(aspect_view::AspectViewInit {
-                        kind:          aspect_view::AspectViewKind::Transit,
-                        items:         aspect_list::transit_items(
+                        kind:             aspect_view::AspectViewKind::Transit,
+                        items:            aspect_list::transit_items(
                             &ts.transit_aspects,
                             &ts.house_transits,
                             &chart.positions,
                             ts.transit_jdn,
                         ),
-                        chart:         None,
-                        store:         Rc::clone(&self.store),
-                        baseline:      Rc::clone(&self.baseline),
-                        identity:      Rc::clone(&self.identity),
-                        parent_sender: sender.clone(),
+                        placements_items: vec![],
+                        chart:            None,
+                        store:            Rc::clone(&self.store),
+                        baseline:         Rc::clone(&self.baseline),
+                        identity:         Rc::clone(&self.identity),
+                        parent_sender:    sender.clone(),
                     });
                     tav.set_vexpand(true);
                     widgets.sky_container.append(&tav);
@@ -1420,11 +1421,13 @@ fn sync_peers_factory(model: &mut AppModel) {
 fn format_interp_key(key: &str) -> (String, String) {
     let (kind, rest) = key.split_once(':').unwrap_or(("", key));
     let kind_label = match kind {
-        "natal"         => "Natal",
-        "synastry"      => "Synastry",
-        "transit"       => "Transit",
-        "house_transit" => "House transit",
-        other           => other,
+        "natal"           => "Natal",
+        "synastry"        => "Synastry",
+        "transit"         => "Transit",
+        "house_transit"   => "House transit",
+        "placement_sign"  => "Placement (sign)",
+        "placement_house" => "Placement (house)",
+        other             => other,
     };
     let desc = rest.replace('_', " ");
     // Capitalise first character only.
@@ -1781,33 +1784,34 @@ fn build_widgets(
 
     // Populate aspect views for returning users with an existing chart.
     if let Some(chart) = &model.chart {
-        let chart_rc = Rc::new(chart.clone());
         let nav = aspect_view::launch(aspect_view::AspectViewInit {
-            kind:          aspect_view::AspectViewKind::Natal,
-            items:         aspect_list::natal_items(&chart.natal_aspects()),
-            chart:         Some(Rc::clone(&chart_rc)),
-            store:         Rc::clone(&model.store),
-            baseline:      Rc::clone(&model.baseline),
-            identity:      Rc::clone(&model.identity),
-            parent_sender: sender.clone(),
+            kind:             aspect_view::AspectViewKind::Natal,
+            items:            aspect_list::natal_items(&chart.natal_aspects()),
+            placements_items: crate::placements::placement_items(chart),
+            chart:            None,
+            store:            Rc::clone(&model.store),
+            baseline:         Rc::clone(&model.baseline),
+            identity:         Rc::clone(&model.identity),
+            parent_sender:    sender.clone(),
         });
         nav.set_vexpand(true);
         chart_container.append(&nav);
 
         if let Ok(ts) = chart.transits_at(current_jdn()) {
             let tav = aspect_view::launch(aspect_view::AspectViewInit {
-                kind:          aspect_view::AspectViewKind::Transit,
-                items:         aspect_list::transit_items(
+                kind:             aspect_view::AspectViewKind::Transit,
+                items:            aspect_list::transit_items(
                     &ts.transit_aspects,
                     &ts.house_transits,
                     &chart.positions,
                     ts.transit_jdn,
                 ),
-                chart:         None,
-                store:         Rc::clone(&model.store),
-                baseline:      Rc::clone(&model.baseline),
-                identity:      Rc::clone(&model.identity),
-                parent_sender: sender.clone(),
+                placements_items: vec![],
+                chart:            None,
+                store:            Rc::clone(&model.store),
+                baseline:         Rc::clone(&model.baseline),
+                identity:         Rc::clone(&model.identity),
+                parent_sender:    sender.clone(),
             });
             tav.set_vexpand(true);
             sky_container.append(&tav);

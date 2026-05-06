@@ -39,14 +39,19 @@ pub enum AspectViewKind {
 }
 
 pub struct AspectViewInit {
-    pub kind:          AspectViewKind,
-    pub items:         Vec<AspectItem>,
-    /// Required when `kind == Natal` for the placements preamble; ignored otherwise.
-    pub chart:         Option<Rc<Chart>>,
-    pub store:         Rc<RefCell<ZodiaStore>>,
-    pub baseline:      Rc<BaselineStore>,
-    pub identity:      Rc<IdentityKeypair>,
-    pub parent_sender: AsyncComponentSender<AppModel>,
+    pub kind:             AspectViewKind,
+    pub items:            Vec<AspectItem>,
+    /// Placement rows to render above the aspects group (Natal only).  Ignored
+    /// for other kinds.
+    pub placements_items: Vec<AspectItem>,
+    /// No longer used after PR2 (placements come pre-built from the caller).
+    /// Retained on the type for now in case a later kind needs the chart.
+    #[allow(dead_code)]
+    pub chart:            Option<Rc<Chart>>,
+    pub store:            Rc<RefCell<ZodiaStore>>,
+    pub baseline:         Rc<BaselineStore>,
+    pub identity:         Rc<IdentityKeypair>,
+    pub parent_sender:    AsyncComponentSender<AppModel>,
 }
 
 /// Convenience: spawn the component, return its root widget, detach the runtime
@@ -62,15 +67,18 @@ pub fn launch(init: AspectViewInit) -> adw::NavigationView {
 // ── component ─────────────────────────────────────────────────────────────────
 
 pub struct AspectView {
-    nav:           adw::NavigationView,
-    store:         Rc<RefCell<ZodiaStore>>,
-    baseline:      Rc<BaselineStore>,
-    identity:      Rc<IdentityKeypair>,
-    parent_sender: AsyncComponentSender<AppModel>,
-    /// Owned to keep the factory's runtime alive; drained via `send` once PR3
-    /// wires the reactive `InterpUpdated` path.
+    nav:              adw::NavigationView,
+    store:            Rc<RefCell<ZodiaStore>>,
+    baseline:         Rc<BaselineStore>,
+    identity:         Rc<IdentityKeypair>,
+    parent_sender:    AsyncComponentSender<AppModel>,
+    /// Aspects factory (always present).  Owned to keep the runtime alive;
+    /// drained via `send` once PR3 wires the reactive `InterpUpdated` path.
     #[allow(dead_code)]
-    rows:          FactoryVecDeque<InterpRow>,
+    rows:             FactoryVecDeque<InterpRow>,
+    /// Placements factory (Natal only; empty / unused otherwise).
+    #[allow(dead_code)]
+    placements_rows:  Option<FactoryVecDeque<InterpRow>>,
 }
 
 #[derive(Debug)]
@@ -135,20 +143,12 @@ impl SimpleComponent for AspectView {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        // Resolve top-body previews and convert AspectItems into factory inits.
+        // ── Aspects factory ───────────────────────────────────────────────────
         let row_inits: Vec<InterpRowInit> = init.items.iter()
-            .map(|it| InterpRowInit {
-                key:             it.key.clone(),
-                title:           it.key.plain_name(),
-                symbol_line:     Some(it.symbol_line.clone()),
-                meta_line:       it.meta_line.clone(),
-                transit_context: it.transit_context.clone(),
-                body_preview:    resolve_top_body(&init.store.borrow(), &init.baseline, &it.key),
-            })
+            .map(|it| build_row_init(it, &init.store.borrow(), &init.baseline))
             .collect();
         let items_empty = row_inits.is_empty();
 
-        // Spawn the row factory; forward Activate → AspectViewMsg::OpenDetail.
         let mut rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
             .launch(adw::PreferencesGroup::new())
             .forward(sender.input_sender(), |out| match out {
@@ -160,13 +160,32 @@ impl SimpleComponent for AspectView {
             for ri in row_inits { g.push_back(ri); }
         }
 
-        // Group title differs per kind.
         let group_title = match init.kind {
             AspectViewKind::Natal | AspectViewKind::Synastry => "Aspects",
             AspectViewKind::Transit                          => "Transits",
         };
         let interp_group = rows.widget().clone();
         interp_group.set_title(group_title);
+
+        // ── Placements factory (Natal only) ───────────────────────────────────
+        let placements_rows: Option<FactoryVecDeque<InterpRow>> =
+            if matches!(init.kind, AspectViewKind::Natal) && !init.placements_items.is_empty() {
+                let p_inits: Vec<InterpRowInit> = init.placements_items.iter()
+                    .map(|it| build_row_init(it, &init.store.borrow(), &init.baseline))
+                    .collect();
+                let mut p_rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
+                    .launch(adw::PreferencesGroup::new())
+                    .forward(sender.input_sender(), |out| match out {
+                        InterpRowOut::Activate { key, transit_context } =>
+                            AspectViewMsg::OpenDetail { key, transit_context },
+                    });
+                {
+                    let mut g = p_rows.guard();
+                    for ri in p_inits { g.push_back(ri); }
+                }
+                p_rows.widget().set_title("Placements");
+                Some(p_rows)
+            } else { None };
 
         let model = AspectView {
             nav: root.clone(),
@@ -175,15 +194,15 @@ impl SimpleComponent for AspectView {
             identity:      init.identity,
             parent_sender: init.parent_sender,
             rows,
+            placements_rows,
         };
 
         let widgets = view_output!();
         widgets.empty_label.set_visible(items_empty);
 
-        // Natal kind: prepend the placements group above the interp_group.
-        if let (AspectViewKind::Natal, Some(chart)) = (init.kind, init.chart.as_ref()) {
-            let placements = crate::placements::build_placements_group(chart);
-            widgets.content_box.prepend(&placements);
+        // Prepend placements group above the aspects group.
+        if let Some(p_rows) = model.placements_rows.as_ref() {
+            widgets.content_box.prepend(p_rows.widget());
         }
 
         ComponentParts { model, widgets }
@@ -378,4 +397,17 @@ fn resolve_top_body(store: &ZodiaStore, baseline: &BaselineStore, key: &InterpKe
     store.top_body(key).ok().flatten()
         .or_else(|| baseline.lookup(key).map(str::to_owned))
         .unwrap_or_default()
+}
+
+/// Convert an `AspectItem` into the factory's `InterpRowInit`, resolving the
+/// best available body preview from the community store + baseline.
+fn build_row_init(it: &AspectItem, store: &ZodiaStore, baseline: &BaselineStore) -> InterpRowInit {
+    InterpRowInit {
+        key:             it.key.clone(),
+        title:           it.key.plain_name(),
+        symbol_line:     Some(it.symbol_line.clone()),
+        meta_line:       it.meta_line.clone(),
+        transit_context: it.transit_context.clone(),
+        body_preview:    resolve_top_body(store, baseline, &it.key),
+    }
 }

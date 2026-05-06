@@ -21,6 +21,10 @@ pub enum InterpKind {
     Transit,
     /// Transiting planet occupying a natal house
     HouseTransit,
+    /// Natal planet's sign placement (e.g. "Jupiter in Virgo")
+    PlacementSign,
+    /// Natal planet's house placement (e.g. "Jupiter in house 9")
+    PlacementHouse,
 }
 
 /// Fully qualified key for a community interpretation entry.
@@ -30,6 +34,8 @@ pub enum InterpKind {
 /// - `"synastry:jupiter_trine_venus"`
 /// - `"transit:saturn_square_natal_venus"`
 /// - `"house_transit:saturn:7"`
+/// - `"placement_sign:jupiter:virgo"`
+/// - `"placement_house:jupiter:9"`
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InterpKey {
     Natal {
@@ -49,6 +55,26 @@ pub enum InterpKey {
         /// Natal house number (1–12)
         house: u8,
     },
+    PlacementSign {
+        planet: Planet,
+        /// Sign index 0..11 (Aries..Pisces).
+        sign:   u8,
+    },
+    PlacementHouse {
+        planet: Planet,
+        /// Natal house number (1–12)
+        house:  u8,
+    },
+}
+
+/// Lowercase sign name for sig encoding — `"aries"`..`"pisces"`.
+pub fn sign_name_lower(idx: u8) -> &'static str {
+    const NAMES: [&str; 12] = [
+        "aries", "taurus", "gemini", "cancer",
+        "leo", "virgo", "libra", "scorpio",
+        "sagittarius", "capricorn", "aquarius", "pisces",
+    ];
+    NAMES.get(idx as usize % 12).copied().unwrap_or("?")
 }
 
 impl InterpKey {
@@ -61,15 +87,21 @@ impl InterpKey {
                 format!("transit:{}_{}_{}", transiting.name(), kind.name(), natal_body.name()),
             Self::HouseTransit { transiting, house } =>
                 format!("house_transit:{}:{house}", transiting.name()),
+            Self::PlacementSign  { planet, sign } =>
+                format!("placement_sign:{}:{}", planet.name(), sign_name_lower(*sign)),
+            Self::PlacementHouse { planet, house } =>
+                format!("placement_house:{}:{house}", planet.name()),
         }
     }
 
     pub fn kind(&self) -> InterpKind {
         match self {
-            Self::Natal       { .. } => InterpKind::Natal,
-            Self::Synastry    { .. } => InterpKind::Synastry,
-            Self::Transit     { .. } => InterpKind::Transit,
-            Self::HouseTransit { .. } => InterpKind::HouseTransit,
+            Self::Natal       { .. }       => InterpKind::Natal,
+            Self::Synastry    { .. }       => InterpKind::Synastry,
+            Self::Transit     { .. }       => InterpKind::Transit,
+            Self::HouseTransit { .. }      => InterpKind::HouseTransit,
+            Self::PlacementSign  { .. }    => InterpKind::PlacementSign,
+            Self::PlacementHouse { .. }    => InterpKind::PlacementHouse,
         }
     }
 
@@ -85,8 +117,10 @@ impl InterpKey {
     ///
     /// Examples:
     /// - `Natal { "moon_trine_venus" }`     → `"Moon trine Venus"`
-    /// - `Transit { saturn, sun, square }`  → `"Saturn square Sun (transit)"`
+    /// - `Transit { saturn, sun, square }`  → `"Saturn square Sun"`
     /// - `HouseTransit { jupiter, 7 }`      → `"Jupiter in house 7"`
+    /// - `PlacementSign { jupiter, 5 }`     → `"Jupiter in Virgo"`
+    /// - `PlacementHouse { jupiter, 9 }`    → `"Jupiter in House 9"`
     pub fn plain_name(&self) -> String {
         match self {
             Self::Natal { aspect_sig }
@@ -99,6 +133,12 @@ impl InterpKey {
             }
             Self::HouseTransit { transiting, house } => {
                 format!("{} in house {house}", cap(transiting.name()))
+            }
+            Self::PlacementSign  { planet, sign } => {
+                format!("{} in {}", cap(planet.name()), cap(sign_name_lower(*sign)))
+            }
+            Self::PlacementHouse { planet, house } => {
+                format!("{} in House {house}", cap(planet.name()))
             }
         }
     }
