@@ -27,7 +27,6 @@ use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
 use crate::aspect_list::{natal_items, synastry_items};
-use crate::aspect_view::AspectView;
 use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected stargazer.
@@ -69,29 +68,46 @@ pub fn build_stargazer_page(
 
     // Their Chart tab
     let their_av = match &their_chart {
-        Some(chart) => AspectView::natal(
-            natal_items(&chart.natal_aspects()),
-            chart,
-            Rc::clone(&store),
-            Rc::clone(&baseline),
-            Rc::clone(&identity),
-            sender.clone(),
-        ),
-        None => AspectView::new(vec![], Rc::clone(&store), Rc::clone(&baseline), Rc::clone(&identity), sender.clone()),
+        Some(chart) => crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
+            kind:          crate::aspect_view::AspectViewKind::Natal,
+            items:         natal_items(&chart.natal_aspects()),
+            chart:         Some(Rc::new(chart.clone())),
+            store:         Rc::clone(&store),
+            baseline:      Rc::clone(&baseline),
+            identity:      Rc::clone(&identity),
+            parent_sender: sender.clone(),
+        }),
+        None => crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
+            kind:          crate::aspect_view::AspectViewKind::Synastry,
+            items:         vec![],
+            chart:         None,
+            store:         Rc::clone(&store),
+            baseline:      Rc::clone(&baseline),
+            identity:      Rc::clone(&identity),
+            parent_sender: sender.clone(),
+        }),
     };
-    their_av.widget().set_vexpand(true);
+    their_av.set_vexpand(true);
 
     let their_tab = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    their_tab.append(their_av.widget());
+    their_tab.append(&their_av);
     their_tab.set_vexpand(true);
 
     let their_page = view_stack.add_titled(&their_tab, Some("their"), "Their Chart");
     their_page.set_icon_name(Some("weather-clear-symbolic"));
 
     // Synastry tab
-    let syn_av = AspectView::new(synastry_items(&synastry), Rc::clone(&store), Rc::clone(&baseline), Rc::clone(&identity), sender.clone());
-    syn_av.widget().set_vexpand(true);
-    let syn_page = view_stack.add_titled(syn_av.widget(), Some("synastry"), "Synastry");
+    let syn_av = crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
+        kind:          crate::aspect_view::AspectViewKind::Synastry,
+        items:         synastry_items(&synastry),
+        chart:         None,
+        store:         Rc::clone(&store),
+        baseline:      Rc::clone(&baseline),
+        identity:      Rc::clone(&identity),
+        parent_sender: sender.clone(),
+    });
+    syn_av.set_vexpand(true);
+    let syn_page = view_stack.add_titled(&syn_av, Some("synastry"), "Synastry");
     syn_page.set_icon_name(Some("synastry-symbolic"));
 
     // Messages tab

@@ -1,11 +1,12 @@
 //! Aspect + interpretation view.
 //!
-//! An `adw::NavigationView` with two pages:
-//!   1. **List page** — full-width grouped list of aspect rows.  One column of
-//!      text at any window width.
-//!   2. **Detail page** — pushed on row tap; shows all interpretations with
-//!      affirm buttons and a contribute form.  Has its own HeaderBar so the
-//!      back button is always present.
+//! `AspectView` is a `SimpleComponent` that renders a list of aspect /
+//! placement / synastry / transit rows (via the `InterpRow` factory) and pushes
+//! a detail page on row activation.  It owns its own `adw::NavigationView`.
+//!
+//! Construction goes through [`launch`] which spawns the component, retrieves
+//! the root widget, and detaches the runtime so the caller doesn't need to
+//! hold a `Controller` ref.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,150 +14,195 @@ use std::rc::Rc;
 use libadwaita as adw;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
-use relm4::AsyncComponentSender;
-use zodia_core::InterpKey;
+use relm4::factory::FactoryVecDeque;
+use relm4::prelude::*;
+use relm4::{AsyncComponentSender, Component};
+use zodia_core::{Chart, InterpKey};
 use zodia_crypto::IdentityKeypair;
 use zodia_net::InterpEntry;
 use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
 use crate::aspect_list::AspectItem;
+use crate::interp_row::{InterpRow, InterpRowInit, InterpRowOut};
 
 // ── public entry point ────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug)]
+pub enum AspectViewKind {
+    /// Natal chart — group title "Aspects", placements preamble.
+    Natal,
+    /// Sky / transits — group title "Transits", no preamble.
+    Transit,
+    /// Synastry between two charts — group title "Aspects", no preamble.
+    Synastry,
+}
+
+pub struct AspectViewInit {
+    pub kind:          AspectViewKind,
+    pub items:         Vec<AspectItem>,
+    /// Required when `kind == Natal` for the placements preamble; ignored otherwise.
+    pub chart:         Option<Rc<Chart>>,
+    pub store:         Rc<RefCell<ZodiaStore>>,
+    pub baseline:      Rc<BaselineStore>,
+    pub identity:      Rc<IdentityKeypair>,
+    pub parent_sender: AsyncComponentSender<AppModel>,
+}
+
+/// Convenience: spawn the component, return its root widget, detach the runtime
+/// so the caller doesn't need to hold the `Controller`.  Idiomatic for a child
+/// component embedded in a non-relm4 build function (e.g. `build_widgets`).
+pub fn launch(init: AspectViewInit) -> adw::NavigationView {
+    let mut ctl = <AspectView as Component>::builder().launch(init).detach();
+    let widget = ctl.widget().clone();
+    ctl.detach_runtime();
+    widget
+}
+
+// ── component ─────────────────────────────────────────────────────────────────
+
 pub struct AspectView {
-    nav: adw::NavigationView,
+    nav:           adw::NavigationView,
+    store:         Rc<RefCell<ZodiaStore>>,
+    baseline:      Rc<BaselineStore>,
+    identity:      Rc<IdentityKeypair>,
+    parent_sender: AsyncComponentSender<AppModel>,
+    /// Owned to keep the factory's runtime alive; drained via `send` once PR3
+    /// wires the reactive `InterpUpdated` path.
+    #[allow(dead_code)]
+    rows:          FactoryVecDeque<InterpRow>,
 }
 
-impl AspectView {
-    /// Standard aspect list with group title "Aspects".  Used for synastry.
-    pub fn new(
-        items: Vec<AspectItem>,
-        store: Rc<RefCell<ZodiaStore>>,
-        baseline: Rc<BaselineStore>,
-        identity: Rc<IdentityKeypair>,
-        sender: AsyncComponentSender<AppModel>,
-    ) -> Self {
-        Self::build(items, store, baseline, identity, sender, None, "Aspects")
-    }
-
-    /// Natal chart view — prepends a placements section above the aspect list.
-    pub fn natal(
-        items: Vec<AspectItem>,
-        chart: &zodia_core::Chart,
-        store: Rc<RefCell<ZodiaStore>>,
-        baseline: Rc<BaselineStore>,
-        identity: Rc<IdentityKeypair>,
-        sender: AsyncComponentSender<AppModel>,
-    ) -> Self {
-        let preamble = crate::placements::build_placements_group(chart);
-        Self::build(items, store, baseline, identity, sender, Some(preamble.upcast::<gtk::Widget>()), "Aspects")
-    }
-
-    /// Transit view — group title is "Transits".
-    pub fn transits(
-        items: Vec<AspectItem>,
-        store: Rc<RefCell<ZodiaStore>>,
-        baseline: Rc<BaselineStore>,
-        identity: Rc<IdentityKeypair>,
-        sender: AsyncComponentSender<AppModel>,
-    ) -> Self {
-        Self::build(items, store, baseline, identity, sender, None, "Transits")
-    }
-
-    fn build(
-        items: Vec<AspectItem>,
-        store: Rc<RefCell<ZodiaStore>>,
-        baseline: Rc<BaselineStore>,
-        identity: Rc<IdentityKeypair>,
-        sender: AsyncComponentSender<AppModel>,
-        preamble: Option<gtk::Widget>,
-        group_title: &'static str,
-    ) -> Self {
-        let nav = adw::NavigationView::new();
-        nav.set_vexpand(true);
-        nav.push(&list_page(&items, &nav, Rc::clone(&store), Rc::clone(&baseline), Rc::clone(&identity), sender, preamble, group_title));
-        Self { nav }
-    }
-
-    pub fn widget(&self) -> &adw::NavigationView {
-        &self.nav
-    }
+#[derive(Debug)]
+pub enum AspectViewMsg {
+    OpenDetail {
+        key:             InterpKey,
+        transit_context: Option<String>,
+    },
 }
 
-// ── list page ─────────────────────────────────────────────────────────────────
+#[relm4::component(pub)]
+impl SimpleComponent for AspectView {
+    type Init   = AspectViewInit;
+    type Input  = AspectViewMsg;
+    type Output = ();
 
-fn list_page(
-    items: &[AspectItem],
-    nav: &adw::NavigationView,
-    store: Rc<RefCell<ZodiaStore>>,
-    baseline: Rc<BaselineStore>,
-    identity: Rc<IdentityKeypair>,
-    sender: AsyncComponentSender<AppModel>,
-    preamble: Option<gtk::Widget>,
-    group_title: &'static str,
-) -> adw::NavigationPage {
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    scroll.set_vexpand(true);
+    view! {
+        #[root]
+        adw::NavigationView {
+            set_vexpand: true,
 
-    let clamp = adw::Clamp::new();
-    clamp.set_maximum_size(720);
-    clamp.set_margin_top(8);
-    clamp.set_margin_bottom(8);
-    clamp.set_margin_start(12);
-    clamp.set_margin_end(12);
+            adw::NavigationPage {
+                set_title: "Aspects",
+                #[wrap(Some)]
+                set_child = &gtk::ScrolledWindow {
+                    set_hscrollbar_policy: gtk::PolicyType::Never,
+                    set_vexpand: true,
+                    #[wrap(Some)]
+                    set_child = &adw::Clamp {
+                        set_maximum_size: 720,
+                        set_margin_top: 8,
+                        set_margin_bottom: 8,
+                        set_margin_start: 12,
+                        set_margin_end: 12,
 
-    let aspect_group = adw::PreferencesGroup::new();
-    aspect_group.set_title(group_title);
+                        #[wrap(Some)]
+                        #[name(content_box)]
+                        set_child = &gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 16,
 
-    if items.is_empty() {
-        let row = adw::ActionRow::new();
-        row.set_title("No aspects within default orbs");
-        aspect_group.add(&row);
-    } else {
-        for item in items {
-            let top_body = resolve_top_body(&store.borrow(), &baseline, &item.key);
+                            #[local_ref]
+                            interp_group -> adw::PreferencesGroup {},
 
-            let row = adw::ActionRow::new();
-            row.set_title(&item.key.plain_name());
-            if top_body.is_empty() {
-                row.set_subtitle("No interpretation yet — tap to contribute");
-            } else {
-                row.set_subtitle(&truncate(&top_body, 120));
-            }
-
-            let glyph_lbl = gtk::Label::new(Some(&item.glyph_suffix));
-            glyph_lbl.add_css_class("dim-label");
-            glyph_lbl.add_css_class("caption");
-            glyph_lbl.add_css_class("aspect-list");
-            row.add_suffix(&glyph_lbl);
-            row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-            row.set_activatable(true);
-
-            let nav_c = nav.clone();
-            let store_c = Rc::clone(&store);
-            let baseline_c = Rc::clone(&baseline);
-            let identity_c = Rc::clone(&identity);
-            let sender_c = sender.clone();
-            let key = item.key.clone();
-            let ctx = item.transit_context.clone();
-            row.connect_activated(move |_| {
-                nav_c.push(&detail_page(&key, ctx.clone(), Rc::clone(&store_c), Rc::clone(&baseline_c), Rc::clone(&identity_c), sender_c.clone()));
-            });
-
-            aspect_group.add(&row);
+                            #[name(empty_label)]
+                            gtk::Label {
+                                set_label: "No aspects within default orbs",
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Center,
+                                set_margin_top: 12,
+                                set_visible: false,
+                            },
+                        },
+                    },
+                },
+            },
         }
     }
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    if let Some(w) = preamble {
-        content.append(&w);
+    fn init(
+        init: Self::Init,
+        root: Self::Root,
+        sender: ComponentSender<Self>,
+    ) -> ComponentParts<Self> {
+        // Resolve top-body previews and convert AspectItems into factory inits.
+        let row_inits: Vec<InterpRowInit> = init.items.iter()
+            .map(|it| InterpRowInit {
+                key:             it.key.clone(),
+                title:           it.key.plain_name(),
+                glyph_suffix:    Some(it.glyph_suffix.clone()),
+                transit_context: it.transit_context.clone(),
+                body_preview:    resolve_top_body(&init.store.borrow(), &init.baseline, &it.key),
+            })
+            .collect();
+        let items_empty = row_inits.is_empty();
+
+        // Spawn the row factory; forward Activate → AspectViewMsg::OpenDetail.
+        let mut rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
+            .launch(adw::PreferencesGroup::new())
+            .forward(sender.input_sender(), |out| match out {
+                InterpRowOut::Activate { key, transit_context } =>
+                    AspectViewMsg::OpenDetail { key, transit_context },
+            });
+        {
+            let mut g = rows.guard();
+            for ri in row_inits { g.push_back(ri); }
+        }
+
+        // Group title differs per kind.
+        let group_title = match init.kind {
+            AspectViewKind::Natal | AspectViewKind::Synastry => "Aspects",
+            AspectViewKind::Transit                          => "Transits",
+        };
+        let interp_group = rows.widget().clone();
+        interp_group.set_title(group_title);
+
+        let model = AspectView {
+            nav: root.clone(),
+            store:         init.store,
+            baseline:      init.baseline,
+            identity:      init.identity,
+            parent_sender: init.parent_sender,
+            rows,
+        };
+
+        let widgets = view_output!();
+        widgets.empty_label.set_visible(items_empty);
+
+        // Natal kind: prepend the placements group above the interp_group.
+        if let (AspectViewKind::Natal, Some(chart)) = (init.kind, init.chart.as_ref()) {
+            let placements = crate::placements::build_placements_group(chart);
+            widgets.content_box.prepend(&placements);
+        }
+
+        ComponentParts { model, widgets }
     }
-    content.append(&aspect_group);
-    clamp.set_child(Some(&content));
-    scroll.set_child(Some(&clamp));
-    adw::NavigationPage::new(&scroll, "Aspects")
+
+    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+        match msg {
+            AspectViewMsg::OpenDetail { key, transit_context } => {
+                let page = detail_page(
+                    &key,
+                    transit_context,
+                    Rc::clone(&self.store),
+                    Rc::clone(&self.baseline),
+                    Rc::clone(&self.identity),
+                    self.parent_sender.clone(),
+                );
+                self.nav.push(&page);
+            }
+        }
+    }
 }
 
 // ── detail page ───────────────────────────────────────────────────────────────
@@ -273,7 +319,7 @@ pub fn detail_page(
     let contribute_group = adw::PreferencesGroup::new();
     contribute_group.set_title("Contribute");
     contribute_group.set_description(Some(
-        "Share your lived understanding of this placement.",
+        "Optional — add your own reading if you have one.",
     ));
 
     let entry = adw::EntryRow::new();
@@ -281,9 +327,8 @@ pub fn detail_page(
     contribute_group.add(&entry);
     content.append(&contribute_group);
 
-    let submit = gtk::Button::with_label("Submit  ✓");
-    submit.add_css_class("suggested-action");
-    submit.add_css_class("pill");
+    let submit = gtk::Button::with_label("Submit");
+    submit.add_css_class("flat");
     submit.set_halign(gtk::Align::End);
     submit.set_margin_top(4);
 
@@ -332,10 +377,4 @@ fn resolve_top_body(store: &ZodiaStore, baseline: &BaselineStore, key: &InterpKe
     store.top_body(key).ok().flatten()
         .or_else(|| baseline.lookup(key).map(str::to_owned))
         .unwrap_or_default()
-}
-
-pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let head: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() { format!("{head}…") } else { head }
 }

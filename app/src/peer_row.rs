@@ -1,4 +1,12 @@
 //! Factory component for a single peer row in the "Others" sidebar section.
+//!
+//! Built with manual `FactoryComponent` impl + `relm4::view!` for the widget
+//! tree.  This keeps the declarative tree benefits while leaving room for the
+//! cross-widget hover wiring and the nickname-dialog click handler.
+//!
+//! The row's `widget_name` is set to `"{bucket:02}_{peer_hex}"` so the parent
+//! `gtk::ListBox::set_sort_func` can sort rows lexically by bucket then by peer
+//! id without needing to look anything up in the model.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -20,6 +28,9 @@ pub struct PeerRowInit {
     pub display_name: String,
     pub is_connected: bool,
     pub is_pending:   bool,
+    /// 0 = connected+online, 1 = incoming pending, 2 = outgoing pending,
+    /// 3 = connected+offline.  Lower values float to the top in sort order.
+    pub sort_bucket:  u8,
     pub dot_filled:   bool,
     pub dot_rgba:     [f32; 4],
     pub unread:       usize,
@@ -49,18 +60,19 @@ pub enum PeerRowOut {
 // ── model ─────────────────────────────────────────────────────────────────────
 
 pub struct PeerRow {
-    pub peer_id:      PeerId,
-    pub solar_month:  u8,
-    pub display_name: String,
-    pub is_connected: bool,
-    pub is_pending:   bool,
-    /// Shared with the draw closure so colour changes take effect on queue_draw.
-    dot_params:       Rc<Cell<(bool, [f32; 4])>>,
-    /// Shared with the GestureClick closure so activation is gated on live state.
+    pub peer_id:       PeerId,
+    pub solar_month:   u8,
+    pub display_name:  String,
+    pub is_connected:  bool,
+    pub is_pending:    bool,
+    pub sort_bucket:   u8,
+    pub dot_filled:    bool,
+    pub dot_rgba:      [f32; 4],
+    pub unread:        usize,
+    /// Live gate read by the activation GestureClick closure.
     is_connected_cell: Rc<Cell<bool>>,
-    pub unread:       usize,
-    /// Shared with the nickname dialog closure so the dialog always shows fresh text.
-    nickname:         Rc<RefCell<String>>,
+    /// Live nickname read by the dialog when the user opens it.
+    nickname:          Rc<RefCell<String>>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -72,6 +84,37 @@ pub struct PeerRowWidgets {
     badge:      gtk::Label,
     edit_img:   gtk::Image,
     remove_btn: gtk::Button,
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn row_widget_name(bucket: u8, peer_id: &PeerId) -> String {
+    format!("{:02}_{}", bucket, hex::encode(&peer_id.0))
+}
+
+fn label_text(solar_month: u8, display_name: &str) -> String {
+    let glyph = if solar_month > 0 { sign_glyph(solar_month) } else { "" };
+    format!("{glyph}  {display_name}")
+}
+
+fn paint_dot(filled: bool, rgba: [f32; 4]) -> impl Fn(&gtk::DrawingArea, &gtk::cairo::Context, i32, i32) + 'static {
+    move |_, cr, w, h| {
+        let (r, g, b, a) = (
+            rgba[0] as f64, rgba[1] as f64,
+            rgba[2] as f64, rgba[3] as f64,
+        );
+        let cx     = w as f64 / 2.0;
+        let cy     = h as f64 / 2.0;
+        let radius = w.min(h) as f64 / 2.0;
+        cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+        cr.set_source_rgba(r, g, b, a);
+        if filled {
+            let _ = cr.fill();
+        } else {
+            cr.set_line_width(1.2);
+            let _ = cr.stroke();
+        }
+    }
 }
 
 // ── factory component ─────────────────────────────────────────────────────────
@@ -87,8 +130,7 @@ impl FactoryComponent for PeerRow {
     type Index         = DynamicIndex;
 
     fn init_model(init: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
-        PeerRow {
-            dot_params:        Rc::new(Cell::new((init.dot_filled, init.dot_rgba))),
+        Self {
             is_connected_cell: Rc::new(Cell::new(init.is_connected)),
             nickname:          Rc::new(RefCell::new(init.nickname)),
             peer_id:      init.peer_id,
@@ -96,14 +138,20 @@ impl FactoryComponent for PeerRow {
             display_name: init.display_name,
             is_connected: init.is_connected,
             is_pending:   init.is_pending,
+            sort_bucket:  init.sort_bucket,
+            dot_filled:   init.dot_filled,
+            dot_rgba:     init.dot_rgba,
             unread:       init.unread,
         }
     }
 
     fn init_root(&self) -> Self::Root {
-        let row = gtk::ListBoxRow::new();
-        row.set_widget_name(&hex::encode(&self.peer_id.0));
-        row.set_activatable(self.is_connected);
+        relm4::view! {
+            row = gtk::ListBoxRow {
+                set_widget_name: &row_widget_name(self.sort_bucket, &self.peer_id),
+                set_activatable: self.is_connected,
+            }
+        }
         row
     }
 
@@ -114,117 +162,107 @@ impl FactoryComponent for PeerRow {
         _returned_widget: &gtk::ListBoxRow,
         sender: FactorySender<Self>,
     ) -> Self::Widgets {
-        let peer_hex = hex::encode_upper(&self.peer_id.0[..4]);
-        let row = root.clone();
+        // Build the inner widget tree declaratively.  Cross-widget signal wiring
+        // (motion controllers, dialog click) happens after this block.
+        relm4::view! {
+            #[local_ref]
+            root -> gtk::ListBoxRow {
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_spacing: 10,
+                    set_margin_start: 12,
+                    set_margin_end: 12,
+                    set_margin_top: 6,
+                    set_margin_bottom: 6,
 
-        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        hbox.set_margin_start(12);
-        hbox.set_margin_end(12);
-        hbox.set_margin_top(6);
-        hbox.set_margin_bottom(6);
+                    #[name(dot)]
+                    gtk::DrawingArea {
+                        set_size_request: (8, 8),
+                        set_valign: gtk::Align::Center,
+                    },
 
-        // ── Presence dot ─────────────────────────────────────────────────────
-        let dp = Rc::clone(&self.dot_params);
-        let dot = gtk::DrawingArea::new();
-        dot.set_size_request(8, 8);
-        dot.set_valign(gtk::Align::Center);
-        dot.set_draw_func(move |_, cr, w, h| {
-            let (filled, rgba) = dp.get();
-            let (r, g, b, a) = (
-                rgba[0] as f64, rgba[1] as f64,
-                rgba[2] as f64, rgba[3] as f64,
-            );
-            let cx     = w as f64 / 2.0;
-            let cy     = h as f64 / 2.0;
-            let radius = w.min(h) as f64 / 2.0;
-            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
-            cr.set_source_rgba(r, g, b, a);
-            if filled {
-                let _ = cr.fill();
-            } else {
-                cr.set_line_width(1.2);
-                let _ = cr.stroke();
+                    #[name(label)]
+                    gtk::Label {
+                        set_text: &label_text(self.solar_month, &self.display_name),
+                        set_halign: gtk::Align::Start,
+                        set_hexpand: true,
+                    },
+
+                    #[name(badge)]
+                    gtk::Label {
+                        add_css_class: "badge",
+                        add_css_class: "accent",
+                        set_valign: gtk::Align::Center,
+                        set_visible: self.unread > 0,
+                        set_label: &self.unread.to_string(),
+                    },
+
+                    #[name(edit_img)]
+                    gtk::Image {
+                        set_icon_name: Some("document-edit-symbolic"),
+                        set_pixel_size: 16,
+                        set_opacity: 0.0,
+                        set_valign: gtk::Align::Center,
+                        set_tooltip_text: Some("Set nickname"),
+                        set_visible: self.is_connected,
+                    },
+
+                    #[name(remove_btn)]
+                    gtk::Button {
+                        set_icon_name: "window-close-symbolic",
+                        add_css_class: "flat",
+                        set_valign: gtk::Align::Center,
+                        set_tooltip_text: Some("Remove"),
+                        set_visible: self.is_pending,
+                        connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
+                            let _ = sender.output(PeerRowOut::Remove(peer_id.clone()));
+                        },
+                    },
+                },
             }
-        });
-        hbox.append(&dot);
+        }
 
-        // ── Name label ───────────────────────────────────────────────────────
-        let glyph = if self.solar_month > 0 { sign_glyph(self.solar_month) } else { "" };
-        let label = gtk::Label::new(Some(&format!("{glyph}  {}", self.display_name)));
-        label.set_halign(gtk::Align::Start);
-        label.set_hexpand(true);
+        // Initial dim-label state for pending rows.
         if self.is_pending { label.add_css_class("dim-label"); }
-        hbox.append(&label);
 
-        // ── Unread badge (always present; hidden when zero) ──────────────────
-        let badge = gtk::Label::new(None);
-        badge.add_css_class("badge");
-        badge.add_css_class("accent");
-        badge.set_valign(gtk::Align::Center);
-        badge.set_visible(self.unread > 0);
-        if self.unread > 0 { badge.set_text(&self.unread.to_string()); }
-        hbox.append(&badge);
+        // Initial dot paint.
+        dot.set_draw_func(paint_dot(self.dot_filled, self.dot_rgba));
 
-        // ── Edit icon (connected — shown on hover) ───────────────────────────
-        let edit_img = gtk::Image::from_icon_name("document-edit-symbolic");
-        edit_img.set_pixel_size(16);
-        edit_img.set_opacity(0.0);
-        edit_img.set_valign(gtk::Align::Center);
-        edit_img.set_tooltip_text(Some("Set nickname"));
-        edit_img.set_visible(self.is_connected);
-        hbox.append(&edit_img);
-
-        // ── Remove button (pending — always visible) ─────────────────────────
-        let remove_btn = gtk::Button::from_icon_name("window-close-symbolic");
-        remove_btn.add_css_class("flat");
-        remove_btn.set_valign(gtk::Align::Center);
-        remove_btn.set_tooltip_text(Some("Remove"));
-        remove_btn.set_visible(self.is_pending);
-        hbox.append(&remove_btn);
-
-        root.set_child(Some(&hbox));
-
-        // ── Activation gesture (connected peers) ─────────────────────────────
+        // Activation gesture on the row, gated by the live is_connected cell.
         {
             let ic  = Rc::clone(&self.is_connected_cell);
             let pid = self.peer_id.clone();
-            let s   = sender.output_sender().clone();
+            let s   = sender.clone();
             let click = gtk::GestureClick::new();
             click.connect_released(move |_, n, _, _| {
                 if n == 1 && ic.get() {
-                    let _ = s.send(PeerRowOut::Activate(pid.clone()));
+                    let _ = s.output(PeerRowOut::Activate(pid.clone()));
                 }
             });
-            row.add_controller(click);
+            root.add_controller(click);
         }
 
-        // ── Remove button signal ──────────────────────────────────────────────
+        // Edit-icon hover fade — enter the row reveals 0.4, hover the icon → 1.0.
         {
-            let pid = self.peer_id.clone();
-            let s   = sender.output_sender().clone();
-            remove_btn.connect_clicked(move |_| {
-                let _ = s.send(PeerRowOut::Remove(pid.clone()));
-            });
+            let img_a = edit_img.clone();
+            let img_b = edit_img.clone();
+            let m_row = gtk::EventControllerMotion::new();
+            m_row.connect_enter(move |_, _, _| img_a.set_opacity(0.4));
+            m_row.connect_leave(move |_| img_b.set_opacity(0.0));
+            root.add_controller(m_row);
+
+            let img_c = edit_img.clone();
+            let img_d = edit_img.clone();
+            let m_img = gtk::EventControllerMotion::new();
+            m_img.connect_enter(move |_, _, _| img_c.set_opacity(1.0));
+            m_img.connect_leave(move |_| img_d.set_opacity(0.4));
+            edit_img.add_controller(m_img);
         }
 
-        // ── Edit (nickname) hover + click ─────────────────────────────────────
+        // Edit-icon click → nickname dialog.
         {
-            let motion_row = gtk::EventControllerMotion::new();
-            let img_enter  = edit_img.clone();
-            let img_leave  = edit_img.clone();
-            motion_row.connect_enter(move |_, _, _| img_enter.set_opacity(0.4));
-            motion_row.connect_leave(move |_| img_leave.set_opacity(0.0));
-            row.add_controller(motion_row);
-
-            let motion_img  = gtk::EventControllerMotion::new();
-            let img_hover1  = edit_img.clone();
-            let img_hover2  = edit_img.clone();
-            motion_img.connect_enter(move |_, _, _| img_hover1.set_opacity(1.0));
-            motion_img.connect_leave(move |_| img_hover2.set_opacity(0.4));
-            edit_img.add_controller(motion_img);
-
             let pid       = self.peer_id.0;
-            let s_out     = sender.output_sender().clone();
+            let s         = sender.clone();
             let nick_cell = Rc::clone(&self.nickname);
             let img_ref   = edit_img.clone();
             let click     = gtk::GestureClick::new();
@@ -240,11 +278,11 @@ impl FactoryComponent for PeerRow {
                 entry.set_text(&current);
                 entry.set_placeholder_text(Some("Nickname…"));
                 dialog.set_extra_child(Some(&entry));
-                let s2 = s_out.clone();
-                let e  = entry.clone();
+                let s_inner = s.clone();
+                let e       = entry.clone();
                 dialog.connect_response(None, move |_, id| {
                     if id == "set" {
-                        let _ = s2.send(PeerRowOut::SetNickname {
+                        let _ = s_inner.output(PeerRowOut::SetNickname {
                             peer_id: PeerId(pid),
                             name: e.text().to_string(),
                         });
@@ -255,46 +293,52 @@ impl FactoryComponent for PeerRow {
             edit_img.add_controller(click);
         }
 
-        let _ = peer_hex; // suppress unused warning (used only for debug convenience)
-        PeerRowWidgets { row, dot, label, badge, edit_img, remove_btn }
+        PeerRowWidgets {
+            row: root.clone(),
+            dot,
+            label,
+            badge,
+            edit_img,
+            remove_btn,
+        }
     }
 
     fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
         let PeerRowMsg::Update(init) = msg;
-        self.dot_params.set((init.dot_filled, init.dot_rgba));
         self.is_connected_cell.set(init.is_connected);
         *self.nickname.borrow_mut() = init.nickname;
         self.solar_month  = init.solar_month;
         self.display_name = init.display_name;
         self.is_connected = init.is_connected;
         self.is_pending   = init.is_pending;
+        self.sort_bucket  = init.sort_bucket;
+        self.dot_filled   = init.dot_filled;
+        self.dot_rgba     = init.dot_rgba;
         self.unread       = init.unread;
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: FactorySender<Self>) {
-        // Dot — draw func reads from dot_params Rc<Cell> on each redraw.
-        widgets.dot.queue_draw();
+        // Sort key — `set_sort_func` reads widget_name on each compare.
+        widgets.row.set_widget_name(&row_widget_name(self.sort_bucket, &self.peer_id));
+        widgets.row.set_activatable(self.is_connected);
 
-        // Label text and dim styling.
-        let glyph = if self.solar_month > 0 { sign_glyph(self.solar_month) } else { "" };
-        widgets.label.set_text(&format!("{glyph}  {}", self.display_name));
+        widgets.label.set_text(&label_text(self.solar_month, &self.display_name));
         if self.is_pending {
             widgets.label.add_css_class("dim-label");
         } else {
             widgets.label.remove_css_class("dim-label");
         }
 
-        // Badge.
         widgets.badge.set_visible(self.unread > 0);
         if self.unread > 0 {
-            widgets.badge.set_text(&self.unread.to_string());
+            widgets.badge.set_label(&self.unread.to_string());
         }
 
-        // Edit icon / remove button visibility.
         widgets.edit_img.set_visible(self.is_connected);
         widgets.remove_btn.set_visible(self.is_pending);
 
-        // Row activatability.
-        widgets.row.set_activatable(self.is_connected);
+        // Re-set draw func so the closure captures fresh colour state.
+        widgets.dot.set_draw_func(paint_dot(self.dot_filled, self.dot_rgba));
+        widgets.dot.queue_draw();
     }
 }

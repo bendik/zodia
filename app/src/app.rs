@@ -35,7 +35,7 @@ use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 use relm4::factory::FactoryVecDeque;
 
 use crate::aspect_list;
-use crate::aspect_view::AspectView;
+use crate::aspect_view;
 use crate::notify;
 use crate::peer_row::{PeerRow, PeerRowInit, PeerRowMsg, PeerRowOut};
 use crate::stargazer_list::{Stargazer, StargazerState};
@@ -152,9 +152,10 @@ pub struct AppModel {
     /// Explicit presence state received from each stargazer over their channel.
     stargazer_status: HashMap<PeerId, PeerStatus>,
 
-    /// Incremented whenever the stargazer list content changes so `update_view`
-    /// knows when to rebuild the network view and peer page titles.
-    stargazer_list_generation: u64,
+    /// Incremented when peer state changes; drives the network-tab rebuild and
+    /// the peer-page title sync in `update_view`.  The sidebar peer rows are
+    /// kept fresh by `sync_peers_factory` directly and don't read this token.
+    network_changed_token: u64,
 
     /// Factory-backed peer rows in the "Others" sidebar section.
     peers_factory: FactoryVecDeque<PeerRow>,
@@ -204,7 +205,7 @@ pub struct AppWidgets {
     /// "Others" section header label — hidden when no peers in the factory.
     others_header: gtk::Label,
     /// Generation of the network view / page titles we last rendered.
-    stargazer_list_shown_gen: u64,
+    network_changed_token_shown: u64,
 
     /// Single content stack — chart / sky / stargazers + per-stargazer pages, all as named children.
     content_stack: gtk::Stack,
@@ -297,6 +298,11 @@ impl AsyncComponent for AppModel {
             .launch({
                 let l = gtk::ListBox::new();
                 l.add_css_class("navigation-sidebar");
+                // Each PeerRow's widget_name is "{bucket:02}_{peer_hex}".  Lexical
+                // compare gives the right order (bucket first, peer hex tiebreak).
+                l.set_sort_func(|a, b| {
+                    a.widget_name().cmp(&b.widget_name()).into()
+                });
                 l
             })
             .forward(sender.input_sender(), |out| match out {
@@ -315,7 +321,7 @@ impl AsyncComponent for AppModel {
             stargazers,
             connected_channels: HashMap::new(),
             stargazer_status: HashMap::new(),
-            stargazer_list_generation: 0,
+            network_changed_token: 0,
             peers_factory,
             pending_push_queue: RefCell::new(Vec::new()),
             config: init.config,
@@ -524,7 +530,7 @@ impl AsyncComponent for AppModel {
                     self.stargazer_nicknames.insert(tag, name.trim().to_string());
                 }
                 save_nicknames(self.config.data_dir(), &self.stargazer_nicknames);
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
 
@@ -541,7 +547,7 @@ impl AsyncComponent for AppModel {
                     self.stargazers.insert(peer_id.clone(), Stargazer::outgoing_pending(peer_id.clone()));
                 }
                 save_pending(self.config.data_dir(), &self.stargazers);
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
                 // Immediately kick off the connection attempt.
                 sender.input(AppMsg::Reconnect(peer_id));
@@ -566,7 +572,7 @@ impl AsyncComponent for AppModel {
                         StargazerState::Discovered => {}
                     }
                 }
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
 
@@ -611,7 +617,7 @@ impl AsyncComponent for AppModel {
                 }
                 send_status_active(&channel);
                 self.connected_channels.insert(peer_id.clone(), channel);
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
                 if navigate {
                     self.pending_push_queue.borrow_mut().push(peer_id);
@@ -656,7 +662,7 @@ impl AsyncComponent for AppModel {
                     if let Some(s) = self.stargazers.get_mut(&peer_id) {
                         s.state = StargazerState::Discovered;
                     }
-                    self.stargazer_list_generation += 1;
+                    self.network_changed_token += 1;
                     sync_peers_factory(self);
                     return;
                 };
@@ -685,7 +691,7 @@ impl AsyncComponent for AppModel {
                 }
                 send_status_active(&channel);
                 self.connected_channels.insert(peer_id, channel);
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
 
@@ -700,7 +706,7 @@ impl AsyncComponent for AppModel {
                     if let Some(s) = self.stargazers.get_mut(&peer_id) {
                         s.state = StargazerState::Discovered;
                     }
-                    self.stargazer_list_generation += 1;
+                    self.network_changed_token += 1;
                     sync_peers_factory(self);
                 }
             }
@@ -779,7 +785,7 @@ impl AsyncComponent for AppModel {
                 // Reload activity feed (insert_signed already ran in aspect_view).
                 self.recent_interps = self.store.borrow()
                     .recent_community_interps(12).unwrap_or_default();
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 // Fast path: send directly to already-connected peers.
                 let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
                 for (peer_id, channel) in &self.connected_channels {
@@ -810,7 +816,7 @@ impl AsyncComponent for AppModel {
                 // Reload activity feed and trigger a network view refresh.
                 self.recent_interps = self.store.borrow()
                     .recent_community_interps(12).unwrap_or_default();
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
             }
         }
     }
@@ -844,7 +850,7 @@ impl AsyncComponent for AppModel {
                         );
                     }
                 }
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
                 // Re-publish our announce so the newly-seen peer can discover us too.
                 if let Some(net) = &self.network {
@@ -868,7 +874,7 @@ impl AsyncComponent for AppModel {
                     // Connected stays (reconnect loop handles it).
                     _ => {}
                 }
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
@@ -926,7 +932,7 @@ impl AsyncComponent for AppModel {
                         });
                     }
                 }
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
             ZodiaNetEvent::CallOffer { from, session_id } => {
@@ -981,7 +987,7 @@ impl AsyncComponent for AppModel {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
                 info!(peer = %tag, ?status, "peer status update");
                 self.stargazer_status.insert(peer_id, status);
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
             ZodiaNetEvent::RelayReceived { via: _, dest, payload } => {
@@ -1024,7 +1030,7 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::PeerChannelClosed { peer_id } => {
                 self.stargazer_status.remove(&peer_id);
                 self.connected_channels.remove(&peer_id);
-                self.stargazer_list_generation += 1;
+                self.network_changed_token += 1;
                 sync_peers_factory(self);
                 // Schedule a reconnect attempt for Connected peers after 10 s.
                 if matches!(
@@ -1062,32 +1068,36 @@ impl AsyncComponent for AppModel {
 
         if !self.on_setup_page && widgets.chart_container.first_child().is_none() {
             if let Some(chart) = &self.chart {
-                let nav = AspectView::natal(
-                    aspect_list::natal_items(&chart.natal_aspects()),
-                    chart,
-                    Rc::clone(&self.store),
-                    Rc::clone(&self.baseline),
-                    Rc::clone(&self.identity),
-                    sender.clone(),
-                );
-                nav.widget().set_vexpand(true);
-                widgets.chart_container.append(nav.widget());
+                let chart_rc = Rc::new(chart.clone());
+                let nav = aspect_view::launch(aspect_view::AspectViewInit {
+                    kind:          aspect_view::AspectViewKind::Natal,
+                    items:         aspect_list::natal_items(&chart.natal_aspects()),
+                    chart:         Some(Rc::clone(&chart_rc)),
+                    store:         Rc::clone(&self.store),
+                    baseline:      Rc::clone(&self.baseline),
+                    identity:      Rc::clone(&self.identity),
+                    parent_sender: sender.clone(),
+                });
+                nav.set_vexpand(true);
+                widgets.chart_container.append(&nav);
 
                 if let Ok(ts) = chart.transits_at(current_jdn()) {
-                    let tav = AspectView::transits(
-                        aspect_list::transit_items(
+                    let tav = aspect_view::launch(aspect_view::AspectViewInit {
+                        kind:          aspect_view::AspectViewKind::Transit,
+                        items:         aspect_list::transit_items(
                             &ts.transit_aspects,
                             &ts.house_transits,
                             &chart.positions,
                             ts.transit_jdn,
                         ),
-                        Rc::clone(&self.store),
-                        Rc::clone(&self.baseline),
-                        Rc::clone(&self.identity),
-                        sender.clone(),
-                    );
-                    tav.widget().set_vexpand(true);
-                    widgets.sky_container.append(tav.widget());
+                        chart:         None,
+                        store:         Rc::clone(&self.store),
+                        baseline:      Rc::clone(&self.baseline),
+                        identity:      Rc::clone(&self.identity),
+                        parent_sender: sender.clone(),
+                    });
+                    tav.set_vexpand(true);
+                    widgets.sky_container.append(&tav);
                 }
             }
         }
@@ -1098,7 +1108,7 @@ impl AsyncComponent for AppModel {
 
         // ── rebuild network view and sync page titles when content changes ────
 
-        if self.stargazer_list_generation != widgets.stargazer_list_shown_gen {
+        if self.network_changed_token != widgets.network_changed_token_shown {
             rebuild_network_view(widgets, self, &sender);
             // Keep open peer page titles in sync with nicknames.
             for s in self.stargazers.values()
@@ -1115,12 +1125,17 @@ impl AsyncComponent for AppModel {
                     tw.set_title(&title);
                 }
             }
-            widgets.stargazer_list_shown_gen = self.stargazer_list_generation;
+            widgets.network_changed_token_shown = self.network_changed_token;
         }
 
         // ── push peer pages for OpenPeer requests ─────────────────────────────
 
         let pending: Vec<PeerId> = self.pending_push_queue.borrow_mut().drain(..).collect();
+        if !pending.is_empty() {
+            // Opening a peer page → clear nav-list selection so Chart/Sky/Network
+            // doesn't stay highlighted alongside the active peer row.
+            widgets.nav_list.unselect_all();
+        }
         for peer_id in pending {
             let their_blob = self.stargazers.get(&peer_id).and_then(|s| match &s.state {
                 StargazerState::Connected { birth } => Some(birth),
@@ -1329,6 +1344,7 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
         display_name,
         is_connected,
         is_pending,
+        sort_bucket: s.sidebar_sort_key(has_channel),
         dot_filled,
         dot_rgba,
         unread,
@@ -1338,42 +1354,60 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
 
 /// Sync the factory-backed peer list with the current model state.
 ///
-/// If the set and order of visible peers is unchanged, sends update messages to
-/// each row in place (no GTK widget recreation).  Otherwise clears and rebuilds.
+/// Set-diff against the current factory contents:
+///   - peers in factory but not desired  → `guard.remove`
+///   - peers in desired but not factory  → `guard.push_back`
+///   - peers in both                     → `send(PeerRowMsg::Update)` in place
+///
+/// Visual order is handled by `peers_list.set_sort_func`, which reads each row's
+/// `widget_name` (set by `PeerRow::update_view`).  After any structural or bucket
+/// change we call `invalidate_sort` so GTK re-evaluates row positions.
 fn sync_peers_factory(model: &mut AppModel) {
-    // Collect and sort non-Discovered peers using the canonical sidebar order.
-    let mut visible: Vec<&Stargazer> = model.stargazers.values()
+    // Build desired init map keyed by peer id.
+    let mut desired: HashMap<PeerId, PeerRowInit> = model.stargazers.values()
         .filter(|s| !matches!(s.state, StargazerState::Discovered))
-        .collect();
-    visible.sort_by_key(|s| {
-        let has_channel = model.connected_channels.contains_key(&s.peer_id);
-        (s.sidebar_sort_key(has_channel), hex::encode_upper(&s.peer_id.0[..4]))
-    });
-    let desired: Vec<PeerRowInit> = visible.iter()
-        .map(|s| make_peer_row_init(s, model))
+        .map(|s| (s.peer_id.clone(), make_peer_row_init(s, model)))
         .collect();
 
-    // Compare current factory peer IDs with desired.
-    let current_ids: Vec<[u8; 32]> = model.peers_factory.iter()
-        .map(|r| r.peer_id.0)
-        .collect();
-    let desired_ids: Vec<[u8; 32]> = desired.iter()
-        .map(|r| r.peer_id.0)
-        .collect();
-
-    if current_ids == desired_ids {
-        // Same structure — send update messages so each row redraws in place.
-        for (i, init) in desired.into_iter().enumerate() {
-            model.peers_factory.send(i, PeerRowMsg::Update(Box::new(init)));
+    // Walk current factory rows: either consume a desired entry (update) or mark for removal.
+    let len = model.peers_factory.len();
+    let mut to_update: Vec<(usize, PeerRowInit)> = Vec::new();
+    let mut to_remove: Vec<usize> = Vec::new();
+    for i in 0..len {
+        let row = match model.peers_factory.get(i) {
+            Some(r) => r,
+            None    => continue,
+        };
+        if let Some(init) = desired.remove(&row.peer_id) {
+            to_update.push((i, init));
+        } else {
+            to_remove.push(i);
         }
-    } else {
-        // Structure changed — clear and repopulate.
+    }
+
+    // Apply updates first — indices are still valid pre-removal.
+    for (i, init) in to_update {
+        model.peers_factory.send(i, PeerRowMsg::Update(Box::new(init)));
+    }
+
+    // Remove gone peers (reverse so earlier indices stay valid).
+    if !to_remove.is_empty() {
         let mut guard = model.peers_factory.guard();
-        guard.clear();
-        for init in desired {
+        for i in to_remove.into_iter().rev() {
+            guard.remove(i);
+        }
+    }
+
+    // Append any peers we hadn't seen yet.
+    if !desired.is_empty() {
+        let mut guard = model.peers_factory.guard();
+        for (_, init) in desired {
             guard.push_back(init);
         }
     }
+
+    // Re-evaluate sort order — buckets may have changed for updated rows.
+    model.peers_factory.widget().invalidate_sort();
 }
 
 // ── network content view builder ──────────────────────────────────────────────
@@ -1747,32 +1781,36 @@ fn build_widgets(
 
     // Populate aspect views for returning users with an existing chart.
     if let Some(chart) = &model.chart {
-        let nav = AspectView::natal(
-            aspect_list::natal_items(&chart.natal_aspects()),
-            chart,
-            Rc::clone(&model.store),
-            Rc::clone(&model.baseline),
-            Rc::clone(&model.identity),
-            sender.clone(),
-        );
-        nav.widget().set_vexpand(true);
-        chart_container.append(nav.widget());
+        let chart_rc = Rc::new(chart.clone());
+        let nav = aspect_view::launch(aspect_view::AspectViewInit {
+            kind:          aspect_view::AspectViewKind::Natal,
+            items:         aspect_list::natal_items(&chart.natal_aspects()),
+            chart:         Some(Rc::clone(&chart_rc)),
+            store:         Rc::clone(&model.store),
+            baseline:      Rc::clone(&model.baseline),
+            identity:      Rc::clone(&model.identity),
+            parent_sender: sender.clone(),
+        });
+        nav.set_vexpand(true);
+        chart_container.append(&nav);
 
         if let Ok(ts) = chart.transits_at(current_jdn()) {
-            let tav = AspectView::transits(
-                aspect_list::transit_items(
+            let tav = aspect_view::launch(aspect_view::AspectViewInit {
+                kind:          aspect_view::AspectViewKind::Transit,
+                items:         aspect_list::transit_items(
                     &ts.transit_aspects,
                     &ts.house_transits,
                     &chart.positions,
                     ts.transit_jdn,
                 ),
-                Rc::clone(&model.store),
-                Rc::clone(&model.baseline),
-                Rc::clone(&model.identity),
-                sender.clone(),
-            );
-            tav.widget().set_vexpand(true);
-            sky_container.append(tav.widget());
+                chart:         None,
+                store:         Rc::clone(&model.store),
+                baseline:      Rc::clone(&model.baseline),
+                identity:      Rc::clone(&model.identity),
+                parent_sender: sender.clone(),
+            });
+            tav.set_vexpand(true);
+            sky_container.append(&tav);
         }
     }
 
@@ -1789,7 +1827,7 @@ fn build_widgets(
         split_view,
         nav_list,
         others_header,
-        stargazer_list_shown_gen: u64::MAX, // force initial network view build
+        network_changed_token_shown: u64::MAX, // force initial network view build
         content_stack,
         stargazers_content,
         stargazer_msg_lists: HashMap::new(),

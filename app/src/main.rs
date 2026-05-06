@@ -7,6 +7,7 @@ mod app;
 mod aspect_list;
 mod aspect_view;
 mod baseline;
+mod interp_row;
 mod notify;
 mod peer_row;
 mod stargazer_list;
