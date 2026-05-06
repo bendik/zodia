@@ -9,7 +9,7 @@
 //!                         tabs reactive without blocking the GTK thread
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
 use crate::notify;
-use crate::stargazer_list::DiscoveredStargazer;
+use crate::stargazer_list::{Stargazer, StargazerState};
 use crate::stargazer_page::{self, append_chat_row};
 use crate::util::{approximate_aspects, sign_glyph};
 
@@ -99,12 +99,10 @@ pub enum AppMsg {
     SendViaRelay { relay: PeerId, dest: PeerId, text: String },
     /// User set or updated a nickname for a connected peer.
     SetNickname { peer_id: PeerId, name: String },
-    /// "+" pressed in the Stargazers view — stage outgoing consent proposal, no navigation yet.
+    /// "+" on a discovered peer — immediately enters OutgoingPending and starts connecting.
     ProposeConsent(PeerId),
-    /// "Share ✓" in outgoing consent bar — proceed with the actual connection.
-    ConfirmOutgoingConsent,
-    /// "Cancel ✕" in outgoing consent bar — discard the proposal.
-    CancelOutgoingConsent,
+    /// "×" on a pending/connected sidebar row — remove from all state and disk.
+    RemoveStargazer(PeerId),
     /// Internal: background connect+consent completed; finalize on component thread.
     ConnectionComplete {
         peer_id: PeerId,
@@ -142,10 +140,10 @@ pub struct AppModel {
     network: Option<Arc<ZodiaNetwork>>,
     node_id_text: String,
 
-    /// Stargazers seen on the gossip swarm (Tier-0), ordered by discovery time.
-    discovered_stargazers: Vec<DiscoveredStargazer>,
-    /// Stargazers whose Tier-1 exchange has completed.
-    connected_stargazers: HashMap<PeerId, ConsentBlob>,
+    /// All known stargazers in any state (Discovered → OutgoingPending →
+    /// IncomingPending → Connected).  Connected peers are persisted in peers.tsv;
+    /// OutgoingPending peers in pending.tsv; the rest are ephemeral.
+    stargazers: HashMap<PeerId, Stargazer>,
     /// Active QUIC channels — presence means the channel is open.
     connected_channels: HashMap<PeerId, DirectChannel>,
     /// Explicit presence state received from each stargazer over their channel.
@@ -174,13 +172,6 @@ pub struct AppModel {
     stargazer_nicknames: HashMap<String, String>,
     /// Unread message counts per peer (cleared when their page is opened).
     unread_messages: HashMap<String, usize>,
-
-    /// Incoming consent requests waiting for user approval, in arrival order.
-    /// The first entry is the one currently shown in the consent bar.
-    pending_consents: VecDeque<(PeerId, DirectChannel)>,
-
-    /// Outgoing consent proposal staged by "+" before any network I/O.
-    pending_outgoing_consent: Option<PeerId>,
 
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
@@ -238,9 +229,6 @@ pub struct AppWidgets {
     consent_status: gtk::Label,
     consent_accept_btn: gtk::Button,
     consent_reject_btn: gtk::Button,
-
-    outgoing_consent_bar: gtk::Box,
-    outgoing_consent_status: gtk::Label,
 }
 
 // ── async component ───────────────────────────────────────────────────────────
@@ -268,14 +256,30 @@ impl AsyncComponent for AppModel {
         let baseline = Rc::new(init.baseline);
 
         let stargazer_nicknames = load_nicknames(init.config.data_dir());
-        let persisted_stargazers = load_stargazers(init.config.data_dir());
 
-        // Pre-load chat history for all persisted stargazers.
-        let chat_logs: HashMap<PeerId, Vec<(bool, String)>> = persisted_stargazers
-            .keys()
-            .filter_map(|peer_id| {
-                let msgs = store.borrow().messages_for_peer(&peer_id.0).ok()?;
-                if msgs.is_empty() { None } else { Some((peer_id.clone(), msgs)) }
+        // Build unified stargazer map from both persisted connected peers and
+        // saved outgoing-pending peers.
+        let mut stargazers: HashMap<PeerId, Stargazer> = HashMap::new();
+        for (peer_id, blob) in load_connected_stargazers(init.config.data_dir()) {
+            stargazers.insert(peer_id.clone(), Stargazer {
+                peer_id: peer_id.clone(),
+                solar_month:         zodia_core::solar_month(blob.birth.jdn),
+                geohash_prefix:      blob.birth.geohash.chars().take(3).collect(),
+                approximate_aspects: Vec::new(),
+                state:               StargazerState::Connected { birth: blob },
+            });
+        }
+        for peer_id in load_pending(init.config.data_dir()) {
+            stargazers.entry(peer_id.clone())
+                .or_insert_with(|| Stargazer::outgoing_pending(peer_id));
+        }
+
+        // Pre-load chat history for all persisted (Connected) stargazers.
+        let chat_logs: HashMap<PeerId, Vec<(bool, String)>> = stargazers.values()
+            .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
+            .filter_map(|s| {
+                let msgs = store.borrow().messages_for_peer(&s.peer_id.0).ok()?;
+                if msgs.is_empty() { None } else { Some((s.peer_id.clone(), msgs)) }
             })
             .collect();
 
@@ -286,8 +290,7 @@ impl AsyncComponent for AppModel {
             baseline,
             network: None,
             node_id_text: String::new(),
-            discovered_stargazers: Vec::new(),
-            connected_stargazers: persisted_stargazers,
+            stargazers,
             connected_channels: HashMap::new(),
             stargazer_status: HashMap::new(),
             stargazer_list_generation: 0,
@@ -300,8 +303,6 @@ impl AsyncComponent for AppModel {
             chat_logs,
             stargazer_nicknames,
             unread_messages: HashMap::new(),
-            pending_consents: VecDeque::new(),
-            pending_outgoing_consent: None,
             sync_publish_tx: None,
             recent_interps: Vec::new(),
         };
@@ -409,13 +410,19 @@ impl AsyncComponent for AppModel {
 
             AppMsg::NetworkReady => {
                 // After a short settle delay, attempt to reconnect every persisted
-                // peer that we don't already have an active channel for.
-                let peer_ids: Vec<PeerId> = self.connected_stargazers.keys().cloned().collect();
-                if !peer_ids.is_empty() {
+                // peer (Connected offline) and retry every OutgoingPending peer.
+                let to_reconnect: Vec<PeerId> = self.stargazers.values()
+                    .filter(|s| matches!(
+                        s.state,
+                        StargazerState::Connected { .. } | StargazerState::OutgoingPending
+                    ))
+                    .map(|s| s.peer_id.clone())
+                    .collect();
+                if !to_reconnect.is_empty() {
                     let s = sender.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-                        for peer_id in peer_ids {
+                        for peer_id in to_reconnect {
                             s.input(AppMsg::Reconnect(peer_id));
                         }
                     });
@@ -446,42 +453,42 @@ impl AsyncComponent for AppModel {
             }
 
             AppMsg::Reconnect(peer_id) => {
-                // Only reconnect if we know the peer but no longer have a channel.
-                if !self.connected_stargazers.contains_key(&peer_id)
-                    || self.connected_channels.contains_key(&peer_id)
-                {
-                    return;
-                }
-                if let (Some(net), Some(our_blob)) = (
-                    &self.network,
+                // Determine what kind of connection attempt to make.
+                let is_new = match self.stargazers.get(&peer_id).map(|s| &s.state) {
+                    Some(StargazerState::Connected { .. })
+                        if !self.connected_channels.contains_key(&peer_id) => false,
+                    Some(StargazerState::OutgoingPending) => true,
+                    _ => return,
+                };
+                let (Some(net), Some(our_blob)) = (
+                    self.network.as_ref(),
                     make_consent_blob(&self.config, &self.identity),
-                ) {
-                    let net = Arc::clone(net);
-                    let pid = peer_id.clone();
-                    let peer_hex = hex::encode_upper(&pid.0[..4]);
-                    let s = sender.clone();
-                    info!(peer = %peer_hex, "attempting auto-reconnect");
-                    tokio::spawn(async move {
-                        match net.connect_peer(&pid).await {
-                            Ok(channel) => {
-                                match channel.exchange_consent(&our_blob).await {
-                                    Ok(their_blob) => {
-                                        info!(peer = %peer_hex, "auto-reconnect consent exchange ok");
-                                        s.input(AppMsg::ConnectionComplete {
-                                            peer_id: pid,
-                                            their_blob,
-                                            channel,
-                                            navigate: false,
-                                            is_new: false,
-                                        });
-                                    }
-                                    Err(e) => warn!(peer = %peer_hex, "auto-reconnect consent exchange: {e}"),
+                ) else { return };
+                let net = Arc::clone(net);
+                let pid = peer_id.clone();
+                let peer_hex = hex::encode_upper(&pid.0[..4]);
+                let s = sender.clone();
+                info!(peer = %peer_hex, is_new, "attempting connection");
+                tokio::spawn(async move {
+                    match net.connect_peer(&pid).await {
+                        Ok(channel) => {
+                            match channel.exchange_consent(&our_blob).await {
+                                Ok(their_blob) => {
+                                    info!(peer = %peer_hex, "consent exchange ok");
+                                    s.input(AppMsg::ConnectionComplete {
+                                        peer_id: pid,
+                                        their_blob,
+                                        channel,
+                                        navigate: false,
+                                        is_new,
+                                    });
                                 }
+                                Err(e) => warn!(peer = %peer_hex, "consent exchange: {e}"),
                             }
-                            Err(e) => warn!(peer = %peer_hex, "auto-reconnect failed: {e}"),
                         }
-                    });
-                }
+                        Err(e) => warn!(peer = %peer_hex, "connect_peer failed: {e}"),
+                    }
+                });
             }
 
             AppMsg::SetNickname { peer_id, name } => {
@@ -495,54 +502,43 @@ impl AsyncComponent for AppModel {
                 self.stargazer_list_generation += 1;
             }
 
-                        AppMsg::ProposeConsent(peer_id) => {
-                // "+" from Stargazers view — stage proposal before any network I/O.
-                self.pending_outgoing_consent = Some(peer_id);
+            AppMsg::ProposeConsent(peer_id) => {
+                // Idempotent: skip if already Connected or already seeking.
+                match self.stargazers.get(&peer_id).map(|s| &s.state) {
+                    Some(StargazerState::Connected { .. })
+                    | Some(StargazerState::OutgoingPending) => return,
+                    _ => {}
+                }
+                if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                    s.state = StargazerState::OutgoingPending;
+                } else {
+                    self.stargazers.insert(peer_id.clone(), Stargazer::outgoing_pending(peer_id.clone()));
+                }
+                save_pending(self.config.data_dir(), &self.stargazers);
                 self.stargazer_list_generation += 1;
+                // Immediately kick off the connection attempt.
+                sender.input(AppMsg::Reconnect(peer_id));
             }
 
-            AppMsg::ConfirmOutgoingConsent => {
-                // "Share ✓" — spawn background connect+consent so we don't block
-                // the component thread (and stall mDNS / PeerDiscovered events).
-                if let Some(peer_id) = self.pending_outgoing_consent.take() {
-                    if !self.connected_stargazers.contains_key(&peer_id) {
-                        if let (Some(net), Some(our_blob)) = (
-                            &self.network,
-                            make_consent_blob(&self.config, &self.identity),
-                        ) {
-                            let net = Arc::clone(net);
-                            let pid = peer_id.clone();
-                            let s = sender.clone();
-                            tokio::spawn(async move {
-                                let peer_hex = hex::encode_upper(&pid.0[..4]);
-                                match net.connect_peer(&pid).await {
-                                    Ok(channel) => {
-                                        info!(peer = %peer_hex, "consent channel opened");
-                                        match channel.exchange_consent(&our_blob).await {
-                                            Ok(their_blob) => {
-                                                info!(peer = %peer_hex, "consent exchange complete");
-                                                s.input(AppMsg::ConnectionComplete {
-                                                    peer_id: pid,
-                                                    their_blob,
-                                                    channel,
-                                                    navigate: true,
-                                                    is_new: true,
-                                                });
-                                            }
-                                            Err(e) => warn!("consent exchange: {e}"),
-                                        }
-                                    }
-                                    Err(e) => error!("connect_peer: {e}"),
-                                }
-                            });
+            AppMsg::RemoveStargazer(peer_id) => {
+                let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                if let Some(removed) = self.stargazers.remove(&peer_id) {
+                    match removed.state {
+                        StargazerState::IncomingPending { .. } => {
+                            notify::withdraw(&format!("consent-{peer_hex}"));
+                            // Dropping the channel closes the QUIC connection.
                         }
+                        StargazerState::OutgoingPending => {
+                            save_pending(self.config.data_dir(), &self.stargazers);
+                        }
+                        StargazerState::Connected { .. } => {
+                            self.connected_channels.remove(&peer_id);
+                            self.stargazer_status.remove(&peer_id);
+                            save_stargazers(self.config.data_dir(), &self.stargazers);
+                        }
+                        StargazerState::Discovered => {}
                     }
                 }
-                self.stargazer_list_generation += 1; // hides bar regardless of outcome
-            }
-
-            AppMsg::CancelOutgoingConsent => {
-                self.pending_outgoing_consent = None;
                 self.stargazer_list_generation += 1;
             }
 
@@ -559,17 +555,28 @@ impl AsyncComponent for AppModel {
                         "network-wireless-symbolic",
                         &[],
                     );
-                    // Run interp sync on the component thread (uses Rc types).
                     do_interp_sync(
                         &channel, &their_blob,
                         self.chart.as_ref(), &self.store,
                         &self.identity, &peer_hex,
                     ).await;
-                    self.connected_stargazers.insert(peer_id.clone(), their_blob);
-                    save_stargazers(self.config.data_dir(), &self.connected_stargazers);
+                }
+                // Transition to Connected (update in place, preserve announce info).
+                if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                    s.state = StargazerState::Connected { birth: their_blob };
                 } else {
-                    // Reconnect — update stored blob in case keys rotated.
-                    self.connected_stargazers.insert(peer_id.clone(), their_blob);
+                    // Arrived before any PeerDiscovered (e.g. incoming auto-accepted).
+                    self.stargazers.insert(peer_id.clone(), Stargazer {
+                        peer_id: peer_id.clone(),
+                        solar_month:         zodia_core::solar_month(their_blob.birth.jdn),
+                        geohash_prefix:      their_blob.birth.geohash.chars().take(3).collect(),
+                        approximate_aspects: Vec::new(),
+                        state:               StargazerState::Connected { birth: their_blob },
+                    });
+                }
+                if is_new {
+                    save_stargazers(self.config.data_dir(), &self.stargazers);
+                    save_pending(self.config.data_dir(), &self.stargazers);
                 }
                 if let Some(net) = &self.network {
                     net.accept_channel(peer_id.clone(), channel.clone());
@@ -583,47 +590,11 @@ impl AsyncComponent for AppModel {
             }
 
             AppMsg::OpenStargazer(peer_id) => {
-                // Sidebar tap — navigate to stargazer page; connect first if needed.
+                // Only Connected peers have a navigable page; pending rows are
+                // not activatable so this should only be called for Connected peers.
                 let tag = hex::encode_upper(&peer_id.0[..4]);
                 self.unread_messages.remove(&tag);
-
-                if self.connected_stargazers.contains_key(&peer_id) {
-                    // Already know this peer — navigate immediately.
-                    self.pending_push_queue.borrow_mut().push(peer_id);
-                } else {
-                    // Not connected yet — spawn background connect+consent; navigation
-                    // is queued once ConnectionComplete fires on the component thread.
-                    if let (Some(net), Some(our_blob)) = (
-                        &self.network,
-                        make_consent_blob(&self.config, &self.identity),
-                    ) {
-                        let net = Arc::clone(net);
-                        let pid = peer_id.clone();
-                        let s = sender.clone();
-                        tokio::spawn(async move {
-                            let peer_hex = hex::encode_upper(&pid.0[..4]);
-                            match net.connect_peer(&pid).await {
-                                Ok(channel) => {
-                                    info!(peer = %peer_hex, "consent channel opened");
-                                    match channel.exchange_consent(&our_blob).await {
-                                        Ok(their_blob) => {
-                                            info!(peer = %peer_hex, "consent exchange complete");
-                                            s.input(AppMsg::ConnectionComplete {
-                                                peer_id: pid,
-                                                their_blob,
-                                                channel,
-                                                navigate: true,
-                                                is_new: true,
-                                            });
-                                        }
-                                        Err(e) => warn!("consent exchange: {e}"),
-                                    }
-                                }
-                                Err(e) => error!("connect_peer: {e}"),
-                            }
-                        });
-                    }
-                }
+                self.pending_push_queue.borrow_mut().push(peer_id);
             }
 
             AppMsg::CallStargazer(peer_id) => {
@@ -642,40 +613,62 @@ impl AsyncComponent for AppModel {
             }
 
             AppMsg::AcceptConsent => {
-                if let Some((peer_id, channel)) = self.pending_consents.pop_front() {
-                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
-                    notify::withdraw(&format!("consent-{peer_hex}"));
-                    if let Some(net) = &self.network {
-                        if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
-                            match channel.exchange_consent(&our_blob).await {
-                                Ok(their_blob) => {
-                                    info!(peer = %peer_hex, "consent exchange complete");
-                                    do_interp_sync(
-                                        &channel, &their_blob,
-                                        self.chart.as_ref(), &self.store,
-                                        &self.identity, &peer_hex,
-                                    ).await;
-                                    self.connected_stargazers.insert(peer_id.clone(), their_blob);
-                                    save_stargazers(self.config.data_dir(), &self.connected_stargazers);
-                                    self.stargazer_list_generation += 1;
-                                }
-                                Err(e) => warn!(peer = %peer_hex, "consent exchange failed: {e}"),
-                            }
-                        }
-                        net.accept_channel(peer_id.clone(), channel.clone());
-                        send_status_active(&channel);
-                        self.connected_channels.insert(peer_id, channel);
+                let incoming_id = self.stargazers.iter()
+                    .find(|(_, s)| matches!(s.state, StargazerState::IncomingPending { .. }))
+                    .map(|(id, _)| id.clone());
+                let Some(peer_id) = incoming_id else { return };
+                let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+                notify::withdraw(&format!("consent-{peer_hex}"));
+                let channel = match &self.stargazers[&peer_id].state {
+                    StargazerState::IncomingPending { channel } => channel.clone(),
+                    _ => return,
+                };
+                let Some(our_blob) = make_consent_blob(&self.config, &self.identity) else {
+                    if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                        s.state = StargazerState::Discovered;
                     }
                     self.stargazer_list_generation += 1;
+                    return;
+                };
+                match channel.exchange_consent(&our_blob).await {
+                    Ok(their_blob) => {
+                        info!(peer = %peer_hex, "consent exchange complete");
+                        do_interp_sync(
+                            &channel, &their_blob,
+                            self.chart.as_ref(), &self.store,
+                            &self.identity, &peer_hex,
+                        ).await;
+                        if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                            s.state = StargazerState::Connected { birth: their_blob };
+                        }
+                        save_stargazers(self.config.data_dir(), &self.stargazers);
+                    }
+                    Err(e) => {
+                        warn!(peer = %peer_hex, "consent exchange failed: {e}");
+                        if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                            s.state = StargazerState::Discovered;
+                        }
+                    }
                 }
+                if let Some(net) = &self.network {
+                    net.accept_channel(peer_id.clone(), channel.clone());
+                }
+                send_status_active(&channel);
+                self.connected_channels.insert(peer_id, channel);
+                self.stargazer_list_generation += 1;
             }
 
             AppMsg::RejectConsent => {
-                if let Some((peer_id, _channel)) = self.pending_consents.pop_front() {
-                    // Dropping _channel closes the QUIC connection.
+                let incoming_id = self.stargazers.iter()
+                    .find(|(_, s)| matches!(s.state, StargazerState::IncomingPending { .. }))
+                    .map(|(id, _)| id.clone());
+                if let Some(peer_id) = incoming_id {
                     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                     notify::withdraw(&format!("consent-{peer_hex}"));
                     info!(peer = %peer_hex, "consent request declined");
+                    if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                        s.state = StargazerState::Discovered;
+                    }
                     self.stargazer_list_generation += 1;
                 }
             }
@@ -734,7 +727,10 @@ impl AsyncComponent for AppModel {
 
             AppMsg::SendViaRelay { relay, dest, text } => {
                 let Some(relay_channel) = self.connected_channels.get(&relay) else { return };
-                let Some(their_blob) = self.connected_stargazers.get(&dest) else { return };
+                let Some(their_blob) = self.stargazers.get(&dest).and_then(|s| match &s.state {
+                    StargazerState::Connected { birth } => Some(birth),
+                    _ => None,
+                }) else { return };
                 let our_id = self.network.as_ref().map(|n| n.node_id()).unwrap_or(PeerId([0u8; 32]));
 
                 let inner = RelayPayload { from: our_id.0, text: text.clone() };
@@ -798,12 +794,26 @@ impl AsyncComponent for AppModel {
                 let approx = self.chart.as_ref()
                     .map(|c| approximate_aspects(blob.solar_month, &c.positions))
                     .unwrap_or_default();
-                self.discovered_stargazers.push(DiscoveredStargazer::from_blob(peer_id, &blob, approx));
+                match self.stargazers.get_mut(&peer_id) {
+                    Some(s) => {
+                        // Update announce info regardless of current state.
+                        s.solar_month         = blob.solar_month;
+                        s.geohash_prefix      = blob.geohash_prefix.clone();
+                        s.approximate_aspects = approx;
+                        // If we've been wanting to reach them, retry now.
+                        if matches!(s.state, StargazerState::OutgoingPending) {
+                            _sender.input(AppMsg::Reconnect(peer_id.clone()));
+                        }
+                    }
+                    None => {
+                        self.stargazers.insert(
+                            peer_id.clone(),
+                            Stargazer::discovered(peer_id, &blob, approx),
+                        );
+                    }
+                }
                 self.stargazer_list_generation += 1;
-                // This peer just reached us via gossip, meaning our overlay now includes
-                // them.  Re-publish our own announce immediately so they can discover
-                // us too — without this, mutual discovery relies solely on the periodic
-                // re-announce timer (up to 20 s latency after the overlay connects).
+                // Re-publish our announce so the newly-seen peer can discover us too.
                 if let Some(net) = &self.network {
                     if let Err(e) = net.publish_announce().await {
                         warn!("re-announce on peer-discovered failed: {e}");
@@ -811,11 +821,53 @@ impl AsyncComponent for AppModel {
                 }
             }
             ZodiaNetEvent::PeerLeft { peer_id } => {
-                self.discovered_stargazers.retain(|p| p.peer_id != peer_id);
+                match self.stargazers.get(&peer_id).map(|s| &s.state) {
+                    Some(StargazerState::Discovered) | None => {
+                        self.stargazers.remove(&peer_id);
+                    }
+                    Some(StargazerState::IncomingPending { .. }) => {
+                        // Their channel is gone; revert so they don't linger as pending.
+                        if let Some(s) = self.stargazers.get_mut(&peer_id) {
+                            s.state = StargazerState::Discovered;
+                        }
+                    }
+                    // OutgoingPending stays (retry on next PeerDiscovered).
+                    // Connected stays (reconnect loop handles it).
+                    _ => {}
+                }
                 self.stargazer_list_generation += 1;
             }
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+
+                // Mutual-pending fast path: if we're already seeking them, skip
+                // the consent bar and auto-accept the exchange.
+                if matches!(
+                    self.stargazers.get(&peer_id).map(|s| &s.state),
+                    Some(StargazerState::OutgoingPending)
+                ) {
+                    info!(peer = %peer_hex, "mutual pending — auto-accepting incoming channel");
+                    if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
+                        let s = _sender.clone();
+                        let pid = peer_id.clone();
+                        tokio::spawn(async move {
+                            match channel.exchange_consent(&our_blob).await {
+                                Ok(their_blob) => {
+                                    s.input(AppMsg::ConnectionComplete {
+                                        peer_id: pid,
+                                        their_blob,
+                                        channel,
+                                        navigate: false,
+                                        is_new: true,
+                                    });
+                                }
+                                Err(e) => warn!(peer = %peer_hex, "mutual auto-accept failed: {e}"),
+                            }
+                        });
+                    }
+                    return;
+                }
+
                 info!(peer = %peer_hex, "incoming consent request — waiting for user approval");
                 let name = self.stargazer_nicknames.get(&peer_hex)
                     .cloned()
@@ -827,8 +879,20 @@ impl AsyncComponent for AppModel {
                     "mail-unread-symbolic",
                     &[("Accept", "app.accept-consent"), ("Decline", "app.reject-consent")],
                 );
-                self.pending_consents.push_back((peer_id, channel));
-                self.stargazer_list_generation += 1; // triggers update_view → consent bar refresh
+                // Update or insert the IncomingPending state.
+                match self.stargazers.get_mut(&peer_id) {
+                    Some(s) => s.state = StargazerState::IncomingPending { channel },
+                    None    => {
+                        self.stargazers.insert(peer_id.clone(), Stargazer {
+                            peer_id,
+                            solar_month:         0,
+                            geohash_prefix:      String::new(),
+                            approximate_aspects: Vec::new(),
+                            state:               StargazerState::IncomingPending { channel },
+                        });
+                    }
+                }
+                self.stargazer_list_generation += 1;
             }
             ZodiaNetEvent::CallOffer { from, session_id } => {
                 let peer_hex = hex::encode_upper(&from.0[..4]);
@@ -925,9 +989,11 @@ impl AsyncComponent for AppModel {
                 self.stargazer_status.remove(&peer_id);
                 self.connected_channels.remove(&peer_id);
                 self.stargazer_list_generation += 1;
-                // If we have a Tier-1 relationship with this peer, schedule a
-                // reconnect attempt after 10 s to restore the channel.
-                if self.connected_stargazers.contains_key(&peer_id) {
+                // Schedule a reconnect attempt for Connected peers after 10 s.
+                if matches!(
+                    self.stargazers.get(&peer_id).map(|s| &s.state),
+                    Some(StargazerState::Connected { .. })
+                ) {
                     let s = _sender.clone();
                     let pid = peer_id.clone();
                     tokio::spawn(async move {
@@ -1001,7 +1067,11 @@ impl AsyncComponent for AppModel {
 
         let pending: Vec<PeerId> = self.pending_push_queue.borrow_mut().drain(..).collect();
         for peer_id in pending {
-            if let Some(their_blob) = self.connected_stargazers.get(&peer_id) {
+            let their_blob = self.stargazers.get(&peer_id).and_then(|s| match &s.state {
+                StargazerState::Connected { birth } => Some(birth),
+                _ => None,
+            });
+            if let Some(their_blob) = their_blob {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
                 if let Some(chart) = &self.chart {
                     let nickname = self.stargazer_nicknames.get(&tag).map(|s| s.as_str());
@@ -1071,7 +1141,9 @@ impl AsyncComponent for AppModel {
         // ── network status label (shown in the Network content view) ─────────
 
         {
-            let connected = self.connected_stargazers.len();
+            let connected = self.stargazers.values()
+                .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
+                .count();
             let active    = self.stargazer_status.values()
                 .filter(|s| **s == PeerStatus::Active).count();
             let text = if self.node_id_text.is_empty() {
@@ -1107,14 +1179,15 @@ impl AsyncComponent for AppModel {
 
         // ── consent bar ──────────────────────────────────────────────────────
 
-        if let Some((peer_id, _)) = self.pending_consents.front() {
-            let tag = hex::encode_upper(&peer_id.0[..4]);
-            // Show solar glyph if we've seen their announce blob.
-            let glyph = self.discovered_stargazers.iter()
-                .find(|p| &p.peer_id == peer_id)
-                .map(|p| sign_glyph(p.solar_month).to_string())
-                .unwrap_or_default();
-            let more = self.pending_consents.len().saturating_sub(1);
+        let first_incoming = self.stargazers.values()
+            .find(|s| matches!(s.state, StargazerState::IncomingPending { .. }));
+        if let Some(s) = first_incoming {
+            let tag = hex::encode_upper(&s.peer_id.0[..4]);
+            let glyph = if s.solar_month > 0 { sign_glyph(s.solar_month).to_string() } else { String::new() };
+            let more = self.stargazers.values()
+                .filter(|s2| matches!(s2.state, StargazerState::IncomingPending { .. }))
+                .count()
+                .saturating_sub(1);
             let label = if more == 0 {
                 format!("{glyph}  ···{tag} wants to connect")
             } else {
@@ -1124,22 +1197,6 @@ impl AsyncComponent for AppModel {
             widgets.consent_bar.set_visible(true);
         } else {
             widgets.consent_bar.set_visible(false);
-        }
-
-        // ── outgoing consent bar ─────────────────────────────────────────────
-
-        if let Some(peer_id) = &self.pending_outgoing_consent {
-            let tag = hex::encode_upper(&peer_id.0[..4]);
-            let glyph = self.discovered_stargazers.iter()
-                .find(|p| &p.peer_id == peer_id)
-                .map(|p| sign_glyph(p.solar_month).to_string())
-                .unwrap_or_default();
-            widgets.outgoing_consent_status.set_text(
-                &format!("{glyph}  Share your chart with ···{tag}?")
-            );
-            widgets.outgoing_consent_bar.set_visible(true);
-        } else {
-            widgets.outgoing_consent_bar.set_visible(false);
         }
 
         // ── call bar ─────────────────────────────────────────────────────────
@@ -1180,6 +1237,8 @@ impl AsyncComponent for AppModel {
 
 /// Rebuild the peer rows in `nav_list` (indices 4+) and refresh any open peer
 /// page titles so nickname changes are reflected immediately.
+///
+/// Sort order: Connected+online → IncomingPending → OutgoingPending → Connected+offline.
 #[allow(deprecated)] // ViewSwitcherTitle
 fn rebuild_sidebar_stargazers(
     widgets: &mut AppWidgets,
@@ -1197,29 +1256,34 @@ fn rebuild_sidebar_stargazers(
         widgets.nav_list.remove(&row);
     }
 
-    let mut sorted: Vec<&PeerId> = model.connected_stargazers.keys().collect();
-    sorted.sort_by_key(|id| hex::encode_upper(&id.0[..4]));
+    // Collect all non-Discovered stargazers and sort them.
+    let mut visible: Vec<&Stargazer> = model.stargazers.values()
+        .filter(|s| !matches!(s.state, StargazerState::Discovered))
+        .collect();
+    visible.sort_by_key(|s| {
+        let has_channel = model.connected_channels.contains_key(&s.peer_id);
+        (s.sidebar_sort_key(has_channel), hex::encode_upper(&s.peer_id.0[..4]))
+    });
 
-    // Show the "Connected" section header only when there are connected peers.
+    // Show the "Others" section header only when there is something to show.
     if let Some(header) = widgets.nav_list.row_at_index(3) {
-        header.set_visible(!sorted.is_empty());
+        header.set_visible(!visible.is_empty());
     }
 
-    for peer_id in sorted {
-        let their_blob   = &model.connected_stargazers[peer_id];
-        let peer_hex     = hex::encode_upper(&peer_id.0[..4]);
-        let solar_month  = zodia_core::solar_month(their_blob.birth.jdn);
-        let glyph        = sign_glyph(solar_month);
-        let status       = model.stargazer_status.get(peer_id);
-        let has_channel  = model.connected_channels.contains_key(peer_id);
-        let display_name = model.stargazer_nicknames.get(&peer_hex)
-            .cloned()
-            .unwrap_or_else(|| format!("···{peer_hex}"));
-        let unread = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
+    for stargazer in visible {
+        let peer_id  = &stargazer.peer_id;
+        let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+        let has_channel = model.connected_channels.contains_key(peer_id);
+        let is_connected = matches!(stargazer.state, StargazerState::Connected { .. });
+        let is_pending   = matches!(
+            stargazer.state,
+            StargazerState::OutgoingPending | StargazerState::IncomingPending { .. }
+        );
 
         let row = gtk::ListBoxRow::new();
-        // Store full peer id hex as widget name for activation lookup.
         row.set_widget_name(&hex::encode(&peer_id.0));
+        // Pending peers have no navigable page yet.
+        row.set_activatable(is_connected);
 
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         hbox.set_margin_start(12);
@@ -1227,13 +1291,20 @@ fn rebuild_sidebar_stargazers(
         hbox.set_margin_top(6);
         hbox.set_margin_bottom(6);
 
-        // Three-state presence dot — drawn as a 6 px circle so it sits at the
-        // true geometric centre of the row rather than riding the text baseline.
-        let (dot_filled, dot_color) = match (has_channel, status) {
-            (_, Some(PeerStatus::Active))  => (true,  [0.46_f32, 0.82, 0.46, 1.0]),
-            (_, Some(PeerStatus::Away))    => (true,  [0.95,     0.75, 0.30, 1.0]),
-            (true,  None)                  => (true,  [0.95,     0.75, 0.30, 1.0]),
-            (false, _)                     => (false, [0.55,     0.55, 0.55, 0.7]),
+        // Presence / state dot.
+        let status = model.stargazer_status.get(peer_id);
+        let (dot_filled, dot_color) = match &stargazer.state {
+            StargazerState::IncomingPending { .. } =>
+                (true,  [0.95_f32, 0.75, 0.30, 1.0]), // amber — needs action
+            StargazerState::OutgoingPending =>
+                (false, [0.55_f32, 0.55, 0.55, 0.55]), // hollow dim — seeking
+            StargazerState::Connected { .. } => match (has_channel, status) {
+                (_, Some(PeerStatus::Active)) => (true,  [0.46_f32, 0.82, 0.46, 1.0]),
+                (_, Some(PeerStatus::Away))   => (true,  [0.95,     0.75, 0.30, 1.0]),
+                (true,  None)                 => (true,  [0.95,     0.75, 0.30, 1.0]),
+                (false, _)                    => (false, [0.55,     0.55, 0.55, 0.7]),
+            },
+            StargazerState::Discovered => unreachable!(),
         };
         let dot = gtk::DrawingArea::new();
         dot.set_size_request(8, 8);
@@ -1256,11 +1327,25 @@ fn rebuild_sidebar_stargazers(
         });
         hbox.append(&dot);
 
+        // Label: nickname for Connected, tag for Pending (no name yet).
+        let glyph = if stargazer.solar_month > 0 { sign_glyph(stargazer.solar_month) } else { "" };
+        let display_name = if is_connected {
+            model.stargazer_nicknames.get(&peer_hex)
+                .cloned()
+                .unwrap_or_else(|| format!("···{peer_hex}"))
+        } else {
+            format!("···{peer_hex}")
+        };
         let lbl = gtk::Label::new(Some(&format!("{glyph}  {display_name}")));
         lbl.set_halign(gtk::Align::Start);
         lbl.set_hexpand(true);
+        if is_pending {
+            lbl.add_css_class("dim-label");
+        }
         hbox.append(&lbl);
 
+        // Unread badge (Connected only).
+        let unread = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
         if unread > 0 {
             let badge = gtk::Label::new(Some(&unread.to_string()));
             badge.add_css_class("badge");
@@ -1269,33 +1354,29 @@ fn rebuild_sidebar_stargazers(
             hbox.append(&badge);
         }
 
-        // Pencil icon — transparent until hover, always reserves space so the
-        // row height never jumps. Plain Image + GestureClick avoids button
-        // padding that would make peer rows taller than chart/sky/network rows.
-        let edit_img = gtk::Image::from_icon_name("document-edit-symbolic");
-        edit_img.set_pixel_size(16);
-        edit_img.set_opacity(0.0);
-        edit_img.set_valign(gtk::Align::Center);
-        edit_img.set_tooltip_text(Some("Set nickname"));
-        hbox.append(&edit_img);
+        if is_connected {
+            // Pencil icon — transparent until hover.
+            let edit_img = gtk::Image::from_icon_name("document-edit-symbolic");
+            edit_img.set_pixel_size(16);
+            edit_img.set_opacity(0.0);
+            edit_img.set_valign(gtk::Align::Center);
+            edit_img.set_tooltip_text(Some("Set nickname"));
+            hbox.append(&edit_img);
 
-        // Row hover → dim (0.4 opacity); icon hover → full (1.0 opacity).
-        let motion_row = gtk::EventControllerMotion::new();
-        let img_row_enter = edit_img.clone();
-        let img_row_leave = edit_img.clone();
-        motion_row.connect_enter(move |_, _, _| img_row_enter.set_opacity(0.4));
-        motion_row.connect_leave(move |_| img_row_leave.set_opacity(0.0));
-        row.add_controller(motion_row);
+            let motion_row = gtk::EventControllerMotion::new();
+            let img_row_enter = edit_img.clone();
+            let img_row_leave = edit_img.clone();
+            motion_row.connect_enter(move |_, _, _| img_row_enter.set_opacity(0.4));
+            motion_row.connect_leave(move |_| img_row_leave.set_opacity(0.0));
+            row.add_controller(motion_row);
 
-        let motion_icon = gtk::EventControllerMotion::new();
-        let img_icon_enter = edit_img.clone();
-        let img_icon_leave = edit_img.clone();
-        motion_icon.connect_enter(move |_, _, _| img_icon_enter.set_opacity(1.0));
-        motion_icon.connect_leave(move |_| img_icon_leave.set_opacity(0.4));
-        edit_img.add_controller(motion_icon);
+            let motion_icon = gtk::EventControllerMotion::new();
+            let img_icon_enter = edit_img.clone();
+            let img_icon_leave = edit_img.clone();
+            motion_icon.connect_enter(move |_, _, _| img_icon_enter.set_opacity(1.0));
+            motion_icon.connect_leave(move |_| img_icon_leave.set_opacity(0.4));
+            edit_img.add_controller(motion_icon);
 
-        // Open a nickname dialog on click.
-        {
             let pid     = peer_id.0;
             let s       = sender.clone();
             let current = model.stargazer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
@@ -1308,12 +1389,10 @@ fn rebuild_sidebar_stargazers(
                 dialog.set_response_appearance("set", adw::ResponseAppearance::Suggested);
                 dialog.set_default_response(Some("set"));
                 dialog.set_close_response("cancel");
-
                 let entry = gtk::Entry::new();
                 entry.set_text(&current);
                 entry.set_placeholder_text(Some("Nickname…"));
                 dialog.set_extra_child(Some(&entry));
-
                 let s2 = s.clone();
                 let e  = entry.clone();
                 dialog.connect_response(None, move |_, id| {
@@ -1327,18 +1406,30 @@ fn rebuild_sidebar_stargazers(
                 dialog.present(Some(&img_ref));
             });
             edit_img.add_controller(click);
+        } else {
+            // Remove button — always visible on pending rows.
+            let remove_btn = gtk::Button::from_icon_name("window-close-symbolic");
+            remove_btn.add_css_class("flat");
+            remove_btn.set_valign(gtk::Align::Center);
+            remove_btn.set_tooltip_text(Some("Remove"));
+            let pid = peer_id.clone();
+            let s   = sender.clone();
+            remove_btn.connect_clicked(move |_| s.input(AppMsg::RemoveStargazer(pid.clone())));
+            hbox.append(&remove_btn);
         }
 
         row.set_child(Some(&hbox));
         widgets.nav_list.append(&row);
 
-        // Keep the open peer page title in sync with the current nickname.
-        if let Some(title_widget) = widgets.stargazer_titles.get(&peer_hex) {
-            let title_text = model.stargazer_nicknames.get(&peer_hex)
-                .filter(|n| !n.is_empty())
-                .map(|n| format!("{glyph}  {n}"))
-                .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
-            title_widget.set_title(&title_text);
+        // Keep open peer page title in sync with nickname.
+        if is_connected {
+            if let Some(title_widget) = widgets.stargazer_titles.get(&peer_hex) {
+                let title_text = model.stargazer_nicknames.get(&peer_hex)
+                    .filter(|n| !n.is_empty())
+                    .map(|n| format!("{glyph}  {n}"))
+                    .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
+                title_widget.set_title(&title_text);
+            }
         }
     }
 }
@@ -1384,8 +1475,8 @@ fn rebuild_network_view(
         }
     }
 
-    let discoverable: Vec<&DiscoveredStargazer> = model.discovered_stargazers.iter()
-        .filter(|p| !model.connected_stargazers.contains_key(&p.peer_id))
+    let discoverable: Vec<&Stargazer> = model.stargazers.values()
+        .filter(|s| matches!(s.state, StargazerState::Discovered))
         .collect();
 
     if discoverable.is_empty() {
@@ -1687,7 +1778,6 @@ fn build_widgets(
         notif_btn, notif_label,
         net_status_label,
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
-        outgoing_consent_bar, outgoing_consent_status,
         call_bar, call_status, accept_btn, hangup_btn,
     ) = build_main_page(model, sender);
     outer_stack.add_named(&main_view, Some("main"));
@@ -1769,8 +1859,6 @@ fn build_widgets(
         consent_status,
         consent_accept_btn,
         consent_reject_btn,
-        outgoing_consent_bar,
-        outgoing_consent_status,
         call_bar,
         call_status,
         accept_btn,
@@ -2066,7 +2154,6 @@ fn build_main_page(
     gtk::MenuButton, gtk::Label,                        // notif_btn, notif_label
     gtk::Label,                                         // net_status_label
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // incoming consent bar
-    gtk::Box, gtk::Label,                               // outgoing consent bar
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
 ) {
     // ── Notification bell (sidebar header) ───────────────────────────────────
@@ -2115,7 +2202,7 @@ fn build_main_page(
     // ── Section header row (index 3) — not selectable, separates nav from peers ──
     {
         let header_row = gtk::ListBoxRow::new();
-        let lbl = gtk::Label::new(Some("Connected"));
+        let lbl = gtk::Label::new(Some("Others"));
         lbl.add_css_class("heading");
         lbl.add_css_class("dim-label");
         lbl.set_halign(gtk::Align::Start);
@@ -2361,33 +2448,6 @@ fn build_main_page(
 
     toolbar_view.add_bottom_bar(&call_bar);
 
-    // Outgoing consent bar — shown when the local user has staged a "+" proposal.
-    let outgoing_consent_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    outgoing_consent_bar.add_css_class("toolbar");
-    outgoing_consent_bar.set_margin_start(8);
-    outgoing_consent_bar.set_margin_end(8);
-    outgoing_consent_bar.set_visible(false);
-
-    let outgoing_consent_status = gtk::Label::new(None);
-    outgoing_consent_status.set_hexpand(true);
-    outgoing_consent_status.set_halign(gtk::Align::Start);
-    outgoing_consent_bar.append(&outgoing_consent_status);
-
-    let share_btn = gtk::Button::with_label("Share  ✓");
-    share_btn.add_css_class("suggested-action");
-    share_btn.add_css_class("pill");
-    let s = sender.clone();
-    share_btn.connect_clicked(move |_| s.input(AppMsg::ConfirmOutgoingConsent));
-    outgoing_consent_bar.append(&share_btn);
-
-    let cancel_outgoing_btn = gtk::Button::with_label("Cancel  ✕");
-    cancel_outgoing_btn.add_css_class("pill");
-    let s = sender.clone();
-    cancel_outgoing_btn.connect_clicked(move |_| s.input(AppMsg::CancelOutgoingConsent));
-    outgoing_consent_bar.append(&cancel_outgoing_btn);
-
-    toolbar_view.add_bottom_bar(&outgoing_consent_bar);
-
     let _ = model;
 
     (
@@ -2398,7 +2458,6 @@ fn build_main_page(
         notif_btn, notif_label,
         net_status_label,
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
-        outgoing_consent_bar, outgoing_consent_status,
         call_bar, call_status, accept_btn, hangup_btn,
     )
 }
@@ -2431,37 +2490,59 @@ fn load_nicknames(data_dir: &std::path::Path) -> HashMap<String, String> {
 
 // ── peer persistence ──────────────────────────────────────────────────────────
 
-/// Load previously connected peers from `peers.tsv`.
-/// Format: `{peer_id_hex64}\t{jdn}\t{geohash}`
-fn load_stargazers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::ConsentBlob> {
+/// Load Connected peers from `peers.tsv` → `{peer_id_hex64}\t{jdn}\t{geohash}`.
+fn load_connected_stargazers(data_dir: &std::path::Path) -> HashMap<PeerId, zodia_net::ConsentBlob> {
     let Ok(content) = std::fs::read_to_string(data_dir.join("peers.tsv")) else {
         return HashMap::new();
     };
     content.lines()
         .filter_map(|line| {
             let mut parts = line.splitn(3, '\t');
-            let id_hex  = parts.next()?;
+            let id_hex   = parts.next()?;
             let jdn: f64 = parts.next()?.parse().ok()?;
             let geohash  = parts.next()?.to_string();
-            let id_bytes: Vec<u8> = hex::decode(id_hex).ok()?;
-            let id_arr: [u8; 32] = id_bytes.try_into().ok()?;
-            let peer_id = PeerId(id_arr);
+            let id_arr: [u8; 32] = hex::decode(id_hex).ok()?.try_into().ok()?;
             let blob = zodia_net::ConsentBlob {
-                birth: zodia_core::BirthData::new(jdn, geohash),
-                prekey:    [0u8; 32],
-                ephemeral: [0u8; 32],
-                relay_pk:  [0u8; 32],
+                birth:    zodia_core::BirthData::new(jdn, geohash),
+                prekey:   [0u8; 32],
+                ephemeral:[0u8; 32],
+                relay_pk: [0u8; 32],
             };
-            Some((peer_id, blob))
+            Some((PeerId(id_arr), blob))
         })
         .collect()
 }
 
-fn save_stargazers(data_dir: &std::path::Path, peers: &HashMap<PeerId, zodia_net::ConsentBlob>) {
-    let content: String = peers.iter()
-        .map(|(id, blob)| format!("{}\t{}\t{}\n", hex::encode(&id.0), blob.birth.jdn, blob.birth.geohash))
+fn save_stargazers(data_dir: &std::path::Path, stargazers: &HashMap<PeerId, Stargazer>) {
+    let content: String = stargazers.values()
+        .filter_map(|s| match &s.state {
+            StargazerState::Connected { birth } =>
+                Some(format!("{}\t{}\t{}\n", hex::encode(&s.peer_id.0), birth.birth.jdn, birth.birth.geohash)),
+            _ => None,
+        })
         .collect();
     let _ = std::fs::write(data_dir.join("peers.tsv"), content);
+}
+
+/// Load OutgoingPending peers from `pending.tsv` (one hex64 peer id per line).
+fn load_pending(data_dir: &std::path::Path) -> Vec<PeerId> {
+    let Ok(content) = std::fs::read_to_string(data_dir.join("pending.tsv")) else {
+        return Vec::new();
+    };
+    content.lines()
+        .filter_map(|line| {
+            let arr: [u8; 32] = hex::decode(line.trim()).ok()?.try_into().ok()?;
+            Some(PeerId(arr))
+        })
+        .collect()
+}
+
+fn save_pending(data_dir: &std::path::Path, stargazers: &HashMap<PeerId, Stargazer>) {
+    let content: String = stargazers.values()
+        .filter(|s| matches!(s.state, StargazerState::OutgoingPending))
+        .map(|s| format!("{}\n", hex::encode(&s.peer_id.0)))
+        .collect();
+    let _ = std::fs::write(data_dir.join("pending.tsv"), content);
 }
 
 /// Convert a local birth time to a UTC fractional hour using the IANA timezone
