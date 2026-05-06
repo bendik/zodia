@@ -328,7 +328,7 @@ pub fn detail_page(
     contribute_group.add(&entry);
     content.append(&contribute_group);
 
-    let submit = gtk::Button::with_label("Submit");
+    let submit = gtk::Button::with_label("Share");
     submit.add_css_class("flat");
     submit.set_halign(gtk::Align::End);
     submit.set_margin_top(4);
