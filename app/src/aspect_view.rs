@@ -140,7 +140,8 @@ impl SimpleComponent for AspectView {
             .map(|it| InterpRowInit {
                 key:             it.key.clone(),
                 title:           it.key.plain_name(),
-                glyph_suffix:    Some(it.glyph_suffix.clone()),
+                symbol_line:     Some(it.symbol_line.clone()),
+                meta_line:       it.meta_line.clone(),
                 transit_context: it.transit_context.clone(),
                 body_preview:    resolve_top_body(&init.store.borrow(), &init.baseline, &it.key),
             })

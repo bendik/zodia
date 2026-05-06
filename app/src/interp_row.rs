@@ -20,8 +20,10 @@ pub struct InterpRowInit {
     pub key:             InterpKey,
     /// Plain-English row title, e.g. "Jupiter trine Venus".
     pub title:           String,
-    /// Optional compact glyph string shown as a suffix, e.g. "☽△♀  orb 2.3°".
-    pub glyph_suffix:    Option<String>,
+    /// Top suffix line — compact glyph string, e.g. "☽ △ ♀".
+    pub symbol_line:     Option<String>,
+    /// Bottom suffix line — orb / metadata, stacked under `symbol_line`.
+    pub meta_line:       Option<String>,
     /// Optional date-range context for transit aspects, propagated into the
     /// detail page so it can show "Active: 8 Apr – 16 Apr 2026".
     pub transit_context: Option<String>,
@@ -58,14 +60,16 @@ pub enum InterpRowOut {
 pub struct InterpRow {
     pub key:             InterpKey,
     pub title:           String,
-    pub glyph_suffix:    Option<String>,
+    pub symbol_line:     Option<String>,
+    pub meta_line:       Option<String>,
     pub transit_context: Option<String>,
     pub body_preview:    String,
 }
 
 pub struct InterpRowWidgets {
-    row:       adw::ActionRow,
-    glyph_lbl: gtk::Label,
+    row:        adw::ActionRow,
+    symbol_lbl: gtk::Label,
+    meta_lbl:   gtk::Label,
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -100,7 +104,8 @@ impl FactoryComponent for InterpRow {
         Self {
             key:             init.key,
             title:           init.title,
-            glyph_suffix:    init.glyph_suffix,
+            symbol_line:     init.symbol_line,
+            meta_line:       init.meta_line,
             transit_context: init.transit_context,
             body_preview:    init.body_preview,
         }
@@ -122,13 +127,26 @@ impl FactoryComponent for InterpRow {
         _returned_widget: &gtk::Widget,
         sender: FactorySender<Self>,
     ) -> Self::Widgets {
-        // Glyph suffix label (always present; hidden when no glyph).
-        let glyph_lbl = gtk::Label::new(self.glyph_suffix.as_deref());
-        glyph_lbl.add_css_class("dim-label");
-        glyph_lbl.add_css_class("caption");
-        glyph_lbl.add_css_class("aspect-list");
-        glyph_lbl.set_visible(self.glyph_suffix.is_some());
-        root.add_suffix(&glyph_lbl);
+        // Suffix box stacks the symbol line on top of the orb / meta line so the
+        // row's title + subtitle have full width to breathe.
+        let suffix_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        suffix_box.set_valign(gtk::Align::Center);
+
+        let symbol_lbl = gtk::Label::new(self.symbol_line.as_deref());
+        symbol_lbl.add_css_class("dim-label");
+        symbol_lbl.add_css_class("aspect-list");
+        symbol_lbl.set_halign(gtk::Align::End);
+        symbol_lbl.set_visible(self.symbol_line.is_some());
+        suffix_box.append(&symbol_lbl);
+
+        let meta_lbl = gtk::Label::new(self.meta_line.as_deref());
+        meta_lbl.add_css_class("dim-label");
+        meta_lbl.add_css_class("caption");
+        meta_lbl.set_halign(gtk::Align::End);
+        meta_lbl.set_visible(self.meta_line.is_some());
+        suffix_box.append(&meta_lbl);
+
+        root.add_suffix(&suffix_box);
 
         // Trailing chevron.
         root.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
@@ -146,14 +164,15 @@ impl FactoryComponent for InterpRow {
             });
         }
 
-        InterpRowWidgets { row: root, glyph_lbl }
+        InterpRowWidgets { row: root, symbol_lbl, meta_lbl }
     }
 
     fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
         let InterpRowMsg::Update(init) = msg;
         self.key             = init.key;
         self.title           = init.title;
-        self.glyph_suffix    = init.glyph_suffix;
+        self.symbol_line     = init.symbol_line;
+        self.meta_line       = init.meta_line;
         self.transit_context = init.transit_context;
         self.body_preview    = init.body_preview;
     }
@@ -161,12 +180,13 @@ impl FactoryComponent for InterpRow {
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: FactorySender<Self>) {
         widgets.row.set_title(&self.title);
         widgets.row.set_subtitle(&subtitle_for(&self.body_preview));
-        match &self.glyph_suffix {
-            Some(g) => {
-                widgets.glyph_lbl.set_text(g);
-                widgets.glyph_lbl.set_visible(true);
-            }
-            None => widgets.glyph_lbl.set_visible(false),
+        match &self.symbol_line {
+            Some(s) => { widgets.symbol_lbl.set_text(s); widgets.symbol_lbl.set_visible(true); }
+            None    => widgets.symbol_lbl.set_visible(false),
+        }
+        match &self.meta_line {
+            Some(m) => { widgets.meta_lbl.set_text(m); widgets.meta_lbl.set_visible(true); }
+            None    => widgets.meta_lbl.set_visible(false),
         }
     }
 }

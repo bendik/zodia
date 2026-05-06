@@ -13,8 +13,11 @@ use zodia_core::{
 /// Data for a single aspect list row.
 pub struct AspectItem {
     pub key: InterpKey,
-    /// Compact glyph string, e.g. "☽△♀  orb 2.3°" or "♄  →  ⌂7"
-    pub glyph_suffix: String,
+    /// Top suffix line — compact glyph string, e.g. "☽ △ ♀" or "♄ → ⌂7".
+    pub symbol_line: String,
+    /// Bottom suffix line — orb / metadata.  `None` for variants with no orb
+    /// (e.g. house transits).
+    pub meta_line: Option<String>,
     /// Human-readable date range string for transit aspects, e.g.
     /// "Active: 8 Apr – 16 Apr 2026".  `None` for natal/synastry items.
     pub transit_context: Option<String>,
@@ -25,10 +28,11 @@ pub fn natal_items(aspects: &[Aspect]) -> Vec<AspectItem> {
         .iter()
         .map(|a| AspectItem {
             key: InterpKey::from_natal(a),
-            glyph_suffix: format!(
-                "{} {} {}  orb {:.1}°",
-                a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(), a.orb
+            symbol_line: format!(
+                "{} {} {}",
+                a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(),
             ),
+            meta_line: Some(format!("orb {:.1}°", a.orb)),
             transit_context: None,
         })
         .collect()
@@ -58,10 +62,11 @@ pub fn transit_items(
                 });
             AspectItem {
                 key: ta.interp_key(),
-                glyph_suffix: format!(
-                    "{} {} natal {}  orb {:.1}°",
-                    ta.transiting.symbol(), ta.kind.symbol(), ta.natal_body.symbol(), ta.orb
+                symbol_line: format!(
+                    "{} {} natal {}",
+                    ta.transiting.symbol(), ta.kind.symbol(), ta.natal_body.symbol(),
                 ),
+                meta_line: Some(format!("orb {:.1}°", ta.orb)),
                 transit_context: window_str,
             }
         })
@@ -71,7 +76,8 @@ pub fn transit_items(
     for ht in house_transits {
         items.push(AspectItem {
             key: ht.interp_key(),
-            glyph_suffix: format!("{}  →  ⌂{}", ht.transiting.symbol(), ht.house),
+            symbol_line: format!("{} → ⌂{}", ht.transiting.symbol(), ht.house),
+            meta_line: None,
             transit_context: Some(format!("As of {as_of}")),
         });
     }
@@ -83,10 +89,11 @@ pub fn synastry_items(aspects: &[SynastryAspect]) -> Vec<AspectItem> {
         .iter()
         .map(|a| AspectItem {
             key: InterpKey::from_synastry(a),
-            glyph_suffix: format!(
-                "{} {} {}  orb {:.1}°",
-                a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(), a.orb
+            symbol_line: format!(
+                "{} {} {}",
+                a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(),
             ),
+            meta_line: Some(format!("orb {:.1}°", a.orb)),
             transit_context: None,
         })
         .collect()
