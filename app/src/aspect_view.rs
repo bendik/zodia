@@ -219,10 +219,14 @@ impl SimpleComponent for AspectView {
 
 /// Build the detail page for a row's keys.
 ///
-/// - 1 key → no view switcher; the single key's content fills the page.
-/// - 2+ keys → header carries an `adw::ViewSwitcher`; one stack page per key
-///   plus a synthetic "Combined" page that stacks all per-key
-///   Interpretations groups read-only.
+/// Layout (uniform across 1-key and multi-key rows):
+///   1. Optional Timing group (transit aspects)
+///   2. One Interpretations group per `KeyEntry` — labelled with the entry's
+///      label.  Stacked top-to-bottom; this is the always-visible "Combined"
+///      reading.  Affirm buttons are interactive.
+///   3. Contribute group with a single text entry, a radio row picking which
+///      key the contribution targets (hidden when `keys.len() == 1`), and a
+///      Share button.
 pub fn detail_page(
     keys: &[KeyEntry],
     transit_context: Option<String>,
@@ -236,67 +240,15 @@ pub fn detail_page(
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
 
-    // Page heading: the first key's plain_name is the most natural title for
-    // both single-key (aspect) and multi-key (placement) rows — placements
-    // lead with the sign reading.
     let page_title = keys.first()
         .map(|e| e.key.plain_name())
         .unwrap_or_default();
-
-    // Build the view stack regardless; if only one key, we hide the switcher
-    // and just show the single page.
-    let stack = adw::ViewStack::new();
-
-    for entry in keys {
-        let page_widget = key_content_page(
-            &entry.key,
-            transit_context.clone(),
-            Rc::clone(&store),
-            Rc::clone(&baseline),
-            Rc::clone(&identity),
-            sender.clone(),
-        );
-        stack.add_titled(&page_widget, Some(&entry.label.to_lowercase()), &entry.label);
-    }
-
-    // Synthetic "Combined" page for 2+ keys.
-    if keys.len() >= 2 {
-        let combined = combined_content_page(
-            keys,
-            transit_context.clone(),
-            &store.borrow(),
-            &baseline,
-        );
-        stack.add_titled(&combined, Some("combined"), "Combined");
-    }
-
-    // Header title widget: switcher when 2+ keys, plain title otherwise.
-    if keys.len() >= 2 {
-        let switcher = adw::ViewSwitcher::new();
-        switcher.set_stack(Some(&stack));
-        switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
-        header.set_title_widget(Some(&switcher));
-    } else {
-        let title_lbl = gtk::Label::new(Some(&page_title));
-        title_lbl.add_css_class("title");
-        header.set_title_widget(Some(&title_lbl));
-    }
+    let title_lbl = gtk::Label::new(Some(&page_title));
+    title_lbl.add_css_class("title");
+    header.set_title_widget(Some(&title_lbl));
 
     toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&stack));
 
-    adw::NavigationPage::new(&toolbar, &page_title)
-}
-
-/// Per-key page content — Interpretations group + Contribute group.
-fn key_content_page(
-    key: &InterpKey,
-    transit_context: Option<String>,
-    store: Rc<RefCell<ZodiaStore>>,
-    baseline: Rc<BaselineStore>,
-    identity: Rc<IdentityKeypair>,
-    sender: AsyncComponentSender<AppModel>,
-) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     scroll.set_vexpand(true);
@@ -310,62 +262,7 @@ fn key_content_page(
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
 
-    if let Some(ctx) = transit_context {
-        let timing_group = adw::PreferencesGroup::new();
-        timing_group.set_title("Timing");
-        let timing_row = adw::ActionRow::new();
-        timing_row.set_title(&ctx);
-        let icon = gtk::Image::from_icon_name("x-office-calendar-symbolic");
-        icon.add_css_class("dim-label");
-        timing_row.add_prefix(&icon);
-        timing_group.add(&timing_row);
-        content.append(&timing_group);
-    }
-
-    let interp_group = build_interpretations_group(
-        key,
-        &store.borrow(),
-        &baseline,
-        Some(Rc::clone(&identity)),
-        Some(Rc::clone(&store)),
-    );
-    content.append(&interp_group);
-
-    let contribute_group = build_contribute_group(
-        key.clone(),
-        Rc::clone(&store),
-        Rc::clone(&identity),
-        sender,
-        interp_group.clone(),
-    );
-    content.append(&contribute_group);
-
-    clamp.set_child(Some(&content));
-    scroll.set_child(Some(&clamp));
-    scroll
-}
-
-/// Synthetic Combined page — stacks the read-only Interpretations group for
-/// each key.  No contribute UI here (contribute happens on the per-key tabs).
-fn combined_content_page(
-    keys: &[KeyEntry],
-    transit_context: Option<String>,
-    store: &ZodiaStore,
-    baseline: &BaselineStore,
-) -> gtk::ScrolledWindow {
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    scroll.set_vexpand(true);
-
-    let clamp = adw::Clamp::new();
-    clamp.set_maximum_size(640);
-    clamp.set_margin_top(16);
-    clamp.set_margin_bottom(24);
-    clamp.set_margin_start(16);
-    clamp.set_margin_end(16);
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-
+    // ── timing (transits) ─────────────────────────────────────────────────────
     if let Some(ctx) = transit_context {
         let timing_group = adw::PreferencesGroup::new();
         timing_group.set_title("Timing");
@@ -375,15 +272,42 @@ fn combined_content_page(
         content.append(&timing_group);
     }
 
+    // ── interpretations: one labelled group per key, all visible ──────────────
+    // We need to track each group by key sig so the contribute submit can
+    // append to the right one without rebuilding the page.
+    let mut groups_by_sig: std::collections::HashMap<String, adw::PreferencesGroup> =
+        std::collections::HashMap::new();
     for entry in keys {
-        let group = build_interpretations_group(&entry.key, store, baseline, None, None);
-        group.set_title(&entry.label);
+        let group = build_interpretations_group(
+            &entry.key,
+            &store.borrow(),
+            &baseline,
+            Some(Rc::clone(&identity)),
+            Some(Rc::clone(&store)),
+        );
+        // For 1 key, "Interpretations" is the right title.  For 2+, label per key.
+        if keys.len() > 1 {
+            group.set_title(&format!("{} — Interpretations", entry.label));
+        }
+        groups_by_sig.insert(entry.key.to_sig(), group.clone());
         content.append(&group);
     }
 
+    // ── contribute (single, with target-key radio when multi-key) ─────────────
+    let contribute = build_contribute_group(
+        keys,
+        Rc::clone(&store),
+        Rc::clone(&identity),
+        sender,
+        groups_by_sig,
+    );
+    content.append(&contribute);
+
     clamp.set_child(Some(&content));
     scroll.set_child(Some(&clamp));
-    scroll
+    toolbar.set_content(Some(&scroll));
+
+    adw::NavigationPage::new(&toolbar, &page_title)
 }
 
 /// Build the Interpretations group for `key`.  When `identity` + `store_rc`
@@ -453,20 +377,56 @@ fn build_interpretations_group(
     group
 }
 
-/// Build the Contribute group for `key`.  Submitting appends a new row to
-/// `interp_group` so the user sees their addition without re-rendering.
+/// Build the Contribute group.  Single text entry + Share button.  When
+/// `keys.len() > 1`, a radio row picks which key the contribution targets;
+/// otherwise the lone key is implicit.  Submitting appends a new row to the
+/// matching Interpretations group so the user sees their addition immediately.
 fn build_contribute_group(
-    key: InterpKey,
+    keys: &[KeyEntry],
     store: Rc<RefCell<ZodiaStore>>,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
-    interp_group: adw::PreferencesGroup,
+    groups_by_sig: std::collections::HashMap<String, adw::PreferencesGroup>,
 ) -> gtk::Box {
+    use std::cell::Cell;
+
     let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 4);
 
     let group = adw::PreferencesGroup::new();
     group.set_title("Contribute");
     group.set_description(Some("Optional — add your own reading if you have one."));
+
+    // Tracks which key index in `keys` is currently selected.
+    let selected: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+
+    // Target-key radio row (only visible for multi-key rows).
+    if keys.len() > 1 {
+        let target_row = adw::ActionRow::new();
+        target_row.set_title("Reading for");
+        target_row.set_subtitle("Which placement does this contribution describe?");
+
+        let radio_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        radio_box.set_valign(gtk::Align::Center);
+
+        let mut first: Option<gtk::CheckButton> = None;
+        for (i, entry) in keys.iter().enumerate() {
+            let cb = gtk::CheckButton::with_label(&entry.label);
+            if let Some(ref f) = first {
+                cb.set_group(Some(f));
+            } else {
+                first = Some(cb.clone());
+            }
+            if i == 0 { cb.set_active(true); }
+            let sel = Rc::clone(&selected);
+            cb.connect_toggled(move |btn| {
+                if btn.is_active() { sel.set(i); }
+            });
+            radio_box.append(&cb);
+        }
+
+        target_row.add_suffix(&radio_box);
+        group.add(&target_row);
+    }
 
     let entry = adw::EntryRow::new();
     entry.set_title("Your interpretation…");
@@ -478,25 +438,33 @@ fn build_contribute_group(
     submit.set_halign(gtk::Align::End);
     submit.set_margin_top(4);
 
+    let keys_owned: Vec<KeyEntry> = keys.to_vec();
+    let groups     = groups_by_sig;
     let store_c    = Rc::clone(&store);
     let identity_c = Rc::clone(&identity);
     let entry_c    = entry.clone();
-    let group_c    = interp_group.clone();
     let sender_c   = sender.clone();
+    let sel        = Rc::clone(&selected);
     submit.connect_clicked(move |_| {
         let text    = entry_c.text().to_string();
         let trimmed = text.trim();
         if trimmed.is_empty() { return; }
-        let payload    = ZodiaStore::signing_payload(&key, trimmed);
+
+        let idx = sel.get().min(keys_owned.len().saturating_sub(1));
+        let key = match keys_owned.get(idx) { Some(k) => &k.key, None => return };
+
+        let payload    = ZodiaStore::signing_payload(key, trimmed);
         let author_sig = identity_c.sign(&payload);
         let author_pk  = identity_c.public_key();
         if let Ok(_log_id) = store_c.borrow()
-            .insert_signed(&key, trimmed, &author_pk, &author_sig)
+            .insert_signed(key, trimmed, &author_pk, &author_sig)
         {
-            let new_row = adw::ActionRow::new();
-            new_row.set_title(trimmed);
-            new_row.set_subtitle("0 ♡  ·  community (just added)");
-            group_c.add(&new_row);
+            if let Some(group) = groups.get(&key.to_sig()) {
+                let new_row = adw::ActionRow::new();
+                new_row.set_title(trimmed);
+                new_row.set_subtitle("0 ♡  ·  community (just added)");
+                group.add(&new_row);
+            }
             entry_c.set_text("");
             sender_c.input(AppMsg::ShareInterp(InterpEntry {
                 interp_key: key.to_sig(),
