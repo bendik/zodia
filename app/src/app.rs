@@ -32,9 +32,12 @@ use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
 use zodia_store::{StoreError, ZodiaStore, BaselineStore};
 use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
 
+use relm4::factory::FactoryVecDeque;
+
 use crate::aspect_list;
 use crate::aspect_view::AspectView;
 use crate::notify;
+use crate::peer_row::{PeerRow, PeerRowInit, PeerRowMsg, PeerRowOut};
 use crate::stargazer_list::{Stargazer, StargazerState};
 use crate::stargazer_page::{self, append_chat_row};
 use crate::util::{approximate_aspects, sign_glyph};
@@ -150,8 +153,11 @@ pub struct AppModel {
     stargazer_status: HashMap<PeerId, PeerStatus>,
 
     /// Incremented whenever the stargazer list content changes so `update_view`
-    /// knows when to rebuild the GTK rows.
+    /// knows when to rebuild the network view and peer page titles.
     stargazer_list_generation: u64,
+
+    /// Factory-backed peer rows in the "Others" sidebar section.
+    peers_factory: FactoryVecDeque<PeerRow>,
 
     /// Peers the user has explicitly tapped; pages pushed once Tier-1 completes.
     /// Uses `RefCell` for interior mutability inside `update_view (&self)`.
@@ -193,9 +199,11 @@ pub struct AppWidgets {
 
     /// Overlay split view — sidebar on the left, content stack on the right.
     split_view: adw::OverlaySplitView,
-    /// Single nav ListBox (Chart / Sky / Stargazers + opened pages) — one selection source.
+    /// Nav ListBox (Chart / Sky / Network) — three static rows.
     nav_list: gtk::ListBox,
-    /// Generation of the stargazer list we last rendered.
+    /// "Others" section header label — hidden when no peers in the factory.
+    others_header: gtk::Label,
+    /// Generation of the network view / page titles we last rendered.
     stargazer_list_shown_gen: u64,
 
     /// Single content stack — chart / sky / stargazers + per-stargazer pages, all as named children.
@@ -283,6 +291,20 @@ impl AsyncComponent for AppModel {
             })
             .collect();
 
+        // Create the peer-row factory before building widgets so we can embed its
+        // gtk::ListBox in the sidebar layout.
+        let peers_factory: FactoryVecDeque<PeerRow> = FactoryVecDeque::builder()
+            .launch({
+                let l = gtk::ListBox::new();
+                l.add_css_class("navigation-sidebar");
+                l
+            })
+            .forward(sender.input_sender(), |out| match out {
+                PeerRowOut::Activate(pid)  => AppMsg::OpenStargazer(pid),
+                PeerRowOut::Remove(pid)    => AppMsg::RemoveStargazer(pid),
+                PeerRowOut::SetNickname { peer_id, name } => AppMsg::SetNickname { peer_id, name },
+            });
+
         let mut model = AppModel {
             on_setup_page: !has_birth,
             chart: None,
@@ -294,6 +316,7 @@ impl AsyncComponent for AppModel {
             connected_channels: HashMap::new(),
             stargazer_status: HashMap::new(),
             stargazer_list_generation: 0,
+            peers_factory,
             pending_push_queue: RefCell::new(Vec::new()),
             config: init.config,
             setup_error: String::new(),
@@ -306,6 +329,8 @@ impl AsyncComponent for AppModel {
             sync_publish_tx: None,
             recent_interps: Vec::new(),
         };
+        // Populate the factory with persisted peers (Connected + OutgoingPending).
+        sync_peers_factory(&mut model);
         model.recent_interps = model.store.borrow()
             .recent_community_interps(12).unwrap_or_default();
 
@@ -500,6 +525,7 @@ impl AsyncComponent for AppModel {
                 }
                 save_nicknames(self.config.data_dir(), &self.stargazer_nicknames);
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
             }
 
             AppMsg::ProposeConsent(peer_id) => {
@@ -516,6 +542,7 @@ impl AsyncComponent for AppModel {
                 }
                 save_pending(self.config.data_dir(), &self.stargazers);
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
                 // Immediately kick off the connection attempt.
                 sender.input(AppMsg::Reconnect(peer_id));
             }
@@ -540,6 +567,7 @@ impl AsyncComponent for AppModel {
                     }
                 }
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
             }
 
             AppMsg::ConnectionComplete { peer_id, their_blob, channel, navigate, is_new } => {
@@ -584,6 +612,7 @@ impl AsyncComponent for AppModel {
                 send_status_active(&channel);
                 self.connected_channels.insert(peer_id.clone(), channel);
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
                 if navigate {
                     self.pending_push_queue.borrow_mut().push(peer_id);
                 }
@@ -628,6 +657,7 @@ impl AsyncComponent for AppModel {
                         s.state = StargazerState::Discovered;
                     }
                     self.stargazer_list_generation += 1;
+                    sync_peers_factory(self);
                     return;
                 };
                 match channel.exchange_consent(&our_blob).await {
@@ -656,6 +686,7 @@ impl AsyncComponent for AppModel {
                 send_status_active(&channel);
                 self.connected_channels.insert(peer_id, channel);
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
             }
 
             AppMsg::RejectConsent => {
@@ -670,6 +701,7 @@ impl AsyncComponent for AppModel {
                         s.state = StargazerState::Discovered;
                     }
                     self.stargazer_list_generation += 1;
+                    sync_peers_factory(self);
                 }
             }
 
@@ -813,6 +845,7 @@ impl AsyncComponent for AppModel {
                     }
                 }
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
                 // Re-publish our announce so the newly-seen peer can discover us too.
                 if let Some(net) = &self.network {
                     if let Err(e) = net.publish_announce().await {
@@ -836,6 +869,7 @@ impl AsyncComponent for AppModel {
                     _ => {}
                 }
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
             }
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
@@ -893,6 +927,7 @@ impl AsyncComponent for AppModel {
                     }
                 }
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
             }
             ZodiaNetEvent::CallOffer { from, session_id } => {
                 let peer_hex = hex::encode_upper(&from.0[..4]);
@@ -947,6 +982,7 @@ impl AsyncComponent for AppModel {
                 info!(peer = %tag, ?status, "peer status update");
                 self.stargazer_status.insert(peer_id, status);
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
             }
             ZodiaNetEvent::RelayReceived { via: _, dest, payload } => {
                 let our_id = self.network.as_ref().map(|n| n.node_id()).unwrap_or(PeerId([0u8; 32]));
@@ -989,6 +1025,7 @@ impl AsyncComponent for AppModel {
                 self.stargazer_status.remove(&peer_id);
                 self.connected_channels.remove(&peer_id);
                 self.stargazer_list_generation += 1;
+                sync_peers_factory(self);
                 // Schedule a reconnect attempt for Connected peers after 10 s.
                 if matches!(
                     self.stargazers.get(&peer_id).map(|s| &s.state),
@@ -1055,11 +1092,29 @@ impl AsyncComponent for AppModel {
             }
         }
 
-        // ── rebuild peer list when content changes ────────────────────────────
+        // ── factory "Others" header visibility ────────────────────────────────
+
+        widgets.others_header.set_visible(!self.peers_factory.is_empty());
+
+        // ── rebuild network view and sync page titles when content changes ────
 
         if self.stargazer_list_generation != widgets.stargazer_list_shown_gen {
-            rebuild_sidebar_stargazers(widgets, self, &sender);
             rebuild_network_view(widgets, self, &sender);
+            // Keep open peer page titles in sync with nicknames.
+            for s in self.stargazers.values()
+                .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
+            {
+                let peer_hex = hex::encode_upper(&s.peer_id.0[..4]);
+                let glyph    = if s.solar_month > 0 { sign_glyph(s.solar_month) } else { "" };
+                #[allow(deprecated)]
+                if let Some(tw) = widgets.stargazer_titles.get(&peer_hex) {
+                    let title = self.stargazer_nicknames.get(&peer_hex)
+                        .filter(|n| !n.is_empty())
+                        .map(|n| format!("{glyph}  {n}"))
+                        .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
+                    tw.set_title(&title);
+                }
+            }
             widgets.stargazer_list_shown_gen = self.stargazer_list_generation;
         }
 
@@ -1233,30 +1288,60 @@ impl AsyncComponent for AppModel {
     }
 }
 
-// ── sidebar peer list builder ─────────────────────────────────────────────────
+// ── factory peer sync ─────────────────────────────────────────────────────────
 
-/// Rebuild the peer rows in `nav_list` (indices 4+) and refresh any open peer
-/// page titles so nickname changes are reflected immediately.
+/// Compute the `PeerRowInit` for a stargazer (must not be Discovered).
+fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
+    let peer_hex    = hex::encode_upper(&s.peer_id.0[..4]);
+    let has_channel = model.connected_channels.contains_key(&s.peer_id);
+    let status      = model.stargazer_status.get(&s.peer_id);
+    let is_connected = matches!(s.state, StargazerState::Connected { .. });
+    let is_pending   = matches!(
+        s.state,
+        StargazerState::OutgoingPending | StargazerState::IncomingPending { .. }
+    );
+    let (dot_filled, dot_rgba) = match &s.state {
+        StargazerState::IncomingPending { .. } =>
+            (true,  [0.95_f32, 0.75, 0.30, 1.0]),
+        StargazerState::OutgoingPending =>
+            (false, [0.55_f32, 0.55, 0.55, 0.55]),
+        StargazerState::Connected { .. } => match (has_channel, status) {
+            (_, Some(PeerStatus::Active)) => (true,  [0.46_f32, 0.82, 0.46, 1.0]),
+            (_, Some(PeerStatus::Away))   => (true,  [0.95,     0.75, 0.30, 1.0]),
+            (true,  None)                 => (true,  [0.95,     0.75, 0.30, 1.0]),
+            (false, _)                    => (false, [0.55,     0.55, 0.55, 0.70]),
+        },
+        StargazerState::Discovered => unreachable!(),
+    };
+    let display_name = if is_connected {
+        model.stargazer_nicknames.get(&peer_hex)
+            .cloned()
+            .unwrap_or_else(|| format!("···{peer_hex}"))
+    } else {
+        format!("···{peer_hex}")
+    };
+    let nickname = model.stargazer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
+    let unread   = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
+
+    PeerRowInit {
+        peer_id: s.peer_id.clone(),
+        solar_month: s.solar_month,
+        display_name,
+        is_connected,
+        is_pending,
+        dot_filled,
+        dot_rgba,
+        unread,
+        nickname,
+    }
+}
+
+/// Sync the factory-backed peer list with the current model state.
 ///
-/// Sort order: Connected+online → IncomingPending → OutgoingPending → Connected+offline.
-#[allow(deprecated)] // ViewSwitcherTitle
-fn rebuild_sidebar_stargazers(
-    widgets: &mut AppWidgets,
-    model: &AppModel,
-    sender: &AsyncComponentSender<AppModel>,
-) {
-    // Remove all rows at index >= 4 (peer rows from last build).
-    let mut to_remove: Vec<gtk::ListBoxRow> = Vec::new();
-    let mut idx = 4i32;
-    while let Some(row) = widgets.nav_list.row_at_index(idx) {
-        to_remove.push(row);
-        idx += 1;
-    }
-    for row in to_remove {
-        widgets.nav_list.remove(&row);
-    }
-
-    // Collect all non-Discovered stargazers and sort them.
+/// If the set and order of visible peers is unchanged, sends update messages to
+/// each row in place (no GTK widget recreation).  Otherwise clears and rebuilds.
+fn sync_peers_factory(model: &mut AppModel) {
+    // Collect and sort non-Discovered peers using the canonical sidebar order.
     let mut visible: Vec<&Stargazer> = model.stargazers.values()
         .filter(|s| !matches!(s.state, StargazerState::Discovered))
         .collect();
@@ -1264,172 +1349,29 @@ fn rebuild_sidebar_stargazers(
         let has_channel = model.connected_channels.contains_key(&s.peer_id);
         (s.sidebar_sort_key(has_channel), hex::encode_upper(&s.peer_id.0[..4]))
     });
+    let desired: Vec<PeerRowInit> = visible.iter()
+        .map(|s| make_peer_row_init(s, model))
+        .collect();
 
-    // Show the "Others" section header only when there is something to show.
-    if let Some(header) = widgets.nav_list.row_at_index(3) {
-        header.set_visible(!visible.is_empty());
-    }
+    // Compare current factory peer IDs with desired.
+    let current_ids: Vec<[u8; 32]> = model.peers_factory.iter()
+        .map(|r| r.peer_id.0)
+        .collect();
+    let desired_ids: Vec<[u8; 32]> = desired.iter()
+        .map(|r| r.peer_id.0)
+        .collect();
 
-    for stargazer in visible {
-        let peer_id  = &stargazer.peer_id;
-        let peer_hex = hex::encode_upper(&peer_id.0[..4]);
-        let has_channel = model.connected_channels.contains_key(peer_id);
-        let is_connected = matches!(stargazer.state, StargazerState::Connected { .. });
-        let is_pending   = matches!(
-            stargazer.state,
-            StargazerState::OutgoingPending | StargazerState::IncomingPending { .. }
-        );
-
-        let row = gtk::ListBoxRow::new();
-        row.set_widget_name(&hex::encode(&peer_id.0));
-        // Pending peers have no navigable page yet.
-        row.set_activatable(is_connected);
-
-        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        hbox.set_margin_start(12);
-        hbox.set_margin_end(12);
-        hbox.set_margin_top(6);
-        hbox.set_margin_bottom(6);
-
-        // Presence / state dot.
-        let status = model.stargazer_status.get(peer_id);
-        let (dot_filled, dot_color) = match &stargazer.state {
-            StargazerState::IncomingPending { .. } =>
-                (true,  [0.95_f32, 0.75, 0.30, 1.0]), // amber — needs action
-            StargazerState::OutgoingPending =>
-                (false, [0.55_f32, 0.55, 0.55, 0.55]), // hollow dim — seeking
-            StargazerState::Connected { .. } => match (has_channel, status) {
-                (_, Some(PeerStatus::Active)) => (true,  [0.46_f32, 0.82, 0.46, 1.0]),
-                (_, Some(PeerStatus::Away))   => (true,  [0.95,     0.75, 0.30, 1.0]),
-                (true,  None)                 => (true,  [0.95,     0.75, 0.30, 1.0]),
-                (false, _)                    => (false, [0.55,     0.55, 0.55, 0.7]),
-            },
-            StargazerState::Discovered => unreachable!(),
-        };
-        let dot = gtk::DrawingArea::new();
-        dot.set_size_request(8, 8);
-        dot.set_valign(gtk::Align::Center);
-        dot.set_draw_func(move |_, cr, w, h| {
-            let (r, g, b, a) = (dot_color[0] as f64, dot_color[1] as f64,
-                                dot_color[2] as f64, dot_color[3] as f64);
-            let cx = w as f64 / 2.0;
-            let cy = h as f64 / 2.0;
-            let radius = (w.min(h)) as f64 / 2.0;
-            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
-            if dot_filled {
-                cr.set_source_rgba(r, g, b, a);
-                let _ = cr.fill();
-            } else {
-                cr.set_source_rgba(r, g, b, a);
-                cr.set_line_width(1.2);
-                let _ = cr.stroke();
-            }
-        });
-        hbox.append(&dot);
-
-        // Label: nickname for Connected, tag for Pending (no name yet).
-        let glyph = if stargazer.solar_month > 0 { sign_glyph(stargazer.solar_month) } else { "" };
-        let display_name = if is_connected {
-            model.stargazer_nicknames.get(&peer_hex)
-                .cloned()
-                .unwrap_or_else(|| format!("···{peer_hex}"))
-        } else {
-            format!("···{peer_hex}")
-        };
-        let lbl = gtk::Label::new(Some(&format!("{glyph}  {display_name}")));
-        lbl.set_halign(gtk::Align::Start);
-        lbl.set_hexpand(true);
-        if is_pending {
-            lbl.add_css_class("dim-label");
+    if current_ids == desired_ids {
+        // Same structure — send update messages so each row redraws in place.
+        for (i, init) in desired.into_iter().enumerate() {
+            model.peers_factory.send(i, PeerRowMsg::Update(Box::new(init)));
         }
-        hbox.append(&lbl);
-
-        // Unread badge (Connected only).
-        let unread = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
-        if unread > 0 {
-            let badge = gtk::Label::new(Some(&unread.to_string()));
-            badge.add_css_class("badge");
-            badge.add_css_class("accent");
-            badge.set_valign(gtk::Align::Center);
-            hbox.append(&badge);
-        }
-
-        if is_connected {
-            // Pencil icon — transparent until hover.
-            let edit_img = gtk::Image::from_icon_name("document-edit-symbolic");
-            edit_img.set_pixel_size(16);
-            edit_img.set_opacity(0.0);
-            edit_img.set_valign(gtk::Align::Center);
-            edit_img.set_tooltip_text(Some("Set nickname"));
-            hbox.append(&edit_img);
-
-            let motion_row = gtk::EventControllerMotion::new();
-            let img_row_enter = edit_img.clone();
-            let img_row_leave = edit_img.clone();
-            motion_row.connect_enter(move |_, _, _| img_row_enter.set_opacity(0.4));
-            motion_row.connect_leave(move |_| img_row_leave.set_opacity(0.0));
-            row.add_controller(motion_row);
-
-            let motion_icon = gtk::EventControllerMotion::new();
-            let img_icon_enter = edit_img.clone();
-            let img_icon_leave = edit_img.clone();
-            motion_icon.connect_enter(move |_, _, _| img_icon_enter.set_opacity(1.0));
-            motion_icon.connect_leave(move |_| img_icon_leave.set_opacity(0.4));
-            edit_img.add_controller(motion_icon);
-
-            let pid     = peer_id.0;
-            let s       = sender.clone();
-            let current = model.stargazer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
-            let img_ref = edit_img.clone();
-            let click   = gtk::GestureClick::new();
-            click.connect_released(move |_, _, _, _| {
-                let dialog = adw::AlertDialog::new(Some("Set Nickname"), None);
-                dialog.add_response("cancel", "Cancel");
-                dialog.add_response("set", "Set");
-                dialog.set_response_appearance("set", adw::ResponseAppearance::Suggested);
-                dialog.set_default_response(Some("set"));
-                dialog.set_close_response("cancel");
-                let entry = gtk::Entry::new();
-                entry.set_text(&current);
-                entry.set_placeholder_text(Some("Nickname…"));
-                dialog.set_extra_child(Some(&entry));
-                let s2 = s.clone();
-                let e  = entry.clone();
-                dialog.connect_response(None, move |_, id| {
-                    if id == "set" {
-                        s2.input(AppMsg::SetNickname {
-                            peer_id: PeerId(pid),
-                            name: e.text().to_string(),
-                        });
-                    }
-                });
-                dialog.present(Some(&img_ref));
-            });
-            edit_img.add_controller(click);
-        } else {
-            // Remove button — always visible on pending rows.
-            let remove_btn = gtk::Button::from_icon_name("window-close-symbolic");
-            remove_btn.add_css_class("flat");
-            remove_btn.set_valign(gtk::Align::Center);
-            remove_btn.set_tooltip_text(Some("Remove"));
-            let pid = peer_id.clone();
-            let s   = sender.clone();
-            remove_btn.connect_clicked(move |_| s.input(AppMsg::RemoveStargazer(pid.clone())));
-            hbox.append(&remove_btn);
-        }
-
-        row.set_child(Some(&hbox));
-        widgets.nav_list.append(&row);
-
-        // Keep open peer page title in sync with nickname.
-        if is_connected {
-            if let Some(title_widget) = widgets.stargazer_titles.get(&peer_hex) {
-                let title_text = model.stargazer_nicknames.get(&peer_hex)
-                    .filter(|n| !n.is_empty())
-                    .map(|n| format!("{glyph}  {n}"))
-                    .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
-                title_widget.set_title(&title_text);
-            }
+    } else {
+        // Structure changed — clear and repopulate.
+        let mut guard = model.peers_factory.guard();
+        guard.clear();
+        for init in desired {
+            guard.push_back(init);
         }
     }
 }
@@ -1779,7 +1721,8 @@ fn build_widgets(
         net_status_label,
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
-    ) = build_main_page(model, sender);
+        others_header,
+    ) = build_main_page(model, sender, model.peers_factory.widget());
     outer_stack.add_named(&main_view, Some("main"));
 
     // ── Responsive sidebar collapse via adw::Breakpoint ──────────────────────
@@ -1845,7 +1788,8 @@ fn build_widgets(
         sky_container,
         split_view,
         nav_list,
-        stargazer_list_shown_gen: u64::MAX, // force initial build
+        others_header,
+        stargazer_list_shown_gen: u64::MAX, // force initial network view build
         content_stack,
         stargazers_content,
         stargazer_msg_lists: HashMap::new(),
@@ -2146,6 +2090,7 @@ fn build_setup_page(
 fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
+    peers_list: &gtk::ListBox,
 ) -> (
     adw::ToolbarView,                                   // outermost wrapper
     gtk::Box, gtk::Box,                                 // chart_container, sky_container
@@ -2155,6 +2100,7 @@ fn build_main_page(
     gtk::Label,                                         // net_status_label
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // incoming consent bar
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
+    gtk::Label,                                         // others_header
 ) {
     // ── Notification bell (sidebar header) ───────────────────────────────────
 
@@ -2199,26 +2145,21 @@ fn build_main_page(
     nav_list.append(&make_nav_row("night-light-symbolic",     "Sky"));
     nav_list.append(&make_nav_row("network-wireless-symbolic","Network"));
 
-    // ── Section header row (index 3) — not selectable, separates nav from peers ──
-    {
-        let header_row = gtk::ListBoxRow::new();
-        let lbl = gtk::Label::new(Some("Others"));
-        lbl.add_css_class("heading");
-        lbl.add_css_class("dim-label");
-        lbl.set_halign(gtk::Align::Start);
-        lbl.set_margin_start(12);
-        lbl.set_margin_end(12);
-        lbl.set_margin_top(12);
-        lbl.set_margin_bottom(2);
-        header_row.set_child(Some(&lbl));
-        header_row.set_selectable(false);
-        header_row.set_activatable(false);
-        nav_list.append(&header_row);
-    }
-    // Peer rows are appended from index 4 onward by rebuild_sidebar_peers.
+    // ── "Others" section header — a standalone label above the factory list ───
+    let others_header = gtk::Label::new(Some("Others"));
+    others_header.add_css_class("heading");
+    others_header.add_css_class("dim-label");
+    others_header.set_halign(gtk::Align::Start);
+    others_header.set_margin_start(12);
+    others_header.set_margin_end(12);
+    others_header.set_margin_top(12);
+    others_header.set_margin_bottom(2);
+    others_header.set_visible(false); // updated in update_view
 
     let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_box.append(&nav_list);
+    sidebar_box.append(&others_header);
+    sidebar_box.append(peers_list); // factory-backed peer rows
 
     let sidebar_scroll = gtk::ScrolledWindow::new();
     sidebar_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
@@ -2357,32 +2298,18 @@ fn build_main_page(
     {
         let cs = content_stack.clone();
         let sv = split_view.clone();
-        let s  = sender.clone();
+        let pl = peers_list.clone();
 
         nav_list.connect_row_activated(move |_, row| {
-            match row.index() {
-                0 | 1 | 2 => {
-                    let page = match row.index() {
-                        0 => "chart",
-                        1 => "sky",
-                        2 => "network",
-                        _ => unreachable!(),
-                    };
-                    cs.set_visible_child_name(page);
-                    if sv.is_collapsed() { sv.set_show_sidebar(false); }
-                }
-                idx if idx >= 4 => {
-                    // Peer row — widget name holds the full peer id hex.
-                    let name = row.widget_name();
-                    if let Ok(bytes) = hex::decode(name.as_str()) {
-                        if let Ok(arr) = bytes.try_into() as Result<[u8; 32], _> {
-                            if sv.is_collapsed() { sv.set_show_sidebar(false); }
-                            s.input(AppMsg::OpenStargazer(PeerId(arr)));
-                        }
-                    }
-                }
-                _ => {} // header row at index 3 — not activatable
-            }
+            let page = match row.index() {
+                0 => "chart",
+                1 => "sky",
+                2 => "network",
+                _ => return,
+            };
+            cs.set_visible_child_name(page);
+            if sv.is_collapsed() { sv.set_show_sidebar(false); }
+            pl.unselect_all();
         });
     }
 
@@ -2459,6 +2386,7 @@ fn build_main_page(
         net_status_label,
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
+        others_header,
     )
 }
 
