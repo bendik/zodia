@@ -8,7 +8,7 @@
 //!   4. Network events   — `CommandOutput = ZodiaNetEvent` keeps all three
 //!                         tabs reactive without blocking the GTK thread
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -165,7 +165,14 @@ pub struct AppModel {
     pending_push_queue: RefCell<Vec<PeerId>>,
 
     config: LocalConfig,
-    setup_error: String,
+    /// Sender for the SetupPage child component (only used while setup is shown).
+    setup_sender: Option<relm4::Sender<crate::setup_page::SetupPageMsg>>,
+    /// Sender for the sidebar NotifBell child component.
+    notif_sender: Option<relm4::Sender<crate::notif_bell::NotifBellMsg>>,
+    /// Sender for the Network tab child component.
+    network_tab_sender: Option<relm4::Sender<crate::network_tab::NetworkTabMsg>>,
+    /// Sender for the Sidebar child component.
+    sidebar_sender: Option<relm4::Sender<crate::sidebar::SidebarMsg>>,
 
     identity: Rc<IdentityKeypair>,
 
@@ -193,24 +200,17 @@ pub struct AppModel {
 #[allow(dead_code)]
 pub struct AppWidgets {
     outer_stack: gtk::Stack,
-    setup_status: gtk::Label,
 
     chart_container: gtk::Box,
     sky_container: gtk::Box,
 
     /// Overlay split view — sidebar on the left, content stack on the right.
     split_view: adw::OverlaySplitView,
-    /// Nav ListBox (Chart / Sky / Network) — three static rows.
-    nav_list: gtk::ListBox,
-    /// "Others" section header label — hidden when no peers in the factory.
-    others_header: gtk::Label,
     /// Generation of the network view / page titles we last rendered.
     network_changed_token_shown: u64,
 
     /// Single content stack — chart / sky / stargazers + per-stargazer pages, all as named children.
     content_stack: gtk::Stack,
-    /// The "Stargazers" scrollable view (rebuilt for discovered/online stargazers).
-    stargazers_content: gtk::Box,
 
     /// Message list widget per stargazer (keyed by 4-byte hex tag).
     stargazer_msg_lists: HashMap<String, gtk::ListBox>,
@@ -221,13 +221,6 @@ pub struct AppWidgets {
     /// ViewSwitcherTitle per stargazer — updated when the nickname changes.
     #[allow(deprecated)]
     stargazer_titles: HashMap<String, adw::ViewSwitcherTitle>,
-
-    /// Bell button — only visible when there are unread messages.
-    notif_btn: gtk::MenuButton,
-    /// Label inside the notification popover.
-    notif_label: gtk::Label,
-    /// Network status label shown in the Network content view header row.
-    net_status_label: gtk::Label,
 
     call_bar: gtk::Box,
     call_status: gtk::Label,
@@ -325,7 +318,10 @@ impl AsyncComponent for AppModel {
             peers_factory,
             pending_push_queue: RefCell::new(Vec::new()),
             config: init.config,
-            setup_error: String::new(),
+            setup_sender: None,
+            notif_sender: None,
+            network_tab_sender: None,
+            sidebar_sender: None,
             identity,
             call_state: CallState::Idle,
             active_audio: None,
@@ -346,7 +342,26 @@ impl AsyncComponent for AppModel {
             }
         }
 
-        let widgets = build_widgets(&root, &model, &sender);
+        // Launch SetupPage child component; output forwards to AppMsg.
+        let (setup_widget, setup_sender) = crate::setup_page::launch(
+            sender.input_sender(),
+            |out| match out {
+                crate::setup_page::SetupPageOut::Submit { year, month, day, hour, minute, lat, lon } =>
+                    AppMsg::ConfirmBirth { year, month, day, hour, minute, lat, lon },
+                crate::setup_page::SetupPageOut::Error(e) =>
+                    AppMsg::SetupError(e),
+            },
+        );
+        model.setup_sender = Some(setup_sender);
+
+        // Launch NotifBell child component (sidebar header).
+        let (notif_widget, notif_sender) = crate::notif_bell::launch();
+        model.notif_sender = Some(notif_sender);
+
+        let (widgets, network_tab_sender, sidebar_sender) =
+            build_widgets(&root, &model, &sender, &setup_widget, &notif_widget);
+        model.network_tab_sender = Some(network_tab_sender);
+        model.sidebar_sender = Some(sidebar_sender);
 
         // Register GIO actions used by interactive notification buttons.
         notify::register_actions(&sender);
@@ -431,12 +446,13 @@ impl AsyncComponent for AppModel {
                         s2.input(AppMsg::ReAnnounce);
                     });
                 }
-                self.setup_error.clear();
                 self.on_setup_page = false;
             }
 
             AppMsg::SetupError(msg) => {
-                self.setup_error = msg;
+                if let Some(s) = &self.setup_sender {
+                    let _ = s.send(crate::setup_page::SetupPageMsg::SetError(msg));
+                }
             }
 
             AppMsg::NetworkReady => {
@@ -1062,7 +1078,6 @@ impl AsyncComponent for AppModel {
         widgets.outer_stack.set_visible_child_name(
             if self.on_setup_page { "setup" } else { "main" }
         );
-        widgets.setup_status.set_text(&self.setup_error);
 
         // ── lazily populate aspect views ──────────────────────────────────────
 
@@ -1105,12 +1120,16 @@ impl AsyncComponent for AppModel {
 
         // ── factory "Others" header visibility ────────────────────────────────
 
-        widgets.others_header.set_visible(!self.peers_factory.is_empty());
+        if let Some(s) = &self.sidebar_sender {
+            let _ = s.send(crate::sidebar::SidebarMsg::SetOthersVisible(
+                !self.peers_factory.is_empty()
+            ));
+        }
 
         // ── rebuild network view and sync page titles when content changes ────
 
         if self.network_changed_token != widgets.network_changed_token_shown {
-            rebuild_network_view(widgets, self, &sender);
+            send_network_refresh(self);
             // Keep open peer page titles in sync with nicknames.
             for s in self.stargazers.values()
                 .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
@@ -1135,7 +1154,9 @@ impl AsyncComponent for AppModel {
         if !pending.is_empty() {
             // Opening a peer page → clear nav-list selection so Chart/Sky/Network
             // doesn't stay highlighted alongside the active peer row.
-            widgets.nav_list.unselect_all();
+            if let Some(s) = &self.sidebar_sender {
+                let _ = s.send(crate::sidebar::SidebarMsg::UnselectNav);
+            }
         }
         for peer_id in pending {
             let their_blob = self.stargazers.get(&peer_id).and_then(|s| match &s.state {
@@ -1211,7 +1232,7 @@ impl AsyncComponent for AppModel {
 
         // ── network status label (shown in the Network content view) ─────────
 
-        {
+        if let Some(s) = &self.network_tab_sender {
             let connected = self.stargazers.values()
                 .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
                 .count();
@@ -1225,16 +1246,15 @@ impl AsyncComponent for AppModel {
                 format!("Node ···{}  ·  {} connected  ·  {} online",
                         self.node_id_text, connected, active)
             };
-            widgets.net_status_label.set_text(&text);
+            let _ = s.send(crate::network_tab::NetworkTabMsg::SetStatus(text));
         }
 
         // ── notification bell ─────────────────────────────────────────────────
 
-        {
+        if let Some(s) = &self.notif_sender {
             let total_unread: usize = self.unread_messages.values().sum();
-            widgets.notif_btn.set_visible(total_unread > 0);
-            if total_unread > 0 {
-                let lines: String = self.unread_messages.iter()
+            let summary = if total_unread > 0 {
+                self.unread_messages.iter()
                     .filter(|(_, &n)| n > 0)
                     .map(|(tag, n)| {
                         let name = self.stargazer_nicknames.get(tag)
@@ -1243,9 +1263,11 @@ impl AsyncComponent for AppModel {
                         format!("{name}  ·  {n} unread")
                     })
                     .collect::<Vec<_>>()
-                    .join("\n");
-                widgets.notif_label.set_text(&lines);
-            }
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            let _ = s.send(crate::notif_bell::NotifBellMsg::Set { summary, total_unread });
         }
 
         // ── consent bar ──────────────────────────────────────────────────────
@@ -1413,131 +1435,29 @@ fn sync_peers_factory(model: &mut AppModel) {
 
 // ── network content view builder ──────────────────────────────────────────────
 
-/// Rebuild the "Network" content pane — shows discoverable peers not yet connected.
-/// The net_status_label at the top of peers_content is a persistent widget and
-/// is NOT touched here; it is updated separately in update_view.
-/// Format a canonical interp key into a readable `(kind, description)` pair.
-/// "natal:jupiter_trine_venus" → ("Natal", "Jupiter trine Venus")
-fn format_interp_key(key: &str) -> (String, String) {
-    let (kind, rest) = key.split_once(':').unwrap_or(("", key));
-    let kind_label = match kind {
-        "natal"           => "Natal",
-        "synastry"        => "Synastry",
-        "transit"         => "Transit",
-        "house_transit"   => "House transit",
-        "placement_sign"  => "Placement (sign)",
-        "placement_house" => "Placement (house)",
-        "placement_angle" => "Placement (angle)",
-        other             => other,
-    };
-    let desc = rest.replace('_', " ");
-    // Capitalise first character only.
-    let mut chars = desc.chars();
-    let desc = match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None    => desc,
-    };
-    (kind_label.to_string(), desc)
-}
+/// Ship a snapshot of discoverable peers + recent community interps to the
+/// `NetworkTab` child component, which owns the Network tab UI internally.
+fn send_network_refresh(model: &AppModel) {
+    let Some(s) = &model.network_tab_sender else { return };
 
-fn rebuild_network_view(
-    widgets: &mut AppWidgets,
-    model: &AppModel,
-    sender: &AsyncComponentSender<AppModel>,
-) {
-    // Remove everything except the first child (net_status_label).
-    loop {
-        match widgets.stargazers_content.last_child() {
-            Some(child) if child != widgets.stargazers_content.first_child().unwrap() => {
-                widgets.stargazers_content.remove(&child);
-            }
-            _ => break,
-        }
-    }
-
-    let discoverable: Vec<&Stargazer> = model.stargazers.values()
-        .filter(|s| matches!(s.state, StargazerState::Discovered))
+    let peers: Vec<crate::network_tab::NetPeer> = model.stargazers.values()
+        .filter(|sg| matches!(sg.state, StargazerState::Discovered))
+        .map(|sg| crate::network_tab::NetPeer {
+            peer_id:        sg.peer_id.clone(),
+            solar_month:    sg.solar_month,
+            aspects:        sg.approximate_aspects.clone(),
+            geohash_prefix: sg.geohash_prefix.clone(),
+        })
         .collect();
 
-    if discoverable.is_empty() {
-        let status = adw::StatusPage::new();
-        status.set_icon_name(Some("network-wireless-symbolic"));
-        status.set_title("No current online Zodia users found");
-        status.set_description(Some(
-            "Other Zodia users will appear here as they are discovered.",
-        ));
-        widgets.stargazers_content.append(&status);
-    } else {
-        let group = adw::PreferencesGroup::new();
-        let n = discoverable.len();
-        group.set_title(&format!(
-            "{n} user{} on the network",
-            if n == 1 { "" } else { "s" }
-        ));
+    let recent: Vec<crate::network_tab::NetInterp> = model.recent_interps.iter()
+        .map(|i| crate::network_tab::NetInterp {
+            interp_key: i.interp_key.clone(),
+            body:       i.body.clone(),
+        })
+        .collect();
 
-        for dp in &discoverable {
-            let glyph = sign_glyph(dp.solar_month);
-            let aspects = if dp.approximate_aspects.is_empty() {
-                "—".to_string()
-            } else {
-                dp.approximate_aspects.join("  ")
-            };
-            let row = adw::ActionRow::new();
-            row.set_title(&aspects);
-            row.set_subtitle(&dp.geohash_prefix);
-
-            let glyph_lbl = gtk::Label::new(Some(glyph));
-            glyph_lbl.set_valign(gtk::Align::Center);
-            row.add_prefix(&glyph_lbl);
-            row.set_activatable(false);
-
-            let add_btn = gtk::Button::new();
-            add_btn.set_icon_name("list-add-symbolic");
-            add_btn.add_css_class("flat");
-            add_btn.set_valign(gtk::Align::Center);
-            add_btn.set_tooltip_text(Some("Exchange charts"));
-            let pid = dp.peer_id.clone();
-            let s = sender.clone();
-            add_btn.connect_clicked(move |_| s.input(AppMsg::ProposeConsent(pid.clone())));
-            row.add_suffix(&add_btn);
-
-            group.add(&row);
-        }
-        widgets.stargazers_content.append(&group);
-    }
-
-    // ── Recent contributions ──────────────────────────────────────────────────
-    if !model.recent_interps.is_empty() {
-        let contrib_group = adw::PreferencesGroup::new();
-        contrib_group.set_title("Recent Contributions");
-        contrib_group.set_description(Some("Interpretations shared across the network"));
-
-        for interp in &model.recent_interps {
-            let (kind, desc) = format_interp_key(&interp.interp_key);
-
-            let row = adw::ActionRow::new();
-            row.set_title(&desc);
-
-            let preview = if interp.body.len() > 120 {
-                format!("{}…", &interp.body[..120])
-            } else {
-                interp.body.clone()
-            };
-            row.set_subtitle(&preview);
-            row.set_subtitle_lines(2);
-            row.set_activatable(false);
-
-            // Kind badge (Natal / Synastry / Transit / House transit) as prefix.
-            let kind_lbl = gtk::Label::new(Some(&kind));
-            kind_lbl.add_css_class("caption");
-            kind_lbl.add_css_class("dim-label");
-            kind_lbl.set_valign(gtk::Align::Center);
-            row.add_prefix(&kind_lbl);
-
-            contrib_group.add(&row);
-        }
-        widgets.stargazers_content.append(&contrib_group);
-    }
+    let _ = s.send(crate::network_tab::NetworkTabMsg::Refresh { peers, recent });
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1740,27 +1660,31 @@ fn build_widgets(
     root: &adw::ApplicationWindow,
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
-) -> AppWidgets {
+    setup_widget: &adw::ToolbarView,
+    notif_widget: &gtk::MenuButton,
+) -> (
+    AppWidgets,
+    relm4::Sender<crate::network_tab::NetworkTabMsg>,
+    relm4::Sender<crate::sidebar::SidebarMsg>,
+) {
     root.set_default_size(800, 620);
 
     let outer_stack = gtk::Stack::new();
     outer_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     outer_stack.set_transition_duration(200);
 
-    let (setup_page, setup_status) = build_setup_page(sender);
-    outer_stack.add_named(&setup_page, Some("setup"));
+    outer_stack.add_named(setup_widget, Some("setup"));
 
     let (
         main_view,
         chart_container, sky_container,
-        split_view, nav_list,
-        content_stack, stargazers_content,
-        notif_btn, notif_label,
-        net_status_label,
+        split_view,
+        content_stack,
+        network_tab_sender,
+        sidebar_sender,
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
-        others_header,
-    ) = build_main_page(model, sender, model.peers_factory.widget());
+    ) = build_main_page(model, sender, model.peers_factory.widget(), notif_widget);
     outer_stack.add_named(&main_view, Some("main"));
 
     // ── Responsive sidebar collapse via adw::Breakpoint ──────────────────────
@@ -1824,24 +1748,17 @@ fn build_widgets(
     );
     root.set_content(Some(&outer_stack));
 
-    AppWidgets {
+    let widgets = AppWidgets {
         outer_stack,
-        setup_status,
         chart_container,
         sky_container,
         split_view,
-        nav_list,
-        others_header,
         network_changed_token_shown: u64::MAX, // force initial network view build
         content_stack,
-        stargazers_content,
         stargazer_msg_lists: HashMap::new(),
         stargazer_chat_shown: HashMap::new(),
         stargazer_actions: HashMap::new(),
         stargazer_titles: HashMap::new(),
-        notif_btn,
-        notif_label,
-        net_status_label,
         consent_bar,
         consent_status,
         consent_accept_btn,
@@ -1850,308 +1767,8 @@ fn build_widgets(
         call_status,
         accept_btn,
         hangup_btn,
-    }
-}
-
-// ── setup page ────────────────────────────────────────────────────────────────
-
-fn build_setup_page(
-    sender: &AsyncComponentSender<AppModel>,
-) -> (adw::ToolbarView, gtk::Label) {
-    fn spin_row(min: f64, max: f64, step: f64, title: &str, init: f64) -> adw::SpinRow {
-        let row = adw::SpinRow::with_range(min, max, step);
-        row.set_title(title);
-        row.set_value(init);
-        row
-    }
-
-    relm4::view! {
-        toolbar_view = adw::ToolbarView {}
-    }
-    relm4::view! {
-        header_bar = adw::HeaderBar {
-            #[wrap(Some)]
-            set_title_widget = &gtk::Label {
-                set_label: "Zodia",
-                add_css_class: "title",
-            },
-        }
-    }
-    toolbar_view.add_top_bar(&header_bar);
-
-    relm4::view! {
-        date_group = adw::PreferencesGroup {
-            set_title: "Birth Date &amp; Time",
-            set_description: Some("Enter your local birth time — timezone is resolved automatically from the birth location."),
-        }
-    }
-    let year_row   = spin_row(1900.0, 2100.0, 1.0, "Year",          1990.0);
-    let month_row  = spin_row(   1.0,   12.0, 1.0, "Month",            6.0);
-    let day_row    = spin_row(   1.0,   31.0, 1.0, "Day",             15.0);
-    let hour_row   = spin_row(   0.0,   23.0, 1.0, "Hour (local)",    12.0);
-    let minute_row = spin_row(   0.0,   59.0, 1.0, "Minute",           0.0);
-    for r in [&year_row, &month_row, &day_row, &hour_row, &minute_row] {
-        date_group.add(r);
-    }
-
-    let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
-
-    // ── City search section ───────────────────────────────────────────────────
-    relm4::view! {
-        city_row = adw::EntryRow {
-            set_title: "City",
-            set_input_purpose: gtk::InputPurpose::Name,
-            set_input_hints: gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI,
-        }
-    }
-    relm4::view! {
-        coord_row = adw::ActionRow {
-            set_title: "Coordinates",
-            set_subtitle: "—",
-            set_selectable: false,
-            set_sensitive: false,
-        }
-    }
-    relm4::view! {
-        city_group = adw::PreferencesGroup {
-            set_title: "Birth Location",
-            add: &city_row,
-            add: &coord_row,
-        }
-    }
-    relm4::view! {
-        to_manual_btn = gtk::Button {
-            set_label: "Enter coordinates manually",
-            add_css_class: "flat",
-        }
-    }
-    relm4::view! {
-        city_section = gtk::Box {
-            set_orientation: gtk::Orientation::Vertical,
-            set_spacing: 12,
-            append: &city_group,
-            append: &to_manual_btn,
-        }
-    }
-
-    {
-        let result_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
-        let selecting: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-        let loc     = selected_loc.clone();
-        let coord_r = coord_row.clone();
-        let group   = city_group.clone();
-        let rows    = result_rows.clone();
-        let sel     = selecting.clone();
-        let entry   = city_row.clone();
-
-        city_row.connect_changed(move |e| {
-            if sel.get() { return; }
-
-            {
-                let to_remove: Vec<_> = rows.borrow_mut().drain(..).collect();
-                for r in &to_remove { group.remove(r); }
-            }
-            group.remove(&coord_r);
-
-            *loc.borrow_mut() = None;
-            coord_r.set_subtitle("—");
-            coord_r.set_sensitive(false);
-
-            let text = e.text();
-            if !text.is_empty() {
-                let mut rs = rows.borrow_mut();
-                for hit in zodia_core::search_cities(text.as_str(), 8) {
-                    let label = format!("{}, {}", hit.name, hit.country);
-                    let lat   = hit.lat as f64;
-                    let lon   = hit.lon as f64;
-
-                    let row = adw::ActionRow::new();
-                    row.set_title(&label);
-                    row.set_activatable(true);
-
-                    let loc2     = loc.clone();
-                    let coord_r2 = coord_r.clone();
-                    let group2   = group.clone();
-                    let rows2    = rows.clone();
-                    let sel2     = sel.clone();
-                    let entry2   = entry.clone();
-
-                    row.connect_activated(move |_| {
-                        let to_remove: Vec<_> = rows2.borrow_mut().drain(..).collect();
-                        for r in &to_remove { group2.remove(r); }
-
-                        sel2.set(true);
-                        entry2.set_text(&label);
-                        sel2.set(false);
-
-                        *loc2.borrow_mut() = Some((lat, lon));
-                        coord_r2.set_subtitle(&format!("{:.4}°  {:.4}°", lat, lon));
-                        coord_r2.set_sensitive(true);
-                    });
-
-                    rs.push(row.clone());
-                    group.add(&row);
-                }
-            }
-
-            group.add(&coord_r);
-        });
-    }
-
-    // ── Manual lat/lon section ────────────────────────────────────────────────
-    let lat_row = adw::SpinRow::with_range(-90.0, 90.0, 0.0001);
-    lat_row.set_title("Latitude");
-    lat_row.set_digits(4);
-    let lon_row = adw::SpinRow::with_range(-180.0, 180.0, 0.0001);
-    lon_row.set_title("Longitude");
-    lon_row.set_digits(4);
-    relm4::view! {
-        manual_group = adw::PreferencesGroup {
-            set_title: "Birth Location",
-            add: &lat_row,
-            add: &lon_row,
-        }
-    }
-    relm4::view! {
-        manual_section = gtk::Box {
-            set_orientation: gtk::Orientation::Vertical,
-            set_spacing: 12,
-            append: &manual_group,
-        }
-    }
-
-    // Keep selected_loc in sync while manual mode is active (only updates when Some).
-    {
-        let loc = selected_loc.clone();
-        lat_row.connect_value_notify(move |row| {
-            if let Some(ref mut v) = *loc.borrow_mut() { v.0 = row.value(); }
-        });
-    }
-    {
-        let loc = selected_loc.clone();
-        lon_row.connect_value_notify(move |row| {
-            if let Some(ref mut v) = *loc.borrow_mut() { v.1 = row.value(); }
-        });
-    }
-
-    // ── Visibility + toggle wiring ────────────────────────────────────────────
-    if zodia_core::has_cities() {
-        // Default: city search visible, manual hidden.
-        manual_section.set_visible(false);
-
-        {
-            let cs   = city_section.clone();
-            let ms   = manual_section.clone();
-            let loc  = selected_loc.clone();
-            let latr = lat_row.clone();
-            let lonr = lon_row.clone();
-            to_manual_btn.connect_clicked(move |_| {
-                cs.set_visible(false);
-                ms.set_visible(true);
-                *loc.borrow_mut() = Some((latr.value(), lonr.value()));
-            });
-        }
-
-        let back_btn = gtk::Button::with_label("Search by city name");
-        back_btn.add_css_class("flat");
-        manual_section.append(&back_btn);
-
-        {
-            let cs  = city_section.clone();
-            let ms  = manual_section.clone();
-            let loc = selected_loc.clone();
-            back_btn.connect_clicked(move |_| {
-                ms.set_visible(false);
-                cs.set_visible(true);
-                *loc.borrow_mut() = None;
-            });
-        }
-    } else {
-        // No city data compiled in: skip straight to manual, no toggle back.
-        city_section.set_visible(false);
-        *selected_loc.borrow_mut() = Some((0.0, 0.0));
-    }
-
-    relm4::view! {
-        setup_status = gtk::Label {
-            add_css_class: "error",
-        }
-    }
-    relm4::view! {
-        btn = gtk::Button {
-            set_label: "Begin  →",
-            add_css_class: "suggested-action",
-            add_css_class: "pill",
-            set_halign: gtk::Align::Center,
-        }
-    }
-    relm4::view! {
-        content = gtk::Box {
-            set_orientation: gtk::Orientation::Vertical,
-            set_spacing: 24,
-            set_valign: gtk::Align::Center,
-            set_vexpand: true,
-
-            gtk::Label {
-                set_label: "Welcome to Zodia",
-                add_css_class: "title-1",
-            },
-
-            gtk::Label {
-                set_label: "Enter your birth details to find your astrological neighbourhood.",
-                add_css_class: "dim-label",
-                set_wrap: true,
-                set_max_width_chars: 50,
-            },
-
-            append: &date_group,
-            append: &city_section,
-            append: &manual_section,
-            append: &setup_status,
-            append: &btn,
-        }
-    }
-
-    let s = sender.clone();
-    let (yr, mr, dr, hr, minr) = (
-        year_row.clone(), month_row.clone(), day_row.clone(),
-        hour_row.clone(), minute_row.clone(),
-    );
-    let loc = selected_loc.clone();
-    btn.connect_clicked(move |_| {
-        let (lat, lon) = match *loc.borrow() {
-            Some(v) => v,
-            None => { s.input(AppMsg::SetupError("Select a birth location".into())); return; }
-        };
-        s.input(AppMsg::ConfirmBirth {
-            year:   yr.value() as i32,
-            month:  mr.value() as u32,
-            day:    dr.value() as u32,
-            hour:   hr.value() as u32,
-            minute: minr.value() as u32,
-            lat, lon,
-        });
-    });
-
-    relm4::view! {
-        scroll = gtk::ScrolledWindow {
-            set_hscrollbar_policy: gtk::PolicyType::Never,
-            set_vexpand: true,
-            #[wrap(Some)]
-            set_child = &adw::Clamp {
-                set_maximum_size: 480,
-                set_margin_top: 24,
-                set_margin_bottom: 24,
-                set_margin_start: 12,
-                set_margin_end: 12,
-                #[wrap(Some)]
-                set_child = &content.clone() {},
-            },
-        }
-    }
-    toolbar_view.set_content(Some(&scroll));
-
-    (toolbar_view, setup_status)
+    };
+    (widgets, network_tab_sender, sidebar_sender)
 }
 
 // ── main page ─────────────────────────────────────────────────────────────────
@@ -2189,113 +1806,32 @@ fn build_main_page(
     model: &AppModel,
     sender: &AsyncComponentSender<AppModel>,
     peers_list: &gtk::ListBox,
+    notif_widget: &gtk::MenuButton,
 ) -> (
     adw::ToolbarView,                                   // outermost wrapper
     gtk::Box, gtk::Box,                                 // chart_container, sky_container
-    adw::OverlaySplitView, gtk::ListBox,                 // split_view, nav_list
-    gtk::Stack, gtk::Box,                               // content_stack, stargazers_content
-    gtk::MenuButton, gtk::Label,                        // notif_btn, notif_label
-    gtk::Label,                                         // net_status_label
+    adw::OverlaySplitView,                              // split_view
+    gtk::Stack,                                         // content_stack
+    relm4::Sender<crate::network_tab::NetworkTabMsg>,    // network_tab_sender
+    relm4::Sender<crate::sidebar::SidebarMsg>,           // sidebar_sender
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // incoming consent bar
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
-    gtk::Label,                                         // others_header
 ) {
-    // ── Notification bell (sidebar header) ───────────────────────────────────
-
-    relm4::view! {
-        notif_label = gtk::Label {
-            set_margin_top: 8,
-            set_margin_bottom: 8,
-            set_margin_start: 12,
-            set_margin_end: 12,
-        }
-    }
-    relm4::view! {
-        notif_btn = gtk::MenuButton {
-            set_icon_name: "notification-symbolic",
-            set_tooltip_text: Some("Notifications"),
-            set_visible: false,
-            #[wrap(Some)]
-            set_popover = &gtk::Popover {
-                #[wrap(Some)]
-                set_child = &notif_label.clone() {},
-            },
-        }
-    }
-
-    // ── Sidebar nav list (Chart / Sky / Network) ─────────────────────────────
-    relm4::view! {
-        nav_list = gtk::ListBox {
-            add_css_class: "navigation-sidebar",
-            set_selection_mode: gtk::SelectionMode::Single,
-        }
-    }
-
-    let make_nav_row = |icon: &str, label_text: &str| -> gtk::ListBoxRow {
-        relm4::view! {
-            row = gtk::ListBoxRow {
-                #[wrap(Some)]
-                set_child = &gtk::Box {
-                    set_orientation: gtk::Orientation::Horizontal,
-                    set_spacing: 10,
-                    set_margin_start: 12,
-                    set_margin_end: 12,
-                    set_margin_top: 10,
-                    set_margin_bottom: 10,
-
-                    gtk::Image {
-                        set_icon_name: Some(icon),
-                        set_pixel_size: 16,
-                    },
-
-                    gtk::Label {
-                        set_label: label_text,
-                        set_halign: gtk::Align::Start,
-                    },
-                },
-            }
-        }
-        row
-    };
-
-    nav_list.append(&make_nav_row("weather-clear-symbolic",   "Chart"));
-    nav_list.append(&make_nav_row("night-light-symbolic",     "Sky"));
-    nav_list.append(&make_nav_row("network-wireless-symbolic","Network"));
-
-    // ── "Others" section header — a standalone label above the factory list ───
-    let others_header = gtk::Label::new(Some("Others"));
-    others_header.add_css_class("heading");
-    others_header.add_css_class("dim-label");
-    others_header.set_halign(gtk::Align::Start);
-    others_header.set_margin_start(12);
-    others_header.set_margin_end(12);
-    others_header.set_margin_top(12);
-    others_header.set_margin_bottom(2);
-    others_header.set_visible(false); // updated in update_view
-
-    let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    sidebar_box.append(&nav_list);
-    sidebar_box.append(&others_header);
-    sidebar_box.append(peers_list); // factory-backed peer rows
-
-    let sidebar_scroll = gtk::ScrolledWindow::new();
-    sidebar_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    sidebar_scroll.set_vexpand(true);
-    sidebar_scroll.set_child(Some(&sidebar_box));
-
-    let sidebar_toolbar = adw::ToolbarView::new();
-    let sidebar_header = adw::HeaderBar::new();
-    let sidebar_title = adw::WindowTitle::new("Zodia", "");
-    sidebar_header.set_title_widget(Some(&sidebar_title));
-    sidebar_header.pack_end(&notif_btn);
-    sidebar_toolbar.add_top_bar(&sidebar_header);
-    sidebar_toolbar.set_content(Some(&sidebar_scroll));
-
     // ── Content area — single crossfade Stack for all views ──────────────────
 
     let content_stack = gtk::Stack::new();
     content_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     content_stack.set_transition_duration(150);
+
+    // ── Overlay split view (constructed early so children can capture it) ────
+
+    let split_view = adw::OverlaySplitView::new();
+    split_view.set_content(Some(&content_stack));
+    split_view.set_min_sidebar_width(200.0);
+    split_view.set_max_sidebar_width(280.0);
+    // On macOS put the sidebar on the right to avoid the traffic-light zone.
+    #[cfg(target_os = "macos")]
+    split_view.set_sidebar_position(gtk::PackType::End);
 
     // Chart view
     relm4::view! {
@@ -2317,99 +1853,49 @@ fn build_main_page(
     let (sky_toolbar, sky_sidebar_btn) = make_tab_toolbar("Sky", &sky_container);
     content_stack.add_named(&sky_toolbar, Some("sky"));
 
-    // Network view
-    relm4::view! {
-        net_status_label = gtk::Label {
-            set_label: "Starting up…",
-            add_css_class: "dim-label",
-            add_css_class: "caption",
-            set_halign: gtk::Align::Center,
-            set_margin_top: 8,
-        }
-    }
-    relm4::view! {
-        stargazers_content = gtk::Box {
-            set_orientation: gtk::Orientation::Vertical,
-            set_spacing: 16,
-            append: &net_status_label,
-        }
-    }
-    relm4::view! {
-        peers_scroll = gtk::ScrolledWindow {
-            set_hscrollbar_policy: gtk::PolicyType::Never,
-            set_vexpand: true,
-            #[wrap(Some)]
-            set_child = &adw::Clamp {
-                set_maximum_size: 720,
-                set_margin_top: 8,
-                set_margin_bottom: 8,
-                set_margin_start: 12,
-                set_margin_end: 12,
-                #[wrap(Some)]
-                set_child = &stargazers_content.clone() {},
-            },
-        }
-    }
-    let (network_toolbar, network_sidebar_btn) = make_tab_toolbar("Network", &peers_scroll);
+    // Network view — full Component owning toolbar, status label, and dynamic body.
+    let (network_toolbar, network_tab_sender) = crate::network_tab::launch(
+        split_view.clone(),
+        sender.input_sender(),
+        |out| match out {
+            crate::network_tab::NetworkTabOut::ProposeConsent(pid) =>
+                AppMsg::ProposeConsent(pid),
+        },
+    );
     content_stack.add_named(&network_toolbar, Some("network"));
+
+    // Sidebar — Component owning Zodia header, NotifBell pack, nav list, peers slot.
+    let (sidebar_toolbar, sidebar_sender) = crate::sidebar::launch(crate::sidebar::SidebarInit {
+        peers_list:    peers_list.clone(),
+        notif_widget:  notif_widget.clone(),
+        split_view:    split_view.clone(),
+        content_stack: content_stack.clone(),
+    });
+    split_view.set_sidebar(Some(&sidebar_toolbar));
 
     // Peer pages are added dynamically as named children when first opened.
 
-    // ── Overlay split view ────────────────────────────────────────────────────
-
-    let split_view = adw::OverlaySplitView::new();
-    split_view.set_sidebar(Some(&sidebar_toolbar));
-    split_view.set_content(Some(&content_stack));
-    split_view.set_min_sidebar_width(200.0);
-    split_view.set_max_sidebar_width(280.0);
-    // On macOS put the sidebar on the right to avoid the traffic-light zone.
-    #[cfg(target_os = "macos")]
-    split_view.set_sidebar_position(gtk::PackType::End);
-
-    // Burger button visibility is driven by the collapsed state.
+    // Burger button visibility for chart/sky is driven by the collapsed state.
+    // (Network tab handles its own sidebar btn internally.)
     // The `collapsed` property itself is driven by an adw::Breakpoint attached
     // to the root window in build_widgets — that is where we have access to
     // the window and can register the breakpoint.
     {
-        let btns = [
-            chart_sidebar_btn.clone(),
-            sky_sidebar_btn.clone(),
-            network_sidebar_btn.clone(),
-        ];
+        let btns = [chart_sidebar_btn.clone(), sky_sidebar_btn.clone()];
         split_view.connect_notify_local(Some("collapsed"), move |sv, _| {
             let collapsed = sv.is_collapsed();
             for btn in &btns {
                 btn.set_visible(collapsed);
             }
         });
-        for btn in [chart_sidebar_btn, sky_sidebar_btn, network_sidebar_btn] {
+        for btn in [chart_sidebar_btn, sky_sidebar_btn] {
             let sv = split_view.clone();
             btn.connect_clicked(move |_| sv.set_show_sidebar(true));
         }
     }
 
-    // Default selection: Chart
-    nav_list.select_row(nav_list.row_at_index(0).as_ref());
-
-    // ── Wire up nav row activation ────────────────────────────────────────────
-
-    {
-        let cs = content_stack.clone();
-        let sv = split_view.clone();
-        let pl = peers_list.clone();
-
-        nav_list.connect_row_activated(move |_, row| {
-            let page = match row.index() {
-                0 => "chart",
-                1 => "sky",
-                2 => "network",
-                _ => return,
-            };
-            cs.set_visible_child_name(page);
-            if sv.is_collapsed() { sv.set_show_sidebar(false); }
-            pl.unselect_all();
-        });
-    }
+    // peers_list and notif_widget are now owned by the Sidebar component.
+    let _ = (peers_list, notif_widget);
 
     // ── Outer ToolbarView — just hosts the call bar at bottom ─────────────────
 
@@ -2500,13 +1986,12 @@ fn build_main_page(
     (
         toolbar_view,
         chart_container, sky_container,
-        split_view, nav_list,
-        content_stack, stargazers_content,
-        notif_btn, notif_label,
-        net_status_label,
+        split_view,
+        content_stack,
+        network_tab_sender,
+        sidebar_sender,
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
-        others_header,
     )
 }
 
