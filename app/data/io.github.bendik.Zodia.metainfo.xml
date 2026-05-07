@@ -84,6 +84,9 @@
   </supports>
 
   <releases>
+    <release version="0.5.0" date="2026-05-07">
+      <description><p>Rewrote most of the ui with more reusable components; add placemnent interpretations; improve social sidebar and sorting.</p></description>
+    </release>
     <release version="0.4.12" date="2026-04-28">
       <description>
         <p>Add brand colors for Flathub; shorten app summary; revert to iroh canary relays; track Cargo.lock for reproducible builds.</p>
