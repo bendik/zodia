@@ -1858,99 +1858,81 @@ fn build_widgets(
 fn build_setup_page(
     sender: &AsyncComponentSender<AppModel>,
 ) -> (adw::ToolbarView, gtk::Label) {
-    let toolbar_view = adw::ToolbarView::new();
+    fn spin_row(min: f64, max: f64, step: f64, title: &str, init: f64) -> adw::SpinRow {
+        let row = adw::SpinRow::with_range(min, max, step);
+        row.set_title(title);
+        row.set_value(init);
+        row
+    }
 
-    let header_bar = adw::HeaderBar::new();
-    let title_label = gtk::Label::new(Some("Zodia"));
-    title_label.add_css_class("title");
-    header_bar.set_title_widget(Some(&title_label));
+    relm4::view! {
+        toolbar_view = adw::ToolbarView {}
+    }
+    relm4::view! {
+        header_bar = adw::HeaderBar {
+            #[wrap(Some)]
+            set_title_widget = &gtk::Label {
+                set_label: "Zodia",
+                add_css_class: "title",
+            },
+        }
+    }
     toolbar_view.add_top_bar(&header_bar);
 
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    scroll.set_vexpand(true);
-
-    let clamp = adw::Clamp::new();
-    clamp.set_maximum_size(480);
-    clamp.set_margin_top(24);
-    clamp.set_margin_bottom(24);
-    clamp.set_margin_start(12);
-    clamp.set_margin_end(12);
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    content.set_valign(gtk::Align::Center);
-    content.set_vexpand(true);
-
-    let title = gtk::Label::new(Some("Welcome to Zodia"));
-    title.add_css_class("title-1");
-    content.append(&title);
-
-    let subtitle = gtk::Label::new(Some(
-        "Enter your birth details to find your astrological neighbourhood.",
-    ));
-    subtitle.add_css_class("dim-label");
-    subtitle.set_wrap(true);
-    subtitle.set_max_width_chars(50);
-    content.append(&subtitle);
-
-    let date_group = adw::PreferencesGroup::new();
-    date_group.set_title("Birth Date &amp; Time");
-    date_group.set_description(Some("Enter your local birth time — timezone is resolved automatically from the birth location."));
-
-    let year_row = adw::SpinRow::with_range(1900.0, 2100.0, 1.0);
-    year_row.set_title("Year");
-    year_row.set_value(1990.0);
-    date_group.add(&year_row);
-
-    let month_row = adw::SpinRow::with_range(1.0, 12.0, 1.0);
-    month_row.set_title("Month");
-    month_row.set_value(6.0);
-    date_group.add(&month_row);
-
-    let day_row = adw::SpinRow::with_range(1.0, 31.0, 1.0);
-    day_row.set_title("Day");
-    day_row.set_value(15.0);
-    date_group.add(&day_row);
-
-    let hour_row = adw::SpinRow::with_range(0.0, 23.0, 1.0);
-    hour_row.set_title("Hour (local)");
-    hour_row.set_value(12.0);
-    date_group.add(&hour_row);
-
-    let minute_row = adw::SpinRow::with_range(0.0, 59.0, 1.0);
-    minute_row.set_title("Minute");
-    minute_row.set_value(0.0);
-    date_group.add(&minute_row);
-
-    content.append(&date_group);
+    relm4::view! {
+        date_group = adw::PreferencesGroup {
+            set_title: "Birth Date &amp; Time",
+            set_description: Some("Enter your local birth time — timezone is resolved automatically from the birth location."),
+        }
+    }
+    let year_row   = spin_row(1900.0, 2100.0, 1.0, "Year",          1990.0);
+    let month_row  = spin_row(   1.0,   12.0, 1.0, "Month",            6.0);
+    let day_row    = spin_row(   1.0,   31.0, 1.0, "Day",             15.0);
+    let hour_row   = spin_row(   0.0,   23.0, 1.0, "Hour (local)",    12.0);
+    let minute_row = spin_row(   0.0,   59.0, 1.0, "Minute",           0.0);
+    for r in [&year_row, &month_row, &day_row, &hour_row, &minute_row] {
+        date_group.add(r);
+    }
 
     let selected_loc: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
 
     // ── City search section ───────────────────────────────────────────────────
-    // adw::EntryRow for input; results appear as inline ActionRows in the group.
-    let city_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
-
-    let city_group = adw::PreferencesGroup::new();
-    city_group.set_title("Birth Location");
-
-    let city_row = adw::EntryRow::new();
-    city_row.set_title("City");
-    city_row.set_input_purpose(gtk::InputPurpose::Name);
-    city_row.set_input_hints(gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI);
-    city_group.add(&city_row);
-
-    let coord_row = adw::ActionRow::new();
-    coord_row.set_title("Coordinates");
-    coord_row.set_subtitle("—");
-    coord_row.set_selectable(false);
-    coord_row.set_sensitive(false);
-    city_group.add(&coord_row);
-
-    city_section.append(&city_group);
-
-    let to_manual_btn = gtk::Button::with_label("Enter coordinates manually");
-    to_manual_btn.add_css_class("flat");
-    city_section.append(&to_manual_btn);
+    relm4::view! {
+        city_row = adw::EntryRow {
+            set_title: "City",
+            set_input_purpose: gtk::InputPurpose::Name,
+            set_input_hints: gtk::InputHints::NO_SPELLCHECK | gtk::InputHints::NO_EMOJI,
+        }
+    }
+    relm4::view! {
+        coord_row = adw::ActionRow {
+            set_title: "Coordinates",
+            set_subtitle: "—",
+            set_selectable: false,
+            set_sensitive: false,
+        }
+    }
+    relm4::view! {
+        city_group = adw::PreferencesGroup {
+            set_title: "Birth Location",
+            add: &city_row,
+            add: &coord_row,
+        }
+    }
+    relm4::view! {
+        to_manual_btn = gtk::Button {
+            set_label: "Enter coordinates manually",
+            add_css_class: "flat",
+        }
+    }
+    relm4::view! {
+        city_section = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_spacing: 12,
+            append: &city_group,
+            append: &to_manual_btn,
+        }
+    }
 
     {
         let result_rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
@@ -2017,22 +1999,26 @@ fn build_setup_page(
     }
 
     // ── Manual lat/lon section ────────────────────────────────────────────────
-    let manual_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
-
-    let manual_group = adw::PreferencesGroup::new();
-    manual_group.set_title("Birth Location");
-
     let lat_row = adw::SpinRow::with_range(-90.0, 90.0, 0.0001);
     lat_row.set_title("Latitude");
     lat_row.set_digits(4);
-    manual_group.add(&lat_row);
-
     let lon_row = adw::SpinRow::with_range(-180.0, 180.0, 0.0001);
     lon_row.set_title("Longitude");
     lon_row.set_digits(4);
-    manual_group.add(&lon_row);
-
-    manual_section.append(&manual_group);
+    relm4::view! {
+        manual_group = adw::PreferencesGroup {
+            set_title: "Birth Location",
+            add: &lat_row,
+            add: &lon_row,
+        }
+    }
+    relm4::view! {
+        manual_section = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_spacing: 12,
+            append: &manual_group,
+        }
+    }
 
     // Keep selected_loc in sync while manual mode is active (only updates when Some).
     {
@@ -2086,18 +2072,45 @@ fn build_setup_page(
         *selected_loc.borrow_mut() = Some((0.0, 0.0));
     }
 
-    content.append(&city_section);
-    content.append(&manual_section);
+    relm4::view! {
+        setup_status = gtk::Label {
+            add_css_class: "error",
+        }
+    }
+    relm4::view! {
+        btn = gtk::Button {
+            set_label: "Begin  →",
+            add_css_class: "suggested-action",
+            add_css_class: "pill",
+            set_halign: gtk::Align::Center,
+        }
+    }
+    relm4::view! {
+        content = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_spacing: 24,
+            set_valign: gtk::Align::Center,
+            set_vexpand: true,
 
-    let setup_status = gtk::Label::new(None);
-    setup_status.add_css_class("error");
-    content.append(&setup_status);
+            gtk::Label {
+                set_label: "Welcome to Zodia",
+                add_css_class: "title-1",
+            },
 
-    let btn = gtk::Button::with_label("Begin  →");
-    btn.add_css_class("suggested-action");
-    btn.add_css_class("pill");
-    btn.set_halign(gtk::Align::Center);
-    content.append(&btn);
+            gtk::Label {
+                set_label: "Enter your birth details to find your astrological neighbourhood.",
+                add_css_class: "dim-label",
+                set_wrap: true,
+                set_max_width_chars: 50,
+            },
+
+            append: &date_group,
+            append: &city_section,
+            append: &manual_section,
+            append: &setup_status,
+            append: &btn,
+        }
+    }
 
     let s = sender.clone();
     let (yr, mr, dr, hr, minr) = (
@@ -2120,14 +2133,56 @@ fn build_setup_page(
         });
     });
 
-    clamp.set_child(Some(&content));
-    scroll.set_child(Some(&clamp));
+    relm4::view! {
+        scroll = gtk::ScrolledWindow {
+            set_hscrollbar_policy: gtk::PolicyType::Never,
+            set_vexpand: true,
+            #[wrap(Some)]
+            set_child = &adw::Clamp {
+                set_maximum_size: 480,
+                set_margin_top: 24,
+                set_margin_bottom: 24,
+                set_margin_start: 12,
+                set_margin_end: 12,
+                #[wrap(Some)]
+                set_child = &content.clone() {},
+            },
+        }
+    }
     toolbar_view.set_content(Some(&scroll));
 
     (toolbar_view, setup_status)
 }
 
 // ── main page ─────────────────────────────────────────────────────────────────
+
+/// Build a content-tab toolbar (header + body wrapped in `adw::ToolbarView`).
+/// The returned sidebar button is hidden by default; visibility is driven by
+/// the split-view collapsed state from `build_main_page`.
+fn make_tab_toolbar(title: &str, body: &impl IsA<gtk::Widget>) -> (adw::ToolbarView, gtk::Button) {
+    relm4::view! {
+        sidebar_btn = gtk::Button {
+            set_icon_name: "open-menu-symbolic",
+            set_tooltip_text: Some("Show sidebar"),
+            set_visible: false,
+        }
+    }
+    relm4::view! {
+        header = adw::HeaderBar {
+            #[wrap(Some)]
+            set_title_widget = &adw::WindowTitle::new(title, "") {},
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    header.pack_start(&sidebar_btn);
+    #[cfg(target_os = "macos")]
+    header.pack_end(&sidebar_btn);
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(body));
+    (toolbar, sidebar_btn)
+}
 
 #[allow(clippy::type_complexity)]
 fn build_main_page(
@@ -2147,40 +2202,59 @@ fn build_main_page(
 ) {
     // ── Notification bell (sidebar header) ───────────────────────────────────
 
-    let notif_label = gtk::Label::new(None);
-    notif_label.set_margin_top(8);
-    notif_label.set_margin_bottom(8);
-    notif_label.set_margin_start(12);
-    notif_label.set_margin_end(12);
-    let notif_popover = gtk::Popover::new();
-    notif_popover.set_child(Some(&notif_label));
-    let notif_btn = gtk::MenuButton::new();
-    notif_btn.set_icon_name("notification-symbolic");
-    notif_btn.set_popover(Some(&notif_popover));
-    notif_btn.set_tooltip_text(Some("Notifications"));
-    notif_btn.set_visible(false);
+    relm4::view! {
+        notif_label = gtk::Label {
+            set_margin_top: 8,
+            set_margin_bottom: 8,
+            set_margin_start: 12,
+            set_margin_end: 12,
+        }
+    }
+    relm4::view! {
+        notif_btn = gtk::MenuButton {
+            set_icon_name: "notification-symbolic",
+            set_tooltip_text: Some("Notifications"),
+            set_visible: false,
+            #[wrap(Some)]
+            set_popover = &gtk::Popover {
+                #[wrap(Some)]
+                set_child = &notif_label.clone() {},
+            },
+        }
+    }
 
-    // ── Sidebar ───────────────────────────────────────────────────────────────
-
-    // ── Nav list (fixed: Chart / Sky / Network) ───────────────────────────────
-    let nav_list = gtk::ListBox::new();
-    nav_list.add_css_class("navigation-sidebar");
-    nav_list.set_selection_mode(gtk::SelectionMode::Single);
+    // ── Sidebar nav list (Chart / Sky / Network) ─────────────────────────────
+    relm4::view! {
+        nav_list = gtk::ListBox {
+            add_css_class: "navigation-sidebar",
+            set_selection_mode: gtk::SelectionMode::Single,
+        }
+    }
 
     let make_nav_row = |icon: &str, label_text: &str| -> gtk::ListBoxRow {
-        let row = gtk::ListBoxRow::new();
-        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        hbox.set_margin_start(12);
-        hbox.set_margin_end(12);
-        hbox.set_margin_top(10);
-        hbox.set_margin_bottom(10);
-        let img = gtk::Image::from_icon_name(icon);
-        img.set_pixel_size(16);
-        hbox.append(&img);
-        let lbl = gtk::Label::new(Some(label_text));
-        lbl.set_halign(gtk::Align::Start);
-        hbox.append(&lbl);
-        row.set_child(Some(&hbox));
+        relm4::view! {
+            row = gtk::ListBoxRow {
+                #[wrap(Some)]
+                set_child = &gtk::Box {
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_spacing: 10,
+                    set_margin_start: 12,
+                    set_margin_end: 12,
+                    set_margin_top: 10,
+                    set_margin_bottom: 10,
+
+                    gtk::Image {
+                        set_icon_name: Some(icon),
+                        set_pixel_size: 16,
+                    },
+
+                    gtk::Label {
+                        set_label: label_text,
+                        set_halign: gtk::Align::Start,
+                    },
+                },
+            }
+        }
         row
     };
 
@@ -2223,79 +2297,60 @@ fn build_main_page(
     content_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     content_stack.set_transition_duration(150);
 
-    // Sidebar toggle button — shown only when the split view is collapsed
-    // (narrow window).  Uses a hamburger icon so it's visually familiar.
-    // On non-macOS: placed on the left (start).
-    // On macOS: placed on the right (end) to avoid the traffic-light buttons.
-    let make_sidebar_btn = || {
-        let btn = gtk::Button::from_icon_name("open-menu-symbolic");
-        btn.set_tooltip_text(Some("Show sidebar"));
-        btn.set_visible(false);
-        btn
-    };
-
     // Chart view
-    let chart_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    chart_container.set_vexpand(true);
-    let chart_header = adw::HeaderBar::new();
-    chart_header.set_title_widget(Some(&adw::WindowTitle::new("Chart", "")));
-    let chart_sidebar_btn = make_sidebar_btn();
-    #[cfg(not(target_os = "macos"))]
-    chart_header.pack_start(&chart_sidebar_btn);
-    #[cfg(target_os = "macos")]
-    chart_header.pack_end(&chart_sidebar_btn);
-    let chart_toolbar = adw::ToolbarView::new();
-    chart_toolbar.add_top_bar(&chart_header);
-    chart_toolbar.set_content(Some(&chart_container));
+    relm4::view! {
+        chart_container = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_vexpand: true,
+        }
+    }
+    let (chart_toolbar, chart_sidebar_btn) = make_tab_toolbar("Chart", &chart_container);
     content_stack.add_named(&chart_toolbar, Some("chart"));
 
     // Sky view
-    let sky_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    sky_container.set_vexpand(true);
-    let sky_header = adw::HeaderBar::new();
-    sky_header.set_title_widget(Some(&adw::WindowTitle::new("Sky", "")));
-    let sky_sidebar_btn = make_sidebar_btn();
-    #[cfg(not(target_os = "macos"))]
-    sky_header.pack_start(&sky_sidebar_btn);
-    #[cfg(target_os = "macos")]
-    sky_header.pack_end(&sky_sidebar_btn);
-    let sky_toolbar = adw::ToolbarView::new();
-    sky_toolbar.add_top_bar(&sky_header);
-    sky_toolbar.set_content(Some(&sky_container));
+    relm4::view! {
+        sky_container = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_vexpand: true,
+        }
+    }
+    let (sky_toolbar, sky_sidebar_btn) = make_tab_toolbar("Sky", &sky_container);
     content_stack.add_named(&sky_toolbar, Some("sky"));
 
     // Network view
-    let peers_scroll = gtk::ScrolledWindow::new();
-    peers_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    peers_scroll.set_vexpand(true);
-    let peers_clamp = adw::Clamp::new();
-    peers_clamp.set_maximum_size(720);
-    peers_clamp.set_margin_top(8);
-    peers_clamp.set_margin_bottom(8);
-    peers_clamp.set_margin_start(12);
-    peers_clamp.set_margin_end(12);
-    let stargazers_content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-
-    let net_status_label = gtk::Label::new(Some("Starting up…"));
-    net_status_label.add_css_class("dim-label");
-    net_status_label.add_css_class("caption");
-    net_status_label.set_halign(gtk::Align::Center);
-    net_status_label.set_margin_top(8);
-    stargazers_content.append(&net_status_label);
-
-    peers_clamp.set_child(Some(&stargazers_content));
-    peers_scroll.set_child(Some(&peers_clamp));
-
-    let network_header = adw::HeaderBar::new();
-    network_header.set_title_widget(Some(&adw::WindowTitle::new("Network", "")));
-    let network_sidebar_btn = make_sidebar_btn();
-    #[cfg(not(target_os = "macos"))]
-    network_header.pack_start(&network_sidebar_btn);
-    #[cfg(target_os = "macos")]
-    network_header.pack_end(&network_sidebar_btn);
-    let network_toolbar = adw::ToolbarView::new();
-    network_toolbar.add_top_bar(&network_header);
-    network_toolbar.set_content(Some(&peers_scroll));
+    relm4::view! {
+        net_status_label = gtk::Label {
+            set_label: "Starting up…",
+            add_css_class: "dim-label",
+            add_css_class: "caption",
+            set_halign: gtk::Align::Center,
+            set_margin_top: 8,
+        }
+    }
+    relm4::view! {
+        stargazers_content = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_spacing: 16,
+            append: &net_status_label,
+        }
+    }
+    relm4::view! {
+        peers_scroll = gtk::ScrolledWindow {
+            set_hscrollbar_policy: gtk::PolicyType::Never,
+            set_vexpand: true,
+            #[wrap(Some)]
+            set_child = &adw::Clamp {
+                set_maximum_size: 720,
+                set_margin_top: 8,
+                set_margin_bottom: 8,
+                set_margin_start: 12,
+                set_margin_end: 12,
+                #[wrap(Some)]
+                set_child = &stargazers_content.clone() {},
+            },
+        }
+    }
+    let (network_toolbar, network_sidebar_btn) = make_tab_toolbar("Network", &peers_scroll);
     content_stack.add_named(&network_toolbar, Some("network"));
 
     // Peer pages are added dynamically as named children when first opened.
@@ -2362,60 +2417,82 @@ fn build_main_page(
     toolbar_view.set_content(Some(&split_view));
 
     // Consent request bar — shown when a peer wants to connect.
-    let consent_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    consent_bar.add_css_class("toolbar");
-    consent_bar.set_margin_start(8);
-    consent_bar.set_margin_end(8);
-    consent_bar.set_visible(false);
+    relm4::view! {
+        consent_bar = gtk::Box {
+            set_orientation: gtk::Orientation::Horizontal,
+            set_spacing: 10,
+            add_css_class: "toolbar",
+            set_margin_start: 8,
+            set_margin_end: 8,
+            set_visible: false,
 
-    let consent_status = gtk::Label::new(None);
-    consent_status.set_hexpand(true);
-    consent_status.set_halign(gtk::Align::Start);
-    consent_bar.append(&consent_status);
+            #[name(consent_status)]
+            gtk::Label {
+                set_hexpand: true,
+                set_halign: gtk::Align::Start,
+            },
 
-    let consent_accept_btn = gtk::Button::with_label("Connect  ✓");
-    consent_accept_btn.add_css_class("suggested-action");
-    consent_accept_btn.add_css_class("pill");
-    let s = sender.clone();
-    consent_accept_btn.connect_clicked(move |_| { s.input(AppMsg::AcceptConsent); });
-    consent_bar.append(&consent_accept_btn);
+            #[name(consent_accept_btn)]
+            gtk::Button {
+                set_label: "Connect  ✓",
+                add_css_class: "suggested-action",
+                add_css_class: "pill",
+                connect_clicked[sender = sender.clone()] => move |_| {
+                    sender.input(AppMsg::AcceptConsent);
+                },
+            },
 
-    let consent_reject_btn = gtk::Button::with_label("Decline  ✕");
-    consent_reject_btn.add_css_class("destructive-action");
-    consent_reject_btn.add_css_class("pill");
-    let s = sender.clone();
-    consent_reject_btn.connect_clicked(move |_| { s.input(AppMsg::RejectConsent); });
-    consent_bar.append(&consent_reject_btn);
-
+            #[name(consent_reject_btn)]
+            gtk::Button {
+                set_label: "Decline  ✕",
+                add_css_class: "destructive-action",
+                add_css_class: "pill",
+                connect_clicked[sender = sender.clone()] => move |_| {
+                    sender.input(AppMsg::RejectConsent);
+                },
+            },
+        }
+    }
     toolbar_view.add_bottom_bar(&consent_bar);
 
     // Call bar — shown during active/ringing/outgoing calls.
-    let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    call_bar.add_css_class("toolbar");
-    call_bar.set_margin_start(8);
-    call_bar.set_margin_end(8);
-    call_bar.set_visible(false);
+    relm4::view! {
+        call_bar = gtk::Box {
+            set_orientation: gtk::Orientation::Horizontal,
+            set_spacing: 10,
+            add_css_class: "toolbar",
+            set_margin_start: 8,
+            set_margin_end: 8,
+            set_visible: false,
 
-    let call_status = gtk::Label::new(None);
-    call_status.set_hexpand(true);
-    call_status.set_halign(gtk::Align::Start);
-    call_bar.append(&call_status);
+            #[name(call_status)]
+            gtk::Label {
+                set_hexpand: true,
+                set_halign: gtk::Align::Start,
+            },
 
-    let accept_btn = gtk::Button::with_label("Accept  ✓");
-    accept_btn.add_css_class("suggested-action");
-    accept_btn.add_css_class("pill");
-    accept_btn.set_visible(false);
-    let s = sender.clone();
-    accept_btn.connect_clicked(move |_| { s.input(AppMsg::AcceptCall); });
-    call_bar.append(&accept_btn);
+            #[name(accept_btn)]
+            gtk::Button {
+                set_label: "Accept  ✓",
+                add_css_class: "suggested-action",
+                add_css_class: "pill",
+                set_visible: false,
+                connect_clicked[sender = sender.clone()] => move |_| {
+                    sender.input(AppMsg::AcceptCall);
+                },
+            },
 
-    let hangup_btn = gtk::Button::with_label("Hang up  ✕");
-    hangup_btn.add_css_class("destructive-action");
-    hangup_btn.add_css_class("pill");
-    let s = sender.clone();
-    hangup_btn.connect_clicked(move |_| { s.input(AppMsg::HangUp); });
-    call_bar.append(&hangup_btn);
-
+            #[name(hangup_btn)]
+            gtk::Button {
+                set_label: "Hang up  ✕",
+                add_css_class: "destructive-action",
+                add_css_class: "pill",
+                connect_clicked[sender = sender.clone()] => move |_| {
+                    sender.input(AppMsg::HangUp);
+                },
+            },
+        }
+    }
     toolbar_view.add_bottom_bar(&call_bar);
 
     let _ = model;

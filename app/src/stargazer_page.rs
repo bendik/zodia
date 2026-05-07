@@ -202,33 +202,73 @@ fn build_messages_tab(
     peer_id: &PeerId,
     sender: &AsyncComponentSender<AppModel>,
 ) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry) {
-    let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    outer.set_vexpand(true);
+    relm4::view! {
+        outer = gtk::Box {
+            set_orientation: gtk::Orientation::Vertical,
+            set_spacing: 0,
+            set_vexpand: true,
 
-    // Scrolled window is full-width so the scrollbar sits at the screen edge.
-    // The list content is clamped to 720 px to match the aspect list width.
-    let msg_list = gtk::ListBox::new();
-    msg_list.set_selection_mode(gtk::SelectionMode::None);
-    msg_list.add_css_class("boxed-list");
-    msg_list.set_vexpand(true);
+            #[name(scrolled)]
+            gtk::ScrolledWindow {
+                set_vexpand: true,
+                set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
 
-    let msg_clamp = adw::Clamp::new();
-    msg_clamp.set_maximum_size(720);
-    msg_clamp.set_margin_top(8);
-    msg_clamp.set_margin_bottom(8);
-    msg_clamp.set_margin_start(12);
-    msg_clamp.set_margin_end(12);
-    msg_clamp.set_child(Some(&msg_list));
+                #[wrap(Some)]
+                set_child = &adw::Clamp {
+                    set_maximum_size: 720,
+                    set_margin_top: 8,
+                    set_margin_bottom: 8,
+                    set_margin_start: 12,
+                    set_margin_end: 12,
 
-    let scrolled = gtk::ScrolledWindow::new();
-    scrolled.set_vexpand(true);
-    scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scrolled.set_child(Some(&msg_clamp));
-    outer.append(&scrolled);
+                    #[wrap(Some)]
+                    #[name(msg_list)]
+                    set_child = &gtk::ListBox {
+                        set_selection_mode: gtk::SelectionMode::None,
+                        add_css_class: "boxed-list",
+                        set_vexpand: true,
+                    },
+                },
+            },
+
+            gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_spacing: 8,
+                set_margin_start: 12,
+                set_margin_end: 12,
+                set_margin_top: 8,
+                set_margin_bottom: 12,
+
+                #[name(call_btn)]
+                gtk::Button {
+                    set_icon_name: "call-start-symbolic",
+                    add_css_class: "circular",
+                    set_tooltip_text: Some("Start voice call"),
+                    connect_clicked[sender = sender.clone(), peer_id = peer_id.clone()] => move |_| {
+                        sender.input(AppMsg::CallStargazer(peer_id.clone()));
+                    },
+                },
+
+                #[name(entry)]
+                gtk::Entry {
+                    set_hexpand: true,
+                    set_placeholder_text: Some("Message…"),
+                },
+
+                #[name(send_btn)]
+                gtk::Button {
+                    set_icon_name: "mail-send-symbolic",
+                    add_css_class: "suggested-action",
+                    add_css_class: "circular",
+                    set_tooltip_text: Some("Send"),
+                },
+            },
+        }
+    }
 
     // Auto-scroll to bottom whenever the content height grows (new message added).
-    // `notify::upper` fires during the allocation phase; we defer one frame via
-    // idle_add_local_once so page_size is fully settled before we set the value.
+    // `notify::upper` fires during allocation; defer one frame via idle so
+    // page_size has settled before we set the value.
     scrolled.vadjustment().connect_notify_local(Some("upper"), |adj, _| {
         let adj = adj.clone();
         glib::idle_add_local_once(move || {
@@ -239,46 +279,20 @@ fn build_messages_tab(
         });
     });
 
-    // Input row — call button | text entry | send button
-    let input_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    input_row.set_margin_start(12);
-    input_row.set_margin_end(12);
-    input_row.set_margin_top(8);
-    input_row.set_margin_bottom(12);
-
-    let call_btn = gtk::Button::from_icon_name("call-start-symbolic");
-    call_btn.add_css_class("circular");
-    call_btn.set_tooltip_text(Some("Start voice call"));
-    let pid_c = peer_id.clone();
-    let sc = sender.clone();
-    call_btn.connect_clicked(move |_| sc.input(AppMsg::CallStargazer(pid_c.clone())));
-    input_row.append(&call_btn);
-
-    let entry = gtk::Entry::new();
-    entry.set_hexpand(true);
-    entry.set_placeholder_text(Some("Message…"));
-    input_row.append(&entry);
-
-    let send_btn = gtk::Button::from_icon_name("mail-send-symbolic");
-    send_btn.add_css_class("suggested-action");
-    send_btn.add_css_class("circular");
-    send_btn.set_tooltip_text(Some("Send"));
-    input_row.append(&send_btn);
-
-    outer.append(&input_row);
-
-    // Wire send button + Enter key
-    let pid = peer_id.clone();
-    let s = sender.clone();
-    let entry_c = entry.clone();
-    let send = move || {
-        let text = entry_c.text().trim().to_string();
-        if !text.is_empty() {
-            s.input(AppMsg::SendChat { peer_id: pid.clone(), text });
-            entry_c.set_text("");
+    // Wire send button + Enter key.  Captured `entry` is the same widget the
+    // view! macro bound; cloning it for the closure is just refcount bumps.
+    let send = {
+        let s       = sender.clone();
+        let pid     = peer_id.clone();
+        let entry_c = entry.clone();
+        move || {
+            let text = entry_c.text().trim().to_string();
+            if !text.is_empty() {
+                s.input(AppMsg::SendChat { peer_id: pid.clone(), text });
+                entry_c.set_text("");
+            }
         }
     };
-
     let send_c = send.clone();
     send_btn.connect_clicked(move |_| send_c());
     entry.connect_activate(move |_| send());
