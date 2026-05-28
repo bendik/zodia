@@ -623,11 +623,22 @@ impl AsyncComponent for AppModel {
                         "network-wireless-symbolic",
                         &[],
                     );
-                    do_interp_sync(
-                        &channel, &their_blob,
-                        self.chart.as_ref(), &self.store,
-                        &self.identity, &peer_hex,
-                    ).await;
+                }
+                // Always exchange the relevant-to-this-pair community
+                // interpretations on every successful (re)connect, not just
+                // the first one — otherwise long-lived peers stop sharing
+                // their newly-authored entries with each other after their
+                // initial handshake.
+                let imported = do_interp_sync(
+                    &channel, &their_blob,
+                    self.chart.as_ref(), &self.store,
+                    &self.identity, &peer_hex,
+                ).await;
+                if imported > 0 {
+                    self.recent_interps = self.store
+                        .recent_community_interps(12)
+                        .await
+                        .unwrap_or_default();
                 }
                 // Transition to Connected (update in place, preserve announce info).
                 if let Some(s) = self.stargazers.get_mut(&peer_id) {
@@ -703,11 +714,17 @@ impl AsyncComponent for AppModel {
                 match channel.exchange_consent(&our_blob).await {
                     Ok(their_blob) => {
                         info!(peer = %peer_hex, "consent exchange complete");
-                        do_interp_sync(
+                        let imported = do_interp_sync(
                             &channel, &their_blob,
                             self.chart.as_ref(), &self.store,
                             &self.identity, &peer_hex,
                         ).await;
+                        if imported > 0 {
+                            self.recent_interps = self.store
+                                .recent_community_interps(12)
+                                .await
+                                .unwrap_or_default();
+                        }
                         if let Some(s) = self.stargazers.get_mut(&peer_id) {
                             s.state = StargazerState::Connected { birth: their_blob };
                         }
@@ -898,8 +915,19 @@ impl AsyncComponent for AppModel {
                         s.solar_month         = blob.solar_month;
                         s.geohash_prefix      = blob.geohash_prefix.clone();
                         s.approximate_aspects = approx;
-                        // If we've been wanting to reach them, retry now.
-                        if matches!(s.state, StargazerState::OutgoingPending) {
+                        // If we want to reach them (OutgoingPending) OR they're
+                        // a previously-connected peer who's just come back
+                        // online without our active channel, retry now.  This
+                        // is how reconnects happen after one side restarts —
+                        // we see the announce, we initiate.
+                        let should_reconnect = matches!(
+                            s.state,
+                            StargazerState::OutgoingPending
+                        ) || (
+                            matches!(s.state, StargazerState::Connected { .. })
+                                && !self.connected_channels.contains_key(&peer_id)
+                        );
+                        if should_reconnect {
                             _sender.input(AppMsg::Reconnect(peer_id.clone()));
                         }
                     }
@@ -1110,6 +1138,14 @@ impl AsyncComponent for AppModel {
                 let n = import_interps(&entries, &self.store, &peer_hex).await;
                 if n > 0 {
                     info!(peer = %peer_hex, "imported {n} live interpretations from peer");
+                    // Refresh the network tab's activity feed and any open
+                    // detail pages so the newly imported entries are visible
+                    // without needing a manual refresh.
+                    self.recent_interps = self.store
+                        .recent_community_interps(12)
+                        .await
+                        .unwrap_or_default();
+                    self.network_changed_token += 1;
                 }
             }
             _ => {}
@@ -1605,6 +1641,8 @@ fn make_consent_blob(config: &LocalConfig, identity: &IdentityKeypair) -> Option
 
 // ── interpretation sync ───────────────────────────────────────────────────────
 
+/// Run a Tier-1 interpretation exchange.  Returns the count of *newly stored*
+/// entries received from the peer so the caller can refresh activity feeds.
 async fn do_interp_sync(
     channel: &DirectChannel,
     their_blob: &ConsentBlob,
@@ -1612,7 +1650,7 @@ async fn do_interp_sync(
     store: &ZodiaStore,
     identity: &Rc<IdentityKeypair>,
     peer_hex: &str,
-) {
+) -> usize {
     let outgoing = collect_entries_for_stargazer(their_blob, our_chart, store, identity).await;
     match channel.exchange_interps(&outgoing).await {
         Ok(received) => {
@@ -1620,8 +1658,12 @@ async fn do_interp_sync(
             if n > 0 {
                 info!(peer = %peer_hex, "imported {n} interpretations from peer");
             }
+            n
         }
-        Err(e) => warn!(peer = %peer_hex, "interp sync failed: {e}"),
+        Err(e) => {
+            warn!(peer = %peer_hex, "interp sync failed: {e}");
+            0
+        }
     }
 }
 
