@@ -46,7 +46,7 @@ use crate::util::{approximate_aspects, sign_glyph};
 
 pub struct AppInit {
     pub config: LocalConfig,
-    pub store: ZodiaStore,
+    pub store_path: std::path::PathBuf,
     pub baseline: BaselineStore,
 }
 
@@ -129,6 +129,10 @@ pub enum AppMsg {
     ShareInterp(InterpEntry),
     /// A new community interpretation arrived via p2panda LogSync.
     SyncInterpReceived(ReceivedInterp),
+    /// User tapped the affirm button on a community interpretation row.
+    AffirmInterp { log_id: [u8; 32] },
+    /// User submitted a fresh community interpretation from a detail page.
+    SubmitInterp { key: InterpKey, body: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -137,7 +141,7 @@ pub struct AppModel {
     on_setup_page: bool,
     chart: Option<Chart>,
 
-    store: Rc<RefCell<ZodiaStore>>,
+    store: ZodiaStore,
     baseline: Rc<BaselineStore>,
 
     network: Option<Arc<ZodiaNetwork>>,
@@ -254,7 +258,18 @@ impl AsyncComponent for AppModel {
     ) -> AsyncComponentParts<Self> {
         let identity = Rc::new(IdentityKeypair::from_seed(init.config.identity.seed()));
         let has_birth = init.config.birth.is_some();
-        let store = Rc::new(RefCell::new(init.store));
+        let store = match ZodiaStore::open(&init.store_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("fatal: could not open store: {e}");
+                std::process::exit(1);
+            }
+        };
+        match store.scrub_baseline().await {
+            Ok(0) => {}
+            Ok(n) => info!("scrubbed {n} legacy baseline rows from DB"),
+            Err(e) => warn!("scrub_baseline failed: {e}"),
+        }
         let baseline = Rc::new(init.baseline);
 
         let stargazer_nicknames = load_nicknames(init.config.data_dir());
@@ -277,13 +292,16 @@ impl AsyncComponent for AppModel {
         }
 
         // Pre-load chat history for all persisted (Connected) stargazers.
-        let chat_logs: HashMap<PeerId, Vec<(bool, String)>> = stargazers.values()
+        let mut chat_logs: HashMap<PeerId, Vec<(bool, String)>> = HashMap::new();
+        for s in stargazers.values()
             .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
-            .filter_map(|s| {
-                let msgs = store.borrow().messages_for_peer(&s.peer_id.0).ok()?;
-                if msgs.is_empty() { None } else { Some((s.peer_id.clone(), msgs)) }
-            })
-            .collect();
+        {
+            if let Ok(msgs) = store.messages_for_peer(&s.peer_id.0).await {
+                if !msgs.is_empty() {
+                    chat_logs.insert(s.peer_id.clone(), msgs);
+                }
+            }
+        }
 
         // Create the peer-row factory before building widgets so we can embed its
         // gtk::ListBox in the sidebar layout.
@@ -333,8 +351,8 @@ impl AsyncComponent for AppModel {
         };
         // Populate the factory with persisted peers (Connected + OutgoingPending).
         sync_peers_factory(&mut model);
-        model.recent_interps = model.store.borrow()
-            .recent_community_interps(12).unwrap_or_default();
+        model.recent_interps = model.store
+            .recent_community_interps(12).await.unwrap_or_default();
 
         if let Some(birth) = model.config.birth.clone() {
             if let Ok(chart) = Chart::compute(birth.clone()) {
@@ -605,11 +623,22 @@ impl AsyncComponent for AppModel {
                         "network-wireless-symbolic",
                         &[],
                     );
-                    do_interp_sync(
-                        &channel, &their_blob,
-                        self.chart.as_ref(), &self.store,
-                        &self.identity, &peer_hex,
-                    ).await;
+                }
+                // Always exchange the relevant-to-this-pair community
+                // interpretations on every successful (re)connect, not just
+                // the first one — otherwise long-lived peers stop sharing
+                // their newly-authored entries with each other after their
+                // initial handshake.
+                let imported = do_interp_sync(
+                    &channel, &their_blob,
+                    self.chart.as_ref(), &self.store,
+                    &self.identity, &peer_hex,
+                ).await;
+                if imported > 0 {
+                    self.recent_interps = self.store
+                        .recent_community_interps(12)
+                        .await
+                        .unwrap_or_default();
                 }
                 // Transition to Connected (update in place, preserve announce info).
                 if let Some(s) = self.stargazers.get_mut(&peer_id) {
@@ -685,11 +714,17 @@ impl AsyncComponent for AppModel {
                 match channel.exchange_consent(&our_blob).await {
                     Ok(their_blob) => {
                         info!(peer = %peer_hex, "consent exchange complete");
-                        do_interp_sync(
+                        let imported = do_interp_sync(
                             &channel, &their_blob,
                             self.chart.as_ref(), &self.store,
                             &self.identity, &peer_hex,
                         ).await;
+                        if imported > 0 {
+                            self.recent_interps = self.store
+                                .recent_community_interps(12)
+                                .await
+                                .unwrap_or_default();
+                        }
                         if let Some(s) = self.stargazers.get_mut(&peer_id) {
                             s.state = StargazerState::Connected { birth: their_blob };
                         }
@@ -773,7 +808,7 @@ impl AsyncComponent for AppModel {
             AppMsg::SendChat { peer_id, text } => {
                 if let Some(channel) = self.connected_channels.get(&peer_id) {
                     if channel.send_msg(&ChannelMsg::ChatMsg { text: text.clone() }).await.is_ok() {
-                        let _ = self.store.borrow().insert_message(&peer_id.0, true, &text);
+                        let _ = self.store.insert_message(&peer_id.0, true, &text).await;
                         self.chat_logs.entry(peer_id).or_default().push((true, text));
                     }
                 }
@@ -793,14 +828,14 @@ impl AsyncComponent for AppModel {
                 let payload = ecies_encrypt(&their_blob.relay_pk, &cbor);
                 let msg = ChannelMsg::RelayMsg { dest: dest.0, payload };
                 if relay_channel.send_msg(&msg).await.is_ok() {
-                    let _ = self.store.borrow().insert_message(&dest.0, true, &text);
+                    let _ = self.store.insert_message(&dest.0, true, &text).await;
                     self.chat_logs.entry(dest).or_default().push((true, text));
                 }
             }
             AppMsg::ShareInterp(entry) => {
                 // Reload activity feed (insert_signed already ran in aspect_view).
-                self.recent_interps = self.store.borrow()
-                    .recent_community_interps(12).unwrap_or_default();
+                self.recent_interps = self.store
+                    .recent_community_interps(12).await.unwrap_or_default();
                 self.network_changed_token += 1;
                 // Fast path: send directly to already-connected peers.
                 let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
@@ -830,9 +865,35 @@ impl AsyncComponent for AppModel {
                     "new interpretation received via sync"
                 );
                 // Reload activity feed and trigger a network view refresh.
-                self.recent_interps = self.store.borrow()
-                    .recent_community_interps(12).unwrap_or_default();
+                self.recent_interps = self.store
+                    .recent_community_interps(12).await.unwrap_or_default();
                 self.network_changed_token += 1;
+            }
+            AppMsg::AffirmInterp { log_id } => {
+                let author_pk = self.identity.public_key();
+                match self.store.affirm(&log_id, &author_pk).await {
+                    Ok(_) => self.network_changed_token += 1,
+                    Err(e) => warn!("affirm failed: {e}"),
+                }
+            }
+            AppMsg::SubmitInterp { key, body } => {
+                let payload    = ZodiaStore::signing_payload(&key, &body);
+                let author_sig = self.identity.sign(&payload);
+                let author_pk  = self.identity.public_key();
+                match self.store
+                    .insert_signed(&key, &body, &author_pk, &author_sig)
+                    .await
+                {
+                    Ok(_) => {
+                        sender.input(AppMsg::ShareInterp(InterpEntry {
+                            interp_key: key.to_sig(),
+                            body,
+                            author_pk,
+                            author_sig: author_sig.to_vec(),
+                        }));
+                    }
+                    Err(e) => warn!("insert_signed failed: {e}"),
+                }
             }
         }
     }
@@ -854,8 +915,19 @@ impl AsyncComponent for AppModel {
                         s.solar_month         = blob.solar_month;
                         s.geohash_prefix      = blob.geohash_prefix.clone();
                         s.approximate_aspects = approx;
-                        // If we've been wanting to reach them, retry now.
-                        if matches!(s.state, StargazerState::OutgoingPending) {
+                        // If we want to reach them (OutgoingPending) OR they're
+                        // a previously-connected peer who's just come back
+                        // online without our active channel, retry now.  This
+                        // is how reconnects happen after one side restarts —
+                        // we see the announce, we initiate.
+                        let should_reconnect = matches!(
+                            s.state,
+                            StargazerState::OutgoingPending
+                        ) || (
+                            matches!(s.state, StargazerState::Connected { .. })
+                                && !self.connected_channels.contains_key(&peer_id)
+                        );
+                        if should_reconnect {
                             _sender.input(AppMsg::Reconnect(peer_id.clone()));
                         }
                     }
@@ -996,7 +1068,7 @@ impl AsyncComponent for AppModel {
                     &[],
                 );
                 *self.unread_messages.entry(tag).or_insert(0) += 1;
-                let _ = self.store.borrow().insert_message(&from.0, false, &text);
+                let _ = self.store.insert_message(&from.0, false, &text).await;
                 self.chat_logs.entry(from).or_default().push((false, text));
             }
             ZodiaNetEvent::PeerStatusChanged { peer_id, status } => {
@@ -1018,7 +1090,7 @@ impl AsyncComponent for AppModel {
                                     let from = PeerId(rp.from);
                                     let tag = hex::encode_upper(&from.0[..4]);
                                     *self.unread_messages.entry(tag).or_insert(0) += 1;
-                                    let _ = self.store.borrow().insert_message(&from.0, false, &rp.text);
+                                    let _ = self.store.insert_message(&from.0, false, &rp.text).await;
                                     self.chat_logs.entry(from).or_default().push((false, rp.text));
                                 }
                                 Err(e) => warn!("relay: CBOR decode failed: {e}"),
@@ -1063,9 +1135,17 @@ impl AsyncComponent for AppModel {
             }
             ZodiaNetEvent::InterpReceived { from, entries } => {
                 let peer_hex = hex::encode_upper(&from.0[..4]);
-                let n = import_interps(&entries, &self.store, &peer_hex);
+                let n = import_interps(&entries, &self.store, &peer_hex).await;
                 if n > 0 {
                     info!(peer = %peer_hex, "imported {n} live interpretations from peer");
+                    // Refresh the network tab's activity feed and any open
+                    // detail pages so the newly imported entries are visible
+                    // without needing a manual refresh.
+                    self.recent_interps = self.store
+                        .recent_community_interps(12)
+                        .await
+                        .unwrap_or_default();
+                    self.network_changed_token += 1;
                 }
             }
             _ => {}
@@ -1088,7 +1168,7 @@ impl AsyncComponent for AppModel {
                     items:            aspect_list::natal_items(&chart.natal_aspects()),
                     placements_items: crate::placements::placement_items(chart),
                     chart:            None,
-                    store:            Rc::clone(&self.store),
+                    store:            self.store.clone(),
                     baseline:         Rc::clone(&self.baseline),
                     identity:         Rc::clone(&self.identity),
                     parent_sender:    sender.clone(),
@@ -1107,7 +1187,7 @@ impl AsyncComponent for AppModel {
                         ),
                         placements_items: vec![],
                         chart:            None,
-                        store:            Rc::clone(&self.store),
+                        store:            self.store.clone(),
                         baseline:         Rc::clone(&self.baseline),
                         identity:         Rc::clone(&self.identity),
                         parent_sender:    sender.clone(),
@@ -1174,7 +1254,7 @@ impl AsyncComponent for AppModel {
                         let (toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title) =
                             stargazer_page::build_stargazer_page(
                                 &peer_id, their_blob, chart,
-                                Rc::clone(&self.store),
+                                self.store.clone(),
                                 Rc::clone(&self.baseline),
                                 Rc::clone(&self.identity),
                                 &sender,
@@ -1488,24 +1568,24 @@ async fn try_spawn_sync(
     net: &ZodiaNetwork,
     sender: &AsyncComponentSender<AppModel>,
 ) -> Option<tokio::sync::mpsc::Sender<SyncPublishMsg>> {
-    use std::sync::{Arc, Mutex};
     use zodia_core::topic_key_global;
 
     let store_path = config.data_dir().join("interpretations.db");
-    let sync_store = match ZodiaStore::open(&store_path) {
-        Ok(s) => Arc::new(Mutex::new(s)),
+    let sync_store = match ZodiaStore::open(&store_path).await {
+        Ok(s) => s,
         Err(e) => { warn!("sync store open failed: {e}"); return None; }
     };
 
-    let panda_key = config.identity.to_panda_key();
-    let topic = topic_key_global().0;
+    let signing_key = config.identity.to_panda_key();
+    let topic = p2panda_core::Topic::from(topic_key_global().0);
 
     let node = match ZodiaSyncNode::spawn(
-        panda_key,
+        signing_key,
         net.endpoint(),
         net.gossip(),
         sync_store,
         topic,
+        config.data_dir(),
     ).await {
         Ok(n) => n,
         Err(e) => { warn!("sync node spawn failed: {e}"); return None; }
@@ -1561,30 +1641,36 @@ fn make_consent_blob(config: &LocalConfig, identity: &IdentityKeypair) -> Option
 
 // ── interpretation sync ───────────────────────────────────────────────────────
 
+/// Run a Tier-1 interpretation exchange.  Returns the count of *newly stored*
+/// entries received from the peer so the caller can refresh activity feeds.
 async fn do_interp_sync(
     channel: &DirectChannel,
     their_blob: &ConsentBlob,
     our_chart: Option<&Chart>,
-    store: &Rc<RefCell<ZodiaStore>>,
+    store: &ZodiaStore,
     identity: &Rc<IdentityKeypair>,
     peer_hex: &str,
-) {
-    let outgoing = collect_entries_for_stargazer(their_blob, our_chart, store, identity);
+) -> usize {
+    let outgoing = collect_entries_for_stargazer(their_blob, our_chart, store, identity).await;
     match channel.exchange_interps(&outgoing).await {
         Ok(received) => {
-            let n = import_interps(&received, store, peer_hex);
+            let n = import_interps(&received, store, peer_hex).await;
             if n > 0 {
                 info!(peer = %peer_hex, "imported {n} interpretations from peer");
             }
+            n
         }
-        Err(e) => warn!(peer = %peer_hex, "interp sync failed: {e}"),
+        Err(e) => {
+            warn!(peer = %peer_hex, "interp sync failed: {e}");
+            0
+        }
     }
 }
 
-fn collect_entries_for_stargazer(
+async fn collect_entries_for_stargazer(
     their_blob: &ConsentBlob,
     our_chart: Option<&Chart>,
-    store: &Rc<RefCell<ZodiaStore>>,
+    store: &ZodiaStore,
     _identity: &Rc<IdentityKeypair>,
 ) -> Vec<InterpEntry> {
     let their_chart = Chart::compute(their_blob.birth.clone()).ok();
@@ -1602,7 +1688,7 @@ fn collect_entries_for_stargazer(
     }
 
     let refs: Vec<&str> = key_sigs.iter().map(|s| s.as_str()).collect();
-    store.borrow().community_for_keys(&refs, 100)
+    store.community_for_keys(&refs, 100).await
         .unwrap_or_default()
         .into_iter()
         .map(|e| InterpEntry {
@@ -1614,9 +1700,9 @@ fn collect_entries_for_stargazer(
         .collect()
 }
 
-fn import_interps(
+async fn import_interps(
     entries: &[InterpEntry],
-    store: &Rc<RefCell<ZodiaStore>>,
+    store: &ZodiaStore,
     peer_hex: &str,
 ) -> usize {
     let mut count = 0;
@@ -1625,9 +1711,9 @@ fn import_interps(
             warn!(peer = %peer_hex, key = %entry.interp_key, "invalid sig length, skipping");
             continue;
         };
-        match store.borrow().insert_received(
+        match store.insert_received(
             &entry.interp_key, &entry.body, &entry.author_pk, &sig_arr,
-        ) {
+        ).await {
             Ok(true)  => count += 1,
             Ok(false) => {}
             Err(StoreError::InvalidSignature) => {
@@ -1714,7 +1800,7 @@ fn build_widgets(
             items:            aspect_list::natal_items(&chart.natal_aspects()),
             placements_items: crate::placements::placement_items(chart),
             chart:            None,
-            store:            Rc::clone(&model.store),
+            store:            model.store.clone(),
             baseline:         Rc::clone(&model.baseline),
             identity:         Rc::clone(&model.identity),
             parent_sender:    sender.clone(),
@@ -1733,7 +1819,7 @@ fn build_widgets(
                 ),
                 placements_items: vec![],
                 chart:            None,
-                store:            Rc::clone(&model.store),
+                store:            model.store.clone(),
                 baseline:         Rc::clone(&model.baseline),
                 identity:         Rc::clone(&model.identity),
                 parent_sender:    sender.clone(),

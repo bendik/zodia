@@ -18,7 +18,7 @@ use crate::{AnnounceBlob, PeerId, ZodiaNetEvent};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
-use p2panda_core::PrivateKey as PandaKey;
+use p2panda_core::{SigningKey as PandaSigningKey, Topic as PandaTopic};
 use p2panda_net::address_book::report::ConnectionOutcome;
 use p2panda_net::gossip::{GossipHandle, GossipSubscription};
 use p2panda_net::iroh_mdns::{MdnsDiscovery, MdnsDiscoveryMode};
@@ -82,8 +82,8 @@ impl ZodiaNetwork {
         config: NetworkConfig,
         birth: &BirthData,
     ) -> Result<(Self, mpsc::Receiver<ZodiaNetEvent>), NetworkError> {
-        // Derive the p2panda PrivateKey from the same scalar bytes.
-        let panda_key = PandaKey::from_bytes(config.signing_key.as_bytes());
+        // Derive the p2panda SigningKey from the same scalar bytes.
+        let panda_key = PandaSigningKey::from_bytes(config.signing_key.as_bytes());
 
         let address_book = AddressBook::builder()
             .spawn()
@@ -96,7 +96,7 @@ impl ZodiaNetwork {
         // random walk seeded by any peer we have ever talked to.
         let endpoint = Endpoint::builder(address_book.clone())
             .network_id(NETWORK_ID)
-            .private_key(panda_key)
+            .signing_key(panda_key)
             .spawn()
             .await
             .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
@@ -141,7 +141,7 @@ impl ZodiaNetwork {
         let mut topic_handles = Vec::with_capacity(topic_keys.len());
         for key in &topic_keys {
             let handle = gossip
-                .stream(key.0)
+                .stream(PandaTopic::from(key.0))
                 .await
                 .map_err(|e| NetworkError::Gossip(e.to_string()))?;
             topic_handles.push(handle);

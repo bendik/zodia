@@ -27,7 +27,7 @@ zodia-av     = { path = "av" }
 
 zodia-config = { path = "config" }
 
-rusqlite   = "0.31"
+sqlx       = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 toml       = "0.8"
 blake3     = "1"
 bytes      = "1"

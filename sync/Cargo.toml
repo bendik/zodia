@@ -17,12 +17,12 @@ futures-util = "0.3"
 
 hex = "0.4"
 
-p2panda-net = { version = "0.5.2", features = [
+p2panda-net = { version = "0.6", features = [
     "address_book",
     "iroh_endpoint",
     "gossip",
     "sync",
 ] }
-p2panda-store = "0.5.2"
-p2panda-core = "0.5.2"
-p2panda-sync = "0.5.2"
+p2panda-store = "0.6"
+p2panda-core = "0.6"
+p2panda-sync = "0.6"
