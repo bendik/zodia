@@ -468,69 +468,6 @@ impl ZodiaStore {
         Ok(result.rows_affected())
     }
 
-    // ── blocking variants ─────────────────────────────────────────────────────
-    //
-    // These wrappers let synchronous render/widget code call into the async
-    // store from inside the relm4 tokio runtime.  Safe only when called from
-    // a multi-threaded tokio context (which is how the app boots — see the
-    // `rt-multi-thread` feature on `tokio` in the workspace manifest).
-
-    pub fn top_body_blocking(&self, key: &InterpKey) -> Result<Option<String>, StoreError> {
-        block_on(self.top_body(key))
-    }
-
-    pub fn all_for_key_blocking(&self, key: &InterpKey) -> Result<Vec<InterpRow>, StoreError> {
-        block_on(self.all_for_key(key))
-    }
-
-    pub fn community_for_keys_blocking(
-        &self,
-        key_sigs: &[&str],
-        limit: usize,
-    ) -> Result<Vec<CommunityEntry>, StoreError> {
-        block_on(self.community_for_keys(key_sigs, limit))
-    }
-
-    pub fn insert_received_blocking(
-        &self,
-        interp_key: &str,
-        body: &str,
-        author_pk: &[u8; 32],
-        author_sig: &[u8; 64],
-    ) -> Result<bool, StoreError> {
-        block_on(self.insert_received(interp_key, body, author_pk, author_sig))
-    }
-
-    pub fn insert_message_blocking(
-        &self,
-        peer_id: &[u8; 32],
-        from_us: bool,
-        body: &str,
-    ) -> Result<(), StoreError> {
-        block_on(self.insert_message(peer_id, from_us, body))
-    }
-
-    pub fn messages_for_peer_blocking(
-        &self,
-        peer_id: &[u8; 32],
-    ) -> Result<Vec<(bool, String)>, StoreError> {
-        block_on(self.messages_for_peer(peer_id))
-    }
-
-    pub fn recent_community_interps_blocking(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<RecentInterp>, StoreError> {
-        block_on(self.recent_community_interps(limit))
-    }
-}
-
-/// Run an async block to completion from inside a tokio-async context.
-///
-/// Uses `block_in_place` to yield the current worker so the executor can drive
-/// the inner future without deadlocking.  Requires a multi-threaded runtime.
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
 }
 
 // ── BaselineStore: row synthesis ──────────────────────────────────────────────

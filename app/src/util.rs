@@ -40,14 +40,14 @@ pub fn lon_to_sign_deg(lon: f64) -> (u8, String) {
 /// Moon trine Venus  ·  ☽△♀  orb 2.3°
 /// Warmth is given easily. Home and beauty feel like the same thing…
 /// ```
-pub fn format_aspect_card(a: &Aspect, store: &ZodiaStore) -> String {
+pub async fn format_aspect_card(a: &Aspect, store: &ZodiaStore) -> String {
     let key = InterpKey::from_natal(a);
     let plain = key.plain_name();
     let header = format!(
         "{}  ·  {}{}{}  orb {:.1}°",
         plain, a.body_a.symbol(), a.kind.symbol(), a.body_b.symbol(), a.orb
     );
-    match store.top_body(&key) {
+    match store.top_body(&key).await {
         Ok(Some(body)) => format!("{header}\n  {body}"),
         _ => header,
     }
@@ -60,14 +60,14 @@ pub fn format_aspect_card(a: &Aspect, store: &ZodiaStore) -> String {
 /// Saturn square Sun (transit)  ·  ♄□☉  orb 1.8°
 /// The scaffolding is being stress-tested…
 /// ```
-pub fn format_transit_card(ta: &TransitAspect, store: &ZodiaStore) -> String {
+pub async fn format_transit_card(ta: &TransitAspect, store: &ZodiaStore) -> String {
     let key = ta.interp_key();
     let plain = key.plain_name();
     let header = format!(
         "{}  ·  {}{}natal {}  orb {:.1}°",
         plain, ta.transiting.symbol(), ta.kind.symbol(), ta.natal_body.symbol(), ta.orb
     );
-    match store.top_body(&key) {
+    match store.top_body(&key).await {
         Ok(Some(body)) => format!("{header}\n  {body}"),
         _ => header,
     }
@@ -80,11 +80,11 @@ pub fn format_transit_card(ta: &TransitAspect, store: &ZodiaStore) -> String {
 /// Saturn in house 7  ♄  →  ⌂7
 /// Relationships are being held to account…
 /// ```
-pub fn format_house_transit_card(ht: &HouseTransit, store: &ZodiaStore) -> String {
+pub async fn format_house_transit_card(ht: &HouseTransit, store: &ZodiaStore) -> String {
     let key = ht.interp_key();
     let plain = key.plain_name();
     let header = format!("{}  {}", plain, ht.transiting.symbol());
-    match store.top_body(&key) {
+    match store.top_body(&key).await {
         Ok(Some(body)) => format!("{header}\n  {body}"),
         _ => header,
     }

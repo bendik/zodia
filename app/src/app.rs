@@ -292,13 +292,16 @@ impl AsyncComponent for AppModel {
         }
 
         // Pre-load chat history for all persisted (Connected) stargazers.
-        let chat_logs: HashMap<PeerId, Vec<(bool, String)>> = stargazers.values()
+        let mut chat_logs: HashMap<PeerId, Vec<(bool, String)>> = HashMap::new();
+        for s in stargazers.values()
             .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
-            .filter_map(|s| {
-                let msgs = store.messages_for_peer_blocking(&s.peer_id.0).ok()?;
-                if msgs.is_empty() { None } else { Some((s.peer_id.clone(), msgs)) }
-            })
-            .collect();
+        {
+            if let Ok(msgs) = store.messages_for_peer(&s.peer_id.0).await {
+                if !msgs.is_empty() {
+                    chat_logs.insert(s.peer_id.clone(), msgs);
+                }
+            }
+        }
 
         // Create the peer-row factory before building widgets so we can embed its
         // gtk::ListBox in the sidebar layout.
