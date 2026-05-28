@@ -12,7 +12,6 @@
 //! `ViewSwitcherTitle` is deprecated in ADW 1.4 but the TabBar alternative
 //! exposes close buttons that cannot be hidden without fragile CSS hacks.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use libadwaita as adw;
@@ -40,7 +39,7 @@ pub fn build_stargazer_page(
     peer_id: &PeerId,
     their_blob: &ConsentBlob,
     our_chart: &Chart,
-    store: Rc<RefCell<ZodiaStore>>,
+    store: ZodiaStore,
     baseline: Rc<BaselineStore>,
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
@@ -73,7 +72,7 @@ pub fn build_stargazer_page(
             items:            natal_items(&chart.natal_aspects()),
             placements_items: crate::placements::placement_items(chart),
             chart:            None,
-            store:            Rc::clone(&store),
+            store:            store.clone(),
             baseline:         Rc::clone(&baseline),
             identity:         Rc::clone(&identity),
             parent_sender:    sender.clone(),
@@ -83,7 +82,7 @@ pub fn build_stargazer_page(
             items:            vec![],
             placements_items: vec![],
             chart:             None,
-            store:            Rc::clone(&store),
+            store:            store.clone(),
             baseline:         Rc::clone(&baseline),
             identity:         Rc::clone(&identity),
             parent_sender:    sender.clone(),
@@ -104,7 +103,7 @@ pub fn build_stargazer_page(
         items:            synastry_items(&synastry),
         placements_items: vec![],
         chart:            None,
-        store:            Rc::clone(&store),
+        store:            store.clone(),
         baseline:         Rc::clone(&baseline),
         identity:         Rc::clone(&identity),
         parent_sender:    sender.clone(),

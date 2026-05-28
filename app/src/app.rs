@@ -129,6 +129,10 @@ pub enum AppMsg {
     ShareInterp(InterpEntry),
     /// A new community interpretation arrived via p2panda LogSync.
     SyncInterpReceived(ReceivedInterp),
+    /// User tapped the affirm button on a community interpretation row.
+    AffirmInterp { log_id: [u8; 32] },
+    /// User submitted a fresh community interpretation from a detail page.
+    SubmitInterp { key: InterpKey, body: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -844,6 +848,32 @@ impl AsyncComponent for AppModel {
                 self.recent_interps = self.store
                     .recent_community_interps(12).await.unwrap_or_default();
                 self.network_changed_token += 1;
+            }
+            AppMsg::AffirmInterp { log_id } => {
+                let author_pk = self.identity.public_key();
+                match self.store.affirm(&log_id, &author_pk).await {
+                    Ok(_) => self.network_changed_token += 1,
+                    Err(e) => warn!("affirm failed: {e}"),
+                }
+            }
+            AppMsg::SubmitInterp { key, body } => {
+                let payload    = ZodiaStore::signing_payload(&key, &body);
+                let author_sig = self.identity.sign(&payload);
+                let author_pk  = self.identity.public_key();
+                match self.store
+                    .insert_signed(&key, &body, &author_pk, &author_sig)
+                    .await
+                {
+                    Ok(_) => {
+                        sender.input(AppMsg::ShareInterp(InterpEntry {
+                            interp_key: key.to_sig(),
+                            body,
+                            author_pk,
+                            author_sig: author_sig.to_vec(),
+                        }));
+                    }
+                    Err(e) => warn!("insert_signed failed: {e}"),
+                }
             }
         }
     }
