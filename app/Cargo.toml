@@ -17,6 +17,7 @@ zodia-config.workspace = true
 zodia-store.workspace = true
 zodia-av.workspace = true
 zodia-sync.workspace = true
+p2panda-core = "0.6"
 ciborium.workspace = true
 blake3.workspace = true
 relm4 = { version = "0.10", features = ["macros", "libadwaita", "gnome_45"] }

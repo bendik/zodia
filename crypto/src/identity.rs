@@ -9,7 +9,7 @@
 //! types are derived from the same 32-byte seed.
 
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
-use p2panda_core::PrivateKey as PandaKey;
+use p2panda_core::SigningKey as PandaSigningKey;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
@@ -52,10 +52,10 @@ impl IdentityKeypair {
         &self.inner
     }
 
-    /// Derive the p2panda-core `PrivateKey` for operation signing.
+    /// Derive the p2panda-core `SigningKey` for operation signing.
     /// Both types are backed by the same ed25519 scalar.
-    pub fn to_panda_key(&self) -> PandaKey {
-        PandaKey::from_bytes(self.inner.as_bytes())
+    pub fn to_panda_key(&self) -> PandaSigningKey {
+        PandaSigningKey::from_bytes(self.inner.as_bytes())
     }
 
     /// The stable X25519 public key used for ECIES relay encryption.

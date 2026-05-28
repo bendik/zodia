@@ -1540,11 +1540,11 @@ async fn try_spawn_sync(
         Err(e) => { warn!("sync store open failed: {e}"); return None; }
     };
 
-    let panda_key = config.identity.to_panda_key();
-    let topic = topic_key_global().0;
+    let signing_key = config.identity.to_panda_key();
+    let topic = p2panda_core::Topic::from(topic_key_global().0);
 
     let node = match ZodiaSyncNode::spawn(
-        panda_key,
+        signing_key,
         net.endpoint(),
         net.gossip(),
         sync_store,
