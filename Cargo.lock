@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "gen_baseline"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6434,7 +6434,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zodia-app"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -6462,7 +6462,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-av"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "cpal",
@@ -6479,7 +6479,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-config"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ciborium",
  "dirs",
@@ -6493,7 +6493,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "geohash",
@@ -6503,7 +6503,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-crypto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -6519,7 +6519,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-net"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "ciborium",
@@ -6538,7 +6538,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "ed25519-dalek 2.2.0",
@@ -6551,7 +6551,7 @@ dependencies = [
 
 [[package]]
 name = "zodia-sync"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ciborium",
  "futures-util",
