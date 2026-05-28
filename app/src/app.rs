@@ -1549,6 +1549,7 @@ async fn try_spawn_sync(
         net.gossip(),
         sync_store,
         topic,
+        config.data_dir(),
     ).await {
         Ok(n) => n,
         Err(e) => { warn!("sync node spawn failed: {e}"); return None; }
