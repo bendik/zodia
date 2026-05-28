@@ -84,6 +84,9 @@
   </supports>
 
   <releases>
+    <release version="0.5.1" date="2026-05-28">
+      <description><p>Drop the self-hosted relay/bootstrap node and fall back to the public iroh defaults — restores NAT traversal for users without a working custom relay.</p></description>
+    </release>
     <release version="0.5.0" date="2026-05-07">
       <description><p>Rewrote most of the ui with more reusable components; add placemnent interpretations; improve social sidebar and sorting.</p></description>
     </release>

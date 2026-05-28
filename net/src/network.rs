@@ -20,12 +20,9 @@ use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
 use p2panda_core::PrivateKey as PandaKey;
 use p2panda_net::address_book::report::ConnectionOutcome;
-use p2panda_net::addrs::NodeInfo;
 use p2panda_net::gossip::{GossipHandle, GossipSubscription};
-use p2panda_net::iroh_endpoint::from_public_key;
 use p2panda_net::iroh_mdns::{MdnsDiscovery, MdnsDiscoveryMode};
-use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, NodeId};
-use iroh::EndpointAddr;
+use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -35,26 +32,6 @@ use zodia_core::{BirthData, compute_positions, topic_key_global, topic_keys_for_
 /// Zodia's network identifier — all nodes sharing this ID form one logical
 /// overlay; peers on different IDs are invisible to each other.
 pub const NETWORK_ID: [u8; 32] = *b"zodia-network-2024\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-
-/// Self-hosted iroh relay for NAT traversal.  Must match the value in tools/bootstrap.
-/// Runs on stargaze.whatdoyouliketodo.com behind Caddy (TLS terminated by Caddy,
-/// iroh-relay listens on localhost:3340 with no TLS).
-pub const RELAY_ZODIA: &str = "https://stargaze.whatdoyouliketodo.com.";
-
-/// All configured relay URLs — used to build the relay map and to hint the
-/// bootstrap node address.
-pub const ALL_RELAYS: &[&str] = &[RELAY_ZODIA];
-
-/// Bootstrap node public key (hex-decoded bytes).
-///
-/// CRITICAL: This node must be running `zodia-bootstrap` compiled with the same
-/// `NETWORK_ID` (`zodia-network-2024…`).  If it is unreachable the PSI-Hash
-/// Discovery walkers stall until their timeout, then fall back to whatever the
-/// address book already contains (i.e. mDNS-discovered LAN peers).  Internet-wide
-/// discovery is effectively dead without a reachable bootstrap node.
-///
-/// Set to `None` to rely on mDNS-only discovery (LAN only).
-const BOOTSTRAP_NODE_ID: Option<[u8; 32]> = Some([176, 45, 141, 10, 244, 112, 14, 59, 107, 231, 19, 72, 114, 30, 215, 65, 72, 50, 80, 56, 10, 112, 192, 16, 171, 119, 103, 105, 89, 230, 178, 181]);
 
 /// Protocol identifier for direct peer-to-peer consent exchanges.
 pub const CONSENT_PROTOCOL: &[u8] = b"zodia/tier1/1";
@@ -114,26 +91,12 @@ impl ZodiaNetwork {
             .map_err(|e| NetworkError::AddressBook(e.to_string()))?;
         debug!("address book ready");
 
-        // Seed the address book with the bootstrap peer so the gossip swarm has
-        // somewhere to connect on first start, even on a fresh install.
-        if let Some(id_bytes) = BOOTSTRAP_NODE_ID {
-            if let Ok(bootstrap_pk) = NodeId::from_bytes(&id_bytes) {
-                let addr = EndpointAddr::new(from_public_key(bootstrap_pk))
-                    .with_relay_url(RELAY_ZODIA.parse().unwrap());
-                let _ = address_book
-                    .insert_node_info(NodeInfo::from(addr).bootstrap())
-                    .await;
-                debug!("bootstrap peer added to address book");
-            }
-        }
-
-        let mut ep_builder = Endpoint::builder(address_book.clone())
+        // Use iroh's default relay servers and mDNS-only LAN discovery for
+        // bootstrap. Internet-wide discovery falls back to the p2panda DHT
+        // random walk seeded by any peer we have ever talked to.
+        let endpoint = Endpoint::builder(address_book.clone())
             .network_id(NETWORK_ID)
-            .private_key(panda_key);
-        for url in ALL_RELAYS {
-            ep_builder = ep_builder.relay_url(url.parse().unwrap());
-        }
-        let endpoint = ep_builder
+            .private_key(panda_key)
             .spawn()
             .await
             .map_err(|e| NetworkError::Endpoint(e.to_string()))?;
