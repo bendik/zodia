@@ -46,7 +46,7 @@ use crate::util::{approximate_aspects, sign_glyph};
 
 pub struct AppInit {
     pub config: LocalConfig,
-    pub store: ZodiaStore,
+    pub store_path: std::path::PathBuf,
     pub baseline: BaselineStore,
 }
 
@@ -137,7 +137,7 @@ pub struct AppModel {
     on_setup_page: bool,
     chart: Option<Chart>,
 
-    store: Rc<RefCell<ZodiaStore>>,
+    store: ZodiaStore,
     baseline: Rc<BaselineStore>,
 
     network: Option<Arc<ZodiaNetwork>>,
@@ -254,7 +254,18 @@ impl AsyncComponent for AppModel {
     ) -> AsyncComponentParts<Self> {
         let identity = Rc::new(IdentityKeypair::from_seed(init.config.identity.seed()));
         let has_birth = init.config.birth.is_some();
-        let store = Rc::new(RefCell::new(init.store));
+        let store = match ZodiaStore::open(&init.store_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("fatal: could not open store: {e}");
+                std::process::exit(1);
+            }
+        };
+        match store.scrub_baseline().await {
+            Ok(0) => {}
+            Ok(n) => info!("scrubbed {n} legacy baseline rows from DB"),
+            Err(e) => warn!("scrub_baseline failed: {e}"),
+        }
         let baseline = Rc::new(init.baseline);
 
         let stargazer_nicknames = load_nicknames(init.config.data_dir());
@@ -280,7 +291,7 @@ impl AsyncComponent for AppModel {
         let chat_logs: HashMap<PeerId, Vec<(bool, String)>> = stargazers.values()
             .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
             .filter_map(|s| {
-                let msgs = store.borrow().messages_for_peer(&s.peer_id.0).ok()?;
+                let msgs = store.messages_for_peer_blocking(&s.peer_id.0).ok()?;
                 if msgs.is_empty() { None } else { Some((s.peer_id.clone(), msgs)) }
             })
             .collect();
@@ -333,8 +344,8 @@ impl AsyncComponent for AppModel {
         };
         // Populate the factory with persisted peers (Connected + OutgoingPending).
         sync_peers_factory(&mut model);
-        model.recent_interps = model.store.borrow()
-            .recent_community_interps(12).unwrap_or_default();
+        model.recent_interps = model.store
+            .recent_community_interps(12).await.unwrap_or_default();
 
         if let Some(birth) = model.config.birth.clone() {
             if let Ok(chart) = Chart::compute(birth.clone()) {
@@ -773,7 +784,7 @@ impl AsyncComponent for AppModel {
             AppMsg::SendChat { peer_id, text } => {
                 if let Some(channel) = self.connected_channels.get(&peer_id) {
                     if channel.send_msg(&ChannelMsg::ChatMsg { text: text.clone() }).await.is_ok() {
-                        let _ = self.store.borrow().insert_message(&peer_id.0, true, &text);
+                        let _ = self.store.insert_message(&peer_id.0, true, &text).await;
                         self.chat_logs.entry(peer_id).or_default().push((true, text));
                     }
                 }
@@ -793,14 +804,14 @@ impl AsyncComponent for AppModel {
                 let payload = ecies_encrypt(&their_blob.relay_pk, &cbor);
                 let msg = ChannelMsg::RelayMsg { dest: dest.0, payload };
                 if relay_channel.send_msg(&msg).await.is_ok() {
-                    let _ = self.store.borrow().insert_message(&dest.0, true, &text);
+                    let _ = self.store.insert_message(&dest.0, true, &text).await;
                     self.chat_logs.entry(dest).or_default().push((true, text));
                 }
             }
             AppMsg::ShareInterp(entry) => {
                 // Reload activity feed (insert_signed already ran in aspect_view).
-                self.recent_interps = self.store.borrow()
-                    .recent_community_interps(12).unwrap_or_default();
+                self.recent_interps = self.store
+                    .recent_community_interps(12).await.unwrap_or_default();
                 self.network_changed_token += 1;
                 // Fast path: send directly to already-connected peers.
                 let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
@@ -830,8 +841,8 @@ impl AsyncComponent for AppModel {
                     "new interpretation received via sync"
                 );
                 // Reload activity feed and trigger a network view refresh.
-                self.recent_interps = self.store.borrow()
-                    .recent_community_interps(12).unwrap_or_default();
+                self.recent_interps = self.store
+                    .recent_community_interps(12).await.unwrap_or_default();
                 self.network_changed_token += 1;
             }
         }
@@ -996,7 +1007,7 @@ impl AsyncComponent for AppModel {
                     &[],
                 );
                 *self.unread_messages.entry(tag).or_insert(0) += 1;
-                let _ = self.store.borrow().insert_message(&from.0, false, &text);
+                let _ = self.store.insert_message(&from.0, false, &text).await;
                 self.chat_logs.entry(from).or_default().push((false, text));
             }
             ZodiaNetEvent::PeerStatusChanged { peer_id, status } => {
@@ -1018,7 +1029,7 @@ impl AsyncComponent for AppModel {
                                     let from = PeerId(rp.from);
                                     let tag = hex::encode_upper(&from.0[..4]);
                                     *self.unread_messages.entry(tag).or_insert(0) += 1;
-                                    let _ = self.store.borrow().insert_message(&from.0, false, &rp.text);
+                                    let _ = self.store.insert_message(&from.0, false, &rp.text).await;
                                     self.chat_logs.entry(from).or_default().push((false, rp.text));
                                 }
                                 Err(e) => warn!("relay: CBOR decode failed: {e}"),
@@ -1063,7 +1074,7 @@ impl AsyncComponent for AppModel {
             }
             ZodiaNetEvent::InterpReceived { from, entries } => {
                 let peer_hex = hex::encode_upper(&from.0[..4]);
-                let n = import_interps(&entries, &self.store, &peer_hex);
+                let n = import_interps(&entries, &self.store, &peer_hex).await;
                 if n > 0 {
                     info!(peer = %peer_hex, "imported {n} live interpretations from peer");
                 }
@@ -1088,7 +1099,7 @@ impl AsyncComponent for AppModel {
                     items:            aspect_list::natal_items(&chart.natal_aspects()),
                     placements_items: crate::placements::placement_items(chart),
                     chart:            None,
-                    store:            Rc::clone(&self.store),
+                    store:            self.store.clone(),
                     baseline:         Rc::clone(&self.baseline),
                     identity:         Rc::clone(&self.identity),
                     parent_sender:    sender.clone(),
@@ -1107,7 +1118,7 @@ impl AsyncComponent for AppModel {
                         ),
                         placements_items: vec![],
                         chart:            None,
-                        store:            Rc::clone(&self.store),
+                        store:            self.store.clone(),
                         baseline:         Rc::clone(&self.baseline),
                         identity:         Rc::clone(&self.identity),
                         parent_sender:    sender.clone(),
@@ -1174,7 +1185,7 @@ impl AsyncComponent for AppModel {
                         let (toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title) =
                             stargazer_page::build_stargazer_page(
                                 &peer_id, their_blob, chart,
-                                Rc::clone(&self.store),
+                                self.store.clone(),
                                 Rc::clone(&self.baseline),
                                 Rc::clone(&self.identity),
                                 &sender,
@@ -1488,12 +1499,11 @@ async fn try_spawn_sync(
     net: &ZodiaNetwork,
     sender: &AsyncComponentSender<AppModel>,
 ) -> Option<tokio::sync::mpsc::Sender<SyncPublishMsg>> {
-    use std::sync::{Arc, Mutex};
     use zodia_core::topic_key_global;
 
     let store_path = config.data_dir().join("interpretations.db");
-    let sync_store = match ZodiaStore::open(&store_path) {
-        Ok(s) => Arc::new(Mutex::new(s)),
+    let sync_store = match ZodiaStore::open(&store_path).await {
+        Ok(s) => s,
         Err(e) => { warn!("sync store open failed: {e}"); return None; }
     };
 
@@ -1565,14 +1575,14 @@ async fn do_interp_sync(
     channel: &DirectChannel,
     their_blob: &ConsentBlob,
     our_chart: Option<&Chart>,
-    store: &Rc<RefCell<ZodiaStore>>,
+    store: &ZodiaStore,
     identity: &Rc<IdentityKeypair>,
     peer_hex: &str,
 ) {
-    let outgoing = collect_entries_for_stargazer(their_blob, our_chart, store, identity);
+    let outgoing = collect_entries_for_stargazer(their_blob, our_chart, store, identity).await;
     match channel.exchange_interps(&outgoing).await {
         Ok(received) => {
-            let n = import_interps(&received, store, peer_hex);
+            let n = import_interps(&received, store, peer_hex).await;
             if n > 0 {
                 info!(peer = %peer_hex, "imported {n} interpretations from peer");
             }
@@ -1581,10 +1591,10 @@ async fn do_interp_sync(
     }
 }
 
-fn collect_entries_for_stargazer(
+async fn collect_entries_for_stargazer(
     their_blob: &ConsentBlob,
     our_chart: Option<&Chart>,
-    store: &Rc<RefCell<ZodiaStore>>,
+    store: &ZodiaStore,
     _identity: &Rc<IdentityKeypair>,
 ) -> Vec<InterpEntry> {
     let their_chart = Chart::compute(their_blob.birth.clone()).ok();
@@ -1602,7 +1612,7 @@ fn collect_entries_for_stargazer(
     }
 
     let refs: Vec<&str> = key_sigs.iter().map(|s| s.as_str()).collect();
-    store.borrow().community_for_keys(&refs, 100)
+    store.community_for_keys(&refs, 100).await
         .unwrap_or_default()
         .into_iter()
         .map(|e| InterpEntry {
@@ -1614,9 +1624,9 @@ fn collect_entries_for_stargazer(
         .collect()
 }
 
-fn import_interps(
+async fn import_interps(
     entries: &[InterpEntry],
-    store: &Rc<RefCell<ZodiaStore>>,
+    store: &ZodiaStore,
     peer_hex: &str,
 ) -> usize {
     let mut count = 0;
@@ -1625,9 +1635,9 @@ fn import_interps(
             warn!(peer = %peer_hex, key = %entry.interp_key, "invalid sig length, skipping");
             continue;
         };
-        match store.borrow().insert_received(
+        match store.insert_received(
             &entry.interp_key, &entry.body, &entry.author_pk, &sig_arr,
-        ) {
+        ).await {
             Ok(true)  => count += 1,
             Ok(false) => {}
             Err(StoreError::InvalidSignature) => {
@@ -1714,7 +1724,7 @@ fn build_widgets(
             items:            aspect_list::natal_items(&chart.natal_aspects()),
             placements_items: crate::placements::placement_items(chart),
             chart:            None,
-            store:            Rc::clone(&model.store),
+            store:            model.store.clone(),
             baseline:         Rc::clone(&model.baseline),
             identity:         Rc::clone(&model.identity),
             parent_sender:    sender.clone(),
@@ -1733,7 +1743,7 @@ fn build_widgets(
                 ),
                 placements_items: vec![],
                 chart:            None,
-                store:            Rc::clone(&model.store),
+                store:            model.store.clone(),
                 baseline:         Rc::clone(&model.baseline),
                 identity:         Rc::clone(&model.identity),
                 parent_sender:    sender.clone(),

@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use p2panda_core::{Body, Header, Operation, PrivateKey as PandaKey, PublicKey as PandaPublicKey};
@@ -170,7 +170,7 @@ impl ZodiaSyncNode {
         panda_key: PandaKey,
         endpoint: Endpoint,
         gossip: Gossip,
-        zodia_store: Arc<Mutex<ZodiaStore>>,
+        zodia_store: ZodiaStore,
         sync_topic: TopicId,
     ) -> Result<Self, SyncError> {
         let sync_store = SyncStore::new();
@@ -200,7 +200,7 @@ impl ZodiaSyncNode {
             .map_err(|e| SyncError::Sync(e.to_string()))?;
 
         let topic_map_bg = topic_map.clone();
-        let zodia_store_bg = Arc::clone(&zodia_store);
+        let zodia_store_bg = zodia_store.clone();
 
         tokio::spawn(async move {
             while let Some(result) = subscription.next().await {
@@ -246,14 +246,12 @@ impl ZodiaSyncNode {
                         let interp_key = payload.interp_key.clone();
                         let body_text = payload.body.clone();
 
-                        let inserted = tokio::task::spawn_blocking(move || {
-                            let store = zodia_store.lock().unwrap();
-                            store.insert_received(&interp_key, &body_text, &author_pk_bytes, &sig_arr)
-                        })
-                        .await;
+                        let inserted = zodia_store
+                            .insert_received(&interp_key, &body_text, &author_pk_bytes, &sig_arr)
+                            .await;
 
                         match inserted {
-                            Ok(Ok(true)) => {
+                            Ok(true) => {
                                 debug!(
                                     key = %payload.interp_key,
                                     "sync: new interpretation received"
@@ -265,17 +263,14 @@ impl ZodiaSyncNode {
                                     author_sig: sig_arr,
                                 }).await;
                             }
-                            Ok(Ok(false)) => {
+                            Ok(false) => {
                                 debug!(key = %payload.interp_key, "sync: duplicate, skipped");
                             }
-                            Ok(Err(StoreError::InvalidSignature)) => {
+                            Err(StoreError::InvalidSignature) => {
                                 warn!(key = %payload.interp_key, "sync: invalid sig, discarded");
                             }
-                            Ok(Err(e)) => {
-                                warn!(key = %payload.interp_key, "sync: store error: {e}");
-                            }
                             Err(e) => {
-                                warn!("sync: spawn_blocking panic: {e}");
+                                warn!(key = %payload.interp_key, "sync: store error: {e}");
                             }
                         }
                     }

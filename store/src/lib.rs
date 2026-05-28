@@ -12,12 +12,17 @@
 //! - Community entries carry an ed25519 `author_sig` over `log_id = BLAKE3(key||body)`.
 //!   `insert_received` verifies the signature before writing, making the store the
 //!   final gatekeeper against forged peer contributions.
+//!
+//! All public methods are `async` and run on the calling tokio runtime.  The
+//! underlying `SqlitePool` is cheap to clone and `Send + Sync`, so the store
+//! can be shared across tasks without external locking.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use rusqlite::{Connection, OptionalExtension, params, types::Value};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 use zodia_core::InterpKey;
 
@@ -30,7 +35,7 @@ pub mod seed;
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
-    Db(#[from] rusqlite::Error),
+    Db(#[from] sqlx::Error),
     #[error("seed parse error: {0}")]
     Seed(String),
     #[error("invalid interpretation signature")]
@@ -61,34 +66,54 @@ pub struct RecentInterp {
 
 // ── store ─────────────────────────────────────────────────────────────────────
 
+/// Async, cloneable handle to the SQLite store.
+///
+/// Cheap to clone — the inner `SqlitePool` is reference-counted.
+#[derive(Clone)]
 pub struct ZodiaStore {
-    conn: Connection,
+    pool: SqlitePool,
 }
 
 impl ZodiaStore {
     /// Open (or create) the SQLite database at `path`.
-    pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let store = Self { conn };
-        store.init()?;
+    pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(opts)
+            .await?;
+        let store = Self { pool };
+        store.init().await?;
         Ok(store)
     }
 
     /// In-memory database — useful for tests and first-run seeding checks.
-    pub fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
-        store.init()?;
+    pub async fn open_in_memory() -> Result<Self, StoreError> {
+        // A single shared connection so all queries see the same in-memory DB.
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
+        let store = Self { pool };
+        store.init().await?;
         Ok(store)
     }
 
-    fn init(&self) -> Result<(), StoreError> {
-        self.conn.execute_batch(SCHEMA)?;
-        // Migrations for older DBs.
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE interpretations ADD COLUMN author_sig BLOB;",
-        );
+    async fn init(&self) -> Result<(), StoreError> {
+        for stmt in SCHEMA_STMTS {
+            sqlx::query(stmt).execute(&self.pool).await?;
+        }
+        // Best-effort migration for older DBs (column may already exist).
+        let _ = sqlx::query("ALTER TABLE interpretations ADD COLUMN author_sig BLOB")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -107,7 +132,7 @@ impl ZodiaStore {
     /// Insert a baseline interpretation (no signature required).
     ///
     /// Duplicate log_ids are silently ignored (idempotent on re-seed).
-    pub fn insert_interpretation(
+    pub async fn insert_interpretation(
         &self,
         key: &InterpKey,
         body: &str,
@@ -116,21 +141,22 @@ impl ZodiaStore {
     ) -> Result<[u8; 32], StoreError> {
         let sig = key.to_sig();
         let log_id = derive_log_id(&sig, body);
-        let now = unix_secs();
-        self.conn.execute(
+        let now = unix_secs() as i64;
+        let author_pk_vec = author_pk.map(|b| b.to_vec());
+        sqlx::query(
             "INSERT OR IGNORE INTO interpretations
              (log_id, interp_key, interp_kind, body, author_pk, received_at, is_baseline)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                log_id.as_slice(),
-                sig,
-                kind_str(key),
-                body,
-                author_pk.map(|b| b.as_slice()),
-                now as i64,
-                is_baseline as i32,
-            ],
-        )?;
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(log_id.as_slice())
+        .bind(&sig)
+        .bind(kind_str(key))
+        .bind(body)
+        .bind(author_pk_vec)
+        .bind(now)
+        .bind(is_baseline as i32)
+        .execute(&self.pool)
+        .await?;
         Ok(log_id)
     }
 
@@ -138,7 +164,7 @@ impl ZodiaStore {
     ///
     /// The caller must sign `ZodiaStore::signing_payload(key, body)` with the
     /// author's identity key before calling this.
-    pub fn insert_signed(
+    pub async fn insert_signed(
         &self,
         key: &InterpKey,
         body: &str,
@@ -147,21 +173,21 @@ impl ZodiaStore {
     ) -> Result<[u8; 32], StoreError> {
         let sig = key.to_sig();
         let log_id = derive_log_id(&sig, body);
-        let now = unix_secs();
-        self.conn.execute(
+        let now = unix_secs() as i64;
+        sqlx::query(
             "INSERT OR IGNORE INTO interpretations
              (log_id, interp_key, interp_kind, body, author_pk, author_sig, received_at, is_baseline)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
-            params![
-                log_id.as_slice(),
-                sig,
-                kind_str(key),
-                body,
-                author_pk.as_slice(),
-                author_sig.as_slice(),
-                now as i64,
-            ],
-        )?;
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(log_id.as_slice())
+        .bind(&sig)
+        .bind(kind_str(key))
+        .bind(body)
+        .bind(author_pk.as_slice())
+        .bind(author_sig.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
         Ok(log_id)
     }
 
@@ -169,7 +195,7 @@ impl ZodiaStore {
     ///
     /// Returns `Ok(true)` if newly inserted, `Ok(false)` if already present,
     /// `Err(StoreError::InvalidSignature)` if the signature does not verify.
-    pub fn insert_received(
+    pub async fn insert_received(
         &self,
         interp_key: &str,
         body: &str,
@@ -186,22 +212,22 @@ impl ZodiaStore {
 
         let log_id = payload;
         let kind = kind_from_key_str(interp_key);
-        let now = unix_secs();
-        let changed = self.conn.execute(
+        let now = unix_secs() as i64;
+        let result = sqlx::query(
             "INSERT OR IGNORE INTO interpretations
              (log_id, interp_key, interp_kind, body, author_pk, author_sig, received_at, is_baseline)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
-            params![
-                log_id.as_slice(),
-                interp_key,
-                kind,
-                body,
-                author_pk.as_slice(),
-                author_sig.as_slice(),
-                now as i64,
-            ],
-        )?;
-        Ok(changed > 0)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(log_id.as_slice())
+        .bind(interp_key)
+        .bind(kind)
+        .bind(body)
+        .bind(author_pk.as_slice())
+        .bind(author_sig.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Collect top non-baseline, signed community entries for the given canonical
@@ -209,7 +235,7 @@ impl ZodiaStore {
     ///
     /// Only entries with a valid `author_sig` are included — unsigned baseline
     /// entries and legacy unsigned community entries are excluded.
-    pub fn community_for_keys(
+    pub async fn community_for_keys(
         &self,
         key_sigs: &[&str],
         limit: usize,
@@ -231,66 +257,72 @@ impl ZodiaStore {
              LIMIT ?"
         );
 
-        let mut params: Vec<Value> = key_sigs
-            .iter()
-            .map(|s| Value::Text(s.to_string()))
-            .collect();
-        params.push(Value::Integer(limit as i64));
+        let mut q = sqlx::query(&sql);
+        for s in key_sigs {
+            q = q.bind(*s);
+        }
+        q = q.bind(limit as i64);
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                let pk_bytes: Vec<u8> = row.get(2)?;
-                let sig_bytes: Vec<u8> = row.get(3)?;
+        let rows = q.fetch_all(&self.pool).await?;
+        let entries = rows
+            .into_iter()
+            .map(|row| {
+                let pk_bytes: Vec<u8> = row.get(2);
+                let sig_bytes: Vec<u8> = row.get(3);
                 let mut author_pk = [0u8; 32];
                 let mut author_sig = [0u8; 64];
                 author_pk.copy_from_slice(&pk_bytes[..32.min(pk_bytes.len())]);
                 author_sig.copy_from_slice(&sig_bytes[..64.min(sig_bytes.len())]);
-                Ok(CommunityEntry {
-                    interp_key: row.get(0)?,
-                    body: row.get(1)?,
+                CommunityEntry {
+                    interp_key: row.get(0),
+                    body: row.get(1),
                     author_pk,
                     author_sig,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+                }
+            })
+            .collect();
+        Ok(entries)
     }
 
     /// The single best interpretation for a key — community-contributed first,
     /// then sorted by affirmation count, with baseline as fallback.
-    pub fn top_body(&self, key: &InterpKey) -> Result<Option<String>, StoreError> {
+    pub async fn top_body(&self, key: &InterpKey) -> Result<Option<String>, StoreError> {
         let sig = key.to_sig();
-        let body = self.conn.query_row(
+        let row = sqlx::query(
             "SELECT body FROM interpretations
-             WHERE interp_key = ?1
+             WHERE interp_key = ?
              ORDER BY is_baseline ASC,
                       (SELECT COUNT(*) FROM affirmations
                        WHERE interp_log_id = interpretations.log_id) DESC
              LIMIT 1",
-            params![sig],
-            |row| row.get::<_, String>(0),
         )
-        .optional()?;
-        Ok(body)
+        .bind(&sig)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<String, _>(0)))
     }
 
     /// All interpretations for a key, best-first.
-    pub fn all_for_key(&self, key: &InterpKey) -> Result<Vec<InterpRow>, StoreError> {
+    pub async fn all_for_key(&self, key: &InterpKey) -> Result<Vec<InterpRow>, StoreError> {
         let sig = key.to_sig();
-        let mut stmt = self.conn.prepare(
+        let rows = sqlx::query(
             "SELECT log_id, body, author_pk, received_at, is_baseline,
                     (SELECT COUNT(*) FROM affirmations WHERE interp_log_id = i.log_id) AS aff_count
              FROM interpretations i
-             WHERE interp_key = ?1
+             WHERE interp_key = ?
              ORDER BY is_baseline ASC, aff_count DESC",
-        )?;
-        let rows = stmt
-            .query_map(params![sig], |row| {
-                let log_id_bytes: Vec<u8> = row.get(0)?;
+        )
+        .bind(&sig)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let out = rows
+            .into_iter()
+            .map(|row| {
+                let log_id_bytes: Vec<u8> = row.get(0);
                 let mut log_id = [0u8; 32];
                 log_id.copy_from_slice(&log_id_bytes[..32.min(log_id_bytes.len())]);
-                let author_bytes: Option<Vec<u8>> = row.get(2)?;
+                let author_bytes: Option<Vec<u8>> = row.get(2);
                 let author_pk = author_bytes.and_then(|b| {
                     if b.len() == 32 {
                         let mut a = [0u8; 32];
@@ -300,46 +332,50 @@ impl ZodiaStore {
                         None
                     }
                 });
-                Ok(InterpRow {
+                InterpRow {
                     log_id,
-                    body: row.get(1)?,
+                    body: row.get(1),
                     author_pk,
-                    received_at: row.get::<_, i64>(3)? as u64,
-                    is_baseline: row.get::<_, i32>(4)? != 0,
-                    affirmation_count: row.get::<_, i64>(5)? as u64,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+                    received_at: row.get::<i64, _>(3) as u64,
+                    is_baseline: row.get::<i32, _>(4) != 0,
+                    affirmation_count: row.get::<i64, _>(5) as u64,
+                }
+            })
+            .collect();
+        Ok(out)
     }
 
     /// Most recently received/authored community interpretations, newest first.
-    pub fn recent_community_interps(&self, limit: usize) -> Result<Vec<RecentInterp>, StoreError> {
-        let mut stmt = self.conn.prepare(
+    pub async fn recent_community_interps(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RecentInterp>, StoreError> {
+        let rows = sqlx::query(
             "SELECT interp_key, body, received_at FROM interpretations
              WHERE is_baseline = 0 AND author_sig IS NOT NULL
              ORDER BY received_at DESC
              LIMIT ?",
-        )?;
-        let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(RecentInterp {
-                    interp_key: row.get(0)?,
-                    body: row.get(1)?,
-                    received_at: row.get::<_, i64>(2)? as u64,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| RecentInterp {
+                interp_key: row.get(0),
+                body: row.get(1),
+                received_at: row.get::<i64, _>(2) as u64,
+            })
+            .collect())
     }
 
     /// Number of non-baseline interpretations in the store.
-    pub fn community_count(&self) -> Result<u64, StoreError> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM interpretations WHERE is_baseline = 0",
-            [],
-            |r| r.get(0),
-        )?;
+    pub async fn community_count(&self) -> Result<u64, StoreError> {
+        let row = sqlx::query("SELECT COUNT(*) FROM interpretations WHERE is_baseline = 0")
+            .fetch_one(&self.pool)
+            .await?;
+        let n: i64 = row.get(0);
         Ok(n as u64)
     }
 
@@ -347,7 +383,7 @@ impl ZodiaStore {
 
     /// Record an affirmation.  Returns `Ok(true)` if newly inserted, `Ok(false)`
     /// if this author had already affirmed this interpretation.
-    pub fn affirm(
+    pub async fn affirm(
         &self,
         interp_log_id: &[u8; 32],
         author_pk: &[u8; 32],
@@ -356,75 +392,145 @@ impl ZodiaStore {
         hasher.update(interp_log_id);
         hasher.update(author_pk);
         let log_id: [u8; 32] = *hasher.finalize().as_bytes();
-        let now = unix_secs();
-        let changed = self.conn.execute(
+        let now = unix_secs() as i64;
+        let result = sqlx::query(
             "INSERT OR IGNORE INTO affirmations (log_id, interp_log_id, author_pk, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                log_id.as_slice(),
-                interp_log_id.as_slice(),
-                author_pk.as_slice(),
-                now as i64,
-            ],
-        )?;
-        Ok(changed > 0)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(log_id.as_slice())
+        .bind(interp_log_id.as_slice())
+        .bind(author_pk.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Affirmation count for one interpretation.
-    pub fn affirmation_count(&self, log_id: &[u8; 32]) -> Result<u64, StoreError> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM affirmations WHERE interp_log_id = ?1",
-            params![log_id.as_slice()],
-            |r| r.get(0),
-        )?;
+    pub async fn affirmation_count(&self, log_id: &[u8; 32]) -> Result<u64, StoreError> {
+        let row = sqlx::query("SELECT COUNT(*) FROM affirmations WHERE interp_log_id = ?")
+            .bind(log_id.as_slice())
+            .fetch_one(&self.pool)
+            .await?;
+        let n: i64 = row.get(0);
         Ok(n as u64)
     }
 
     // ── messages ──────────────────────────────────────────────────────────────
 
     /// Persist a single chat message.
-    pub fn insert_message(
+    pub async fn insert_message(
         &self,
         peer_id: &[u8; 32],
         from_us: bool,
         body: &str,
     ) -> Result<(), StoreError> {
-        let ts = unix_ms();
-        self.conn.execute(
-            "INSERT INTO messages (peer_id, from_us, body, ts) VALUES (?1, ?2, ?3, ?4)",
-            params![peer_id.as_slice(), from_us as i32, body, ts as i64],
-        )?;
+        let ts = unix_ms() as i64;
+        sqlx::query("INSERT INTO messages (peer_id, from_us, body, ts) VALUES (?, ?, ?, ?)")
+            .bind(peer_id.as_slice())
+            .bind(from_us as i32)
+            .bind(body)
+            .bind(ts)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     /// Load all messages for a peer, oldest-first.
-    pub fn messages_for_peer(
+    pub async fn messages_for_peer(
         &self,
         peer_id: &[u8; 32],
     ) -> Result<Vec<(bool, String)>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT from_us, body FROM messages WHERE peer_id = ?1 ORDER BY ts ASC, id ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![peer_id.as_slice()], |row| {
-                let from_us: i32 = row.get(0)?;
-                let body: String = row.get(1)?;
-                Ok((from_us != 0, body))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let rows = sqlx::query(
+            "SELECT from_us, body FROM messages WHERE peer_id = ? ORDER BY ts ASC, id ASC",
+        )
+        .bind(peer_id.as_slice())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let from_us: i32 = row.get(0);
+                let body: String = row.get(1);
+                (from_us != 0, body)
+            })
+            .collect())
     }
 
     // ── migration ─────────────────────────────────────────────────────────────
 
     /// Delete all legacy seeded baseline rows. Idempotent — safe every startup.
-    pub fn scrub_baseline(&self) -> Result<u64, StoreError> {
-        let n = self.conn.execute(
-            "DELETE FROM interpretations WHERE is_baseline = 1",
-            [],
-        )?;
-        Ok(n as u64)
+    pub async fn scrub_baseline(&self) -> Result<u64, StoreError> {
+        let result = sqlx::query("DELETE FROM interpretations WHERE is_baseline = 1")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
+
+    // ── blocking variants ─────────────────────────────────────────────────────
+    //
+    // These wrappers let synchronous render/widget code call into the async
+    // store from inside the relm4 tokio runtime.  Safe only when called from
+    // a multi-threaded tokio context (which is how the app boots — see the
+    // `rt-multi-thread` feature on `tokio` in the workspace manifest).
+
+    pub fn top_body_blocking(&self, key: &InterpKey) -> Result<Option<String>, StoreError> {
+        block_on(self.top_body(key))
+    }
+
+    pub fn all_for_key_blocking(&self, key: &InterpKey) -> Result<Vec<InterpRow>, StoreError> {
+        block_on(self.all_for_key(key))
+    }
+
+    pub fn community_for_keys_blocking(
+        &self,
+        key_sigs: &[&str],
+        limit: usize,
+    ) -> Result<Vec<CommunityEntry>, StoreError> {
+        block_on(self.community_for_keys(key_sigs, limit))
+    }
+
+    pub fn insert_received_blocking(
+        &self,
+        interp_key: &str,
+        body: &str,
+        author_pk: &[u8; 32],
+        author_sig: &[u8; 64],
+    ) -> Result<bool, StoreError> {
+        block_on(self.insert_received(interp_key, body, author_pk, author_sig))
+    }
+
+    pub fn insert_message_blocking(
+        &self,
+        peer_id: &[u8; 32],
+        from_us: bool,
+        body: &str,
+    ) -> Result<(), StoreError> {
+        block_on(self.insert_message(peer_id, from_us, body))
+    }
+
+    pub fn messages_for_peer_blocking(
+        &self,
+        peer_id: &[u8; 32],
+    ) -> Result<Vec<(bool, String)>, StoreError> {
+        block_on(self.messages_for_peer(peer_id))
+    }
+
+    pub fn recent_community_interps_blocking(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RecentInterp>, StoreError> {
+        block_on(self.recent_community_interps(limit))
+    }
+}
+
+/// Run an async block to completion from inside a tokio-async context.
+///
+/// Uses `block_in_place` to yield the current worker so the executor can drive
+/// the inner future without deadlocking.  Requires a multi-threaded runtime.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
 }
 
 // ── BaselineStore: row synthesis ──────────────────────────────────────────────
@@ -463,38 +569,36 @@ pub struct InterpRow {
 
 // ── schema ────────────────────────────────────────────────────────────────────
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS interpretations (
-    log_id      BLOB    NOT NULL PRIMARY KEY,
-    interp_key  TEXT    NOT NULL,
-    interp_kind TEXT    NOT NULL,
-    body        TEXT    NOT NULL,
-    author_pk   BLOB,
-    author_sig  BLOB,
-    received_at INTEGER NOT NULL,
-    is_baseline INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_interp_key  ON interpretations(interp_key);
-CREATE INDEX IF NOT EXISTS idx_interp_kind ON interpretations(interp_kind);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    peer_id   BLOB    NOT NULL,
-    from_us   INTEGER NOT NULL,
-    body      TEXT    NOT NULL,
-    ts        INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_msg_peer ON messages(peer_id, ts);
-
-CREATE TABLE IF NOT EXISTS affirmations (
-    log_id        BLOB    NOT NULL PRIMARY KEY,
-    interp_log_id BLOB    NOT NULL,
-    author_pk     BLOB    NOT NULL,
-    created_at    INTEGER NOT NULL,
-    UNIQUE(interp_log_id, author_pk)
-);
-CREATE INDEX IF NOT EXISTS idx_aff_interp ON affirmations(interp_log_id);
-";
+const SCHEMA_STMTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS interpretations (
+        log_id      BLOB    NOT NULL PRIMARY KEY,
+        interp_key  TEXT    NOT NULL,
+        interp_kind TEXT    NOT NULL,
+        body        TEXT    NOT NULL,
+        author_pk   BLOB,
+        author_sig  BLOB,
+        received_at INTEGER NOT NULL,
+        is_baseline INTEGER NOT NULL DEFAULT 0
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_interp_key  ON interpretations(interp_key)",
+    "CREATE INDEX IF NOT EXISTS idx_interp_kind ON interpretations(interp_kind)",
+    "CREATE TABLE IF NOT EXISTS messages (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        peer_id   BLOB    NOT NULL,
+        from_us   INTEGER NOT NULL,
+        body      TEXT    NOT NULL,
+        ts        INTEGER NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_msg_peer ON messages(peer_id, ts)",
+    "CREATE TABLE IF NOT EXISTS affirmations (
+        log_id        BLOB    NOT NULL PRIMARY KEY,
+        interp_log_id BLOB    NOT NULL,
+        author_pk     BLOB    NOT NULL,
+        created_at    INTEGER NOT NULL,
+        UNIQUE(interp_log_id, author_pk)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_aff_interp ON affirmations(interp_log_id)",
+];
 
 // ── internal helpers ──────────────────────────────────────────────────────────
 

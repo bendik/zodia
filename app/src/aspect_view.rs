@@ -8,7 +8,6 @@
 //! a synthetic "Combined" page when there are 2+ keys.  Aspects (single key)
 //! get no switcher; placements (sign + house) get [Sign] [House] [Combined].
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use libadwaita as adw;
@@ -43,7 +42,7 @@ pub struct AspectViewInit {
     /// No longer used after PR2; kept on the type for callers' convenience.
     #[allow(dead_code)]
     pub chart:            Option<Rc<Chart>>,
-    pub store:            Rc<RefCell<ZodiaStore>>,
+    pub store:            ZodiaStore,
     pub baseline:         Rc<BaselineStore>,
     pub identity:         Rc<IdentityKeypair>,
     pub parent_sender:    AsyncComponentSender<AppModel>,
@@ -62,7 +61,7 @@ pub fn launch(init: AspectViewInit) -> adw::NavigationView {
 
 pub struct AspectView {
     nav:              adw::NavigationView,
-    store:            Rc<RefCell<ZodiaStore>>,
+    store:            ZodiaStore,
     baseline:         Rc<BaselineStore>,
     identity:         Rc<IdentityKeypair>,
     parent_sender:    AsyncComponentSender<AppModel>,
@@ -136,7 +135,7 @@ impl SimpleComponent for AspectView {
     ) -> ComponentParts<Self> {
         // Aspects factory.
         let row_inits: Vec<InterpRowInit> = init.items.iter()
-            .map(|it| build_row_init(it, &init.store.borrow(), &init.baseline))
+            .map(|it| build_row_init(it, &init.store, &init.baseline))
             .collect();
         let items_empty = row_inits.is_empty();
 
@@ -162,7 +161,7 @@ impl SimpleComponent for AspectView {
         let placements_rows: Option<FactoryVecDeque<InterpRow>> =
             if matches!(init.kind, AspectViewKind::Natal) && !init.placements_items.is_empty() {
                 let p_inits: Vec<InterpRowInit> = init.placements_items.iter()
-                    .map(|it| build_row_init(it, &init.store.borrow(), &init.baseline))
+                    .map(|it| build_row_init(it, &init.store, &init.baseline))
                     .collect();
                 let mut p_rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
                     .launch(adw::PreferencesGroup::new())
@@ -204,7 +203,7 @@ impl SimpleComponent for AspectView {
                 let page = detail_page(
                     &keys,
                     transit_context,
-                    Rc::clone(&self.store),
+                    self.store.clone(),
                     Rc::clone(&self.baseline),
                     Rc::clone(&self.identity),
                     self.parent_sender.clone(),
@@ -230,7 +229,7 @@ impl SimpleComponent for AspectView {
 pub fn detail_page(
     keys: &[KeyEntry],
     transit_context: Option<String>,
-    store: Rc<RefCell<ZodiaStore>>,
+    store: ZodiaStore,
     baseline: Rc<BaselineStore>,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
@@ -280,10 +279,10 @@ pub fn detail_page(
     for entry in keys {
         let group = build_interpretations_group(
             &entry.key,
-            &store.borrow(),
+            &store,
             &baseline,
             Some(Rc::clone(&identity)),
-            Some(Rc::clone(&store)),
+            Some(store.clone()),
         );
         // For 1 key, "Interpretations" is the right title.  For 2+, label per key.
         if keys.len() > 1 {
@@ -296,7 +295,7 @@ pub fn detail_page(
     // ── contribute (single, with target-key radio when multi-key) ─────────────
     let contribute = build_contribute_group(
         keys,
-        Rc::clone(&store),
+        store.clone(),
         Rc::clone(&identity),
         sender,
         groups_by_sig,
@@ -318,12 +317,12 @@ fn build_interpretations_group(
     store: &ZodiaStore,
     baseline: &BaselineStore,
     identity: Option<Rc<IdentityKeypair>>,
-    store_rc: Option<Rc<RefCell<ZodiaStore>>>,
+    store_rc: Option<ZodiaStore>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title("Interpretations");
 
-    let mut existing = store.all_for_key(key).unwrap_or_default();
+    let mut existing = store.all_for_key_blocking(key).unwrap_or_default();
     if !existing.iter().any(|r| r.is_baseline) {
         if let Some(row) = baseline.row_for_key(key) {
             existing.push(row);
@@ -383,7 +382,7 @@ fn build_interpretations_group(
 /// matching Interpretations group so the user sees their addition immediately.
 fn build_contribute_group(
     keys: &[KeyEntry],
-    store: Rc<RefCell<ZodiaStore>>,
+    store: ZodiaStore,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
     groups_by_sig: std::collections::HashMap<String, adw::PreferencesGroup>,

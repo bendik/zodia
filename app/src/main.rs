@@ -22,7 +22,7 @@ mod util;
 use app::{AppInit, AppModel};
 use relm4::RelmApp;
 use zodia_config::LocalConfig;
-use zodia_store::{ZodiaStore, BaselineStore, seed::BaselineData};
+use zodia_store::{BaselineStore, seed::BaselineData};
 
 fn main() {
     // ── tracing ───────────────────────────────────────────────────────────────
@@ -44,12 +44,12 @@ fn main() {
         Err(e) => { eprintln!("fatal: could not load config: {e}"); std::process::exit(1); }
     };
 
-    // ── store ─────────────────────────────────────────────────────────────────
+    // ── store path ────────────────────────────────────────────────────────────
+    // The database is opened inside `AppModel::init` (which runs on the relm4
+    // tokio runtime) — sqlx is async-only, so we hand off the path here and
+    // open from inside an async context.
     let store_path = config.data_dir().join("interpretations.db");
-    let store = match ZodiaStore::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => { eprintln!("fatal: could not open store: {e}"); std::process::exit(1); }
-    };
+
     // Load baseline into memory — bundled in binary, never written to the database.
     let baseline = match BaselineData::from_toml(baseline::load()) {
         Ok(b) => {
@@ -62,13 +62,6 @@ fn main() {
             BaselineStore::empty()
         }
     };
-
-    // One-time migration: remove any baseline rows seeded into old databases.
-    match store.scrub_baseline() {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("scrubbed {n} legacy baseline rows from DB"),
-        Err(e) => tracing::warn!("scrub_baseline failed: {e}"),
-    }
 
     // ── Bundled icons ─────────────────────────────────────────────────────────
     // Register SVG icons compiled into the binary at build time so they render
@@ -88,7 +81,7 @@ fn main() {
     gtk4::Window::set_default_icon_name("io.github.bendik.Zodia");
 
     apply_css();
-    app.run_async::<AppModel>(AppInit { config, store, baseline });
+    app.run_async::<AppModel>(AppInit { config, store_path, baseline });
 }
 
 fn apply_css() {
