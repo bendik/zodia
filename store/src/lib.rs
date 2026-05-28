@@ -191,6 +191,44 @@ impl ZodiaStore {
         Ok(log_id)
     }
 
+    /// Persist an interpretation whose authentication is provided by an
+    /// outer container (e.g. the p2panda operation header signature from a
+    /// LogSync-replicated op) — no Zodia-level `author_sig` is required or
+    /// stored.  The caller is responsible for asserting the row's
+    /// authenticity before invoking this.
+    ///
+    /// Returns the derived `log_id`.  `INSERT OR IGNORE` semantics: duplicate
+    /// log_ids are silently dropped.
+    ///
+    /// Rows inserted this way leave the `author_sig` column NULL, which
+    /// means they don't participate in Tier-1 `community_for_keys` re-sharing
+    /// (that path filters on `author_sig IS NOT NULL`).  Re-sharing happens
+    /// via LogSync instead, which carries the original p2panda header.
+    pub async fn insert_from_op(
+        &self,
+        interp_key: &str,
+        body: &str,
+        author_pk: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let log_id = derive_log_id(interp_key, body);
+        let kind   = kind_from_key_str(interp_key);
+        let now    = unix_secs() as i64;
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO interpretations
+             (log_id, interp_key, interp_kind, body, author_pk, received_at, is_baseline)
+             VALUES (?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(log_id.as_slice())
+        .bind(interp_key)
+        .bind(kind)
+        .bind(body)
+        .bind(author_pk.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Verify and insert a community interpretation received from a peer.
     ///
     /// Returns `Ok(true)` if newly inserted, `Ok(false)` if already present,

@@ -6810,6 +6810,8 @@ dependencies = [
  "zodia-core",
  "zodia-crypto",
  "zodia-net",
+ "zodia-ops",
+ "zodia-pipeline",
  "zodia-store",
  "zodia-sync",
 ]
@@ -6942,5 +6944,5 @@ dependencies = [
  "tokio",
  "tracing",
  "zodia-core",
- "zodia-store",
+ "zodia-ops",
 ]
