@@ -22,7 +22,6 @@
 //! relm4 main loop's runtime.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use p2panda_core::{Hash, Operation, VerifyingKey};
 use p2panda_stream::{
@@ -47,12 +46,14 @@ pub enum StateEvent {
         interp_key: String,
         body:       String,
     },
-    /// Someone affirmed an interpretation.  The materialiser also tracks
-    /// the running per-`interp_op_id` count internally and reports it.
+    /// Someone affirmed an interpretation, identified by its content hash
+    /// (`BLAKE3(interp_key || body)`).  Downstream, the app inserts a
+    /// `(target_log_id, voter)` row into the local affirmations table —
+    /// the store is the source of truth for the count, since the pipeline's
+    /// view only reflects events seen since startup.
     AffirmAdded {
-        interp_op_id: Hash,
-        voter:        VerifyingKey,
-        running_count: u64,
+        target_log_id: Hash,
+        voter:         VerifyingKey,
     },
     /// Someone wrote a response that hangs off a parent interpretation.
     ResponseAdded {
@@ -149,13 +150,11 @@ impl Processor<Operation<()>> for DecodeProcessor {
 
 /// Pipeline stage: `DecodeOutput` → `StateEvent`.
 ///
-/// Keeps a small in-memory affirmation count map so each `Affirm` op can
-/// emit a running total without round-tripping to the store.  The store
-/// stays the source of truth; this is just enough to power UI optimism.
+/// Stateless today: each op maps to exactly one `StateEvent`.  The
+/// downstream app handler owns side-effects (store writes, UI refresh).
 #[derive(Debug, Default)]
 pub struct MaterializationProcessor {
-    outbox:        RefCell<Vec<StateEvent>>,
-    affirm_counts: RefCell<HashMap<Hash, u64>>,
+    outbox: RefCell<Vec<StateEvent>>,
 }
 
 impl Processor<DecodeOutput> for MaterializationProcessor {
@@ -172,16 +171,10 @@ impl Processor<DecodeOutput> for MaterializationProcessor {
                     InterpOp::Author { interp_key, body } => StateEvent::InterpAuthored {
                         op_id, author, interp_key, body,
                     },
-                    InterpOp::Affirm { interp_op_id } => {
-                        let mut counts = self.affirm_counts.borrow_mut();
-                        let n = counts.entry(interp_op_id).or_insert(0);
-                        *n += 1;
-                        StateEvent::AffirmAdded {
-                            interp_op_id,
-                            voter: author,
-                            running_count: *n,
-                        }
-                    }
+                    InterpOp::Affirm { target_log_id } => StateEvent::AffirmAdded {
+                        target_log_id,
+                        voter: author,
+                    },
                     InterpOp::RespondTo { parent_op_id, body } => StateEvent::ResponseAdded {
                         op_id, author, parent_op_id, body,
                     },
@@ -302,45 +295,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn affirm_running_count_increments() {
+    async fn two_voters_yield_two_distinct_affirm_events() {
         let sk_a = SigningKey::generate();
         let sk_b = SigningKey::generate();
 
-        // Author op (whose hash A and B will affirm).
-        let author_op = make_op(
-            &sk_a,
-            InterpOp::Author {
-                interp_key: "natal:sun_square_pluto".into(),
-                body:       "Transformation under pressure.".into(),
-            }
-            .encode(),
-            0,
-        );
-        let target = author_op.header.hash();
+        // Any 32-byte hash will do as the content target; the pipeline
+        // doesn't dereference it, downstream does.
+        let target = {
+            let helper = make_op(&sk_a, b"target-fixture".to_vec(), 0);
+            helper.header.hash()
+        };
 
         let affirm_a = make_op(
             &sk_a,
-            InterpOp::Affirm { interp_op_id: target }.encode(),
+            InterpOp::Affirm { target_log_id: target }.encode(),
             1,
         );
         let affirm_b = make_op(
             &sk_b,
-            InterpOp::Affirm { interp_op_id: target }.encode(),
+            InterpOp::Affirm { target_log_id: target }.encode(),
             0,
         );
 
         let pipe = ZodiaPipeline::new();
-        pipe.process(author_op).await.unwrap();
-        let _ = pipe.next().await.unwrap(); // InterpAuthored
         pipe.process(affirm_a).await.unwrap();
         let first = pipe.next().await.unwrap();
         pipe.process(affirm_b).await.unwrap();
         let second = pipe.next().await.unwrap();
 
         match (first, second) {
-            (StateEvent::AffirmAdded { running_count: 1, .. },
-             StateEvent::AffirmAdded { running_count: 2, .. }) => {}
-            (a, b) => panic!("expected AffirmAdded counts 1 then 2, got {a:?} then {b:?}"),
+            (
+                StateEvent::AffirmAdded { target_log_id: t1, voter: v1 },
+                StateEvent::AffirmAdded { target_log_id: t2, voter: v2 },
+            ) => {
+                assert_eq!(t1, target);
+                assert_eq!(t2, target);
+                assert_eq!(v1, sk_a.verifying_key());
+                assert_eq!(v2, sk_b.verifying_key());
+                assert_ne!(v1, v2, "voters should be distinct");
+            }
+            (a, b) => panic!("expected two AffirmAdded events, got {a:?} then {b:?}"),
         }
     }
 

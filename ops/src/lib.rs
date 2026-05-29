@@ -35,12 +35,16 @@ pub enum InterpOp {
         body: String,
     },
 
-    /// User affirmed (♡'d) someone else's interpretation.
+    /// User affirmed (♡'d) an interpretation.
     ///
-    /// `interp_op_id` is the BLAKE3 hash of the original `Author` op's
-    /// header — the canonical operation identifier in p2panda.
+    /// `target_log_id` is `BLAKE3(interp_key || body)` — the Zodia content
+    /// hash, matching the `log_id` column in `zodia-store::interpretations`.
+    /// Targeting content rather than the specific authoring lets duplicate-
+    /// content rows from different peers collapse into one community row
+    /// with a combined affirmation count.  Sybil resistance is enforced
+    /// downstream as (target_log_id, voter_pk) uniqueness.
     Affirm {
-        interp_op_id: Hash,
+        target_log_id: Hash,
     },
 
     /// User wrote a response that hangs off another peer's interpretation.
@@ -108,7 +112,7 @@ mod tests {
 
     #[test]
     fn affirm_roundtrip() {
-        let op = InterpOp::Affirm { interp_op_id: sample_hash() };
+        let op = InterpOp::Affirm { target_log_id: sample_hash() };
         let bytes = op.encode();
         assert_eq!(op, InterpOp::decode(&bytes).unwrap());
     }

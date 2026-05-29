@@ -880,10 +880,20 @@ impl AsyncComponent for AppModel {
                             Err(e) => warn!("sync insert_from_op failed: {e}"),
                         }
                     }
-                    StateEvent::AffirmAdded { .. } => {
-                        // Phase B will wire affirmations into a store projection.
-                        // Today: log + bump so the UI knows something changed.
-                        self.network_changed_token += 1;
+                    StateEvent::AffirmAdded { target_log_id, voter } => {
+                        let log_id: [u8; 32] = *target_log_id.as_bytes();
+                        let voter_pk: [u8; 32] = *voter.as_bytes();
+                        match self.store.affirm(&log_id, &voter_pk).await {
+                            Ok(true) => {
+                                debug!(
+                                    voter = %hex::encode(&voter_pk[..4]),
+                                    "remote affirmation persisted"
+                                );
+                                self.network_changed_token += 1;
+                            }
+                            Ok(false) => {} // already had this affirm
+                            Err(e) => warn!("sync affirm persist failed: {e}"),
+                        }
                     }
                     StateEvent::ResponseAdded { .. } => {
                         // Phase C will wire response threading.  No-op for now.
@@ -895,9 +905,19 @@ impl AsyncComponent for AppModel {
             }
             AppMsg::AffirmInterp { log_id } => {
                 let author_pk = self.identity.public_key();
+                // Local write — the count we display updates immediately.
                 match self.store.affirm(&log_id, &author_pk).await {
                     Ok(_) => self.network_changed_token += 1,
                     Err(e) => warn!("affirm failed: {e}"),
+                }
+                // Network propagation — peers' AffirmAdded handlers will
+                // mirror the same (log_id, our pubkey) row into their stores,
+                // so counts converge.
+                if let Some(tx) = &self.sync_publish_tx {
+                    let op = InterpOp::Affirm {
+                        target_log_id: p2panda_core::Hash::from_bytes(log_id),
+                    };
+                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
                 }
             }
             AppMsg::SubmitInterp { key, body } => {
