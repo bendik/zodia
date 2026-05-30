@@ -84,6 +84,9 @@
   </supports>
 
   <releases>
+    <release version="0.7.0" date="2026-05-30">
+      <description><p>Affirmations (♡) now travel with the rest of the community log — when someone ♡s an interpretation on one device the count converges everywhere within seconds. Replies are first-class too: a 💬 button on every community reading lets you write a response that hangs as a thread under the original. The Network tab now shows a "Sync activity" panel so you can see which peers your device is catching up with. Reconnecting to peers you've already met no longer asks for consent again — the second handshake auto-accepts on both sides.</p></description>
+    </release>
     <release version="0.6.0" date="2026-05-28">
       <description><p>Upgrade to iroh 0.98 and p2panda 0.6 — newer transport stack, persistent operation log (sync state survives restarts), and a switch from rusqlite to sqlx for the local store. Reconnects to known peers now happen automatically as soon as their announce is heard, and shared community interpretations refresh into view the moment they arrive.</p></description>
     </release>
