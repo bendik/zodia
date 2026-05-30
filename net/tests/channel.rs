@@ -4,6 +4,7 @@
 //! no p2panda stack) and verify that `exchange_consent` correctly transfers
 //! `ConsentBlob` values in both directions concurrently.
 
+use iroh::endpoint::presets::Minimal;
 use iroh::{Endpoint, RelayMode};
 use zodia_core::BirthData;
 use zodia_net::{ConsentBlob, DirectChannel};
@@ -24,14 +25,14 @@ fn make_blob(seed: u8, jdn: f64, geohash: &str) -> ConsentBlob {
 #[tokio::test]
 async fn exchange_consent_transfers_blobs_bidirectionally() {
     // ── build two loopback endpoints ─────────────────────────────────────────
-    let server = Endpoint::builder()
+    let server = Endpoint::builder(Minimal)
         .alpns(vec![CONSENT_PROTOCOL.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await
         .expect("server bind failed");
 
-    let client = Endpoint::builder()
+    let client = Endpoint::builder(Minimal)
         .alpns(vec![CONSENT_PROTOCOL.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()
@@ -96,14 +97,14 @@ async fn exchange_consent_transfers_blobs_bidirectionally() {
 /// opens independent QUIC streams, so they don't interfere).
 #[tokio::test]
 async fn exchange_consent_is_reusable_on_same_channel() {
-    let server = Endpoint::builder()
+    let server = Endpoint::builder(Minimal)
         .alpns(vec![CONSENT_PROTOCOL.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await
         .expect("server bind failed");
 
-    let client = Endpoint::builder()
+    let client = Endpoint::builder(Minimal)
         .alpns(vec![CONSENT_PROTOCOL.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind()

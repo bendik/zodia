@@ -30,7 +30,9 @@ use zodia_crypto::{ecies_decrypt, ecies_encrypt};
 use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
                 NetworkConfig, PeerId, PeerStatus, RelayPayload, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore, BaselineStore};
-use zodia_sync::{ReceivedInterp, ZodiaSyncNode};
+use zodia_sync::{SyncEvent, ZodiaSyncNode};
+use zodia_ops::InterpOp;
+use zodia_pipeline::{StateEvent, ZodiaPipeline};
 
 use relm4::factory::FactoryVecDeque;
 
@@ -70,6 +72,37 @@ impl CallState {
             CallState::Idle => None,
         }
     }
+}
+
+// ── incoming-channel routing ──────────────────────────────────────────────────
+
+/// Why we're auto-accepting an incoming consent exchange without showing
+/// the user a prompt.  Determines whether `ConnectionComplete` runs the
+/// first-time-connect side-effects (notification, persistence write).
+#[derive(Debug, Clone, Copy)]
+enum AutoAcceptKind {
+    /// We're seeking them too — first-time mutual consent.
+    FirstTime,
+    /// They were Connected previously and are reconnecting; suppress notify.
+    Reconnect,
+}
+
+// ── sync status ───────────────────────────────────────────────────────────────
+
+/// Tagged sync lifecycle event for AppMsg routing.
+#[derive(Debug, Clone)]
+pub enum SyncLifecycle {
+    Started  { remote_pk: [u8; 32] },
+    Finished { remote_pk: [u8; 32], received_ops: u64 },
+    Failed   { remote_pk: [u8; 32], error: String },
+}
+
+/// Per-peer sync state shown in the Network tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncPeerStatus {
+    Syncing,
+    CaughtUp { received_ops: u64 },
+    Failed   { error: String },
 }
 
 // ── messages ──────────────────────────────────────────────────────────────────
@@ -127,12 +160,20 @@ pub enum AppMsg {
     GoingOffline,
     /// User submitted a new interpretation — broadcast it to all live peers.
     ShareInterp(InterpEntry),
-    /// A new community interpretation arrived via p2panda LogSync.
-    SyncInterpReceived(ReceivedInterp),
+    /// A typed state event from the inbound `ZodiaPipeline`.  Replaces
+    /// the legacy `SyncInterpReceived` path: now everything that arrives
+    /// over LogSync flows through the pipeline first.
+    SyncStateEvent(StateEvent),
+    /// A LogSync session lifecycle event (started / finished / failed)
+    /// for surfacing in the Network tab.
+    SyncLifecycle(SyncLifecycle),
     /// User tapped the affirm button on a community interpretation row.
     AffirmInterp { log_id: [u8; 32] },
     /// User submitted a fresh community interpretation from a detail page.
     SubmitInterp { key: InterpKey, body: String },
+    /// User wrote a response under an existing community interpretation.
+    /// `parent_log_id` is the BLAKE3 content-hash of the parent.
+    SubmitResponse { parent_log_id: [u8; 32], body: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -197,6 +238,10 @@ pub struct AppModel {
 
     /// Most recent community interpretation contributions, for the network tab.
     recent_interps: Vec<zodia_store::RecentInterp>,
+
+    /// Per-remote-pubkey LogSync session status, surfaced in the network tab.
+    /// Keyed by the p2panda `VerifyingKey` bytes of the remote peer.
+    sync_peer_status: HashMap<[u8; 32], SyncPeerStatus>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -348,6 +393,7 @@ impl AsyncComponent for AppModel {
             unread_messages: HashMap::new(),
             sync_publish_tx: None,
             recent_interps: Vec::new(),
+            sync_peer_status: HashMap::new(),
         };
         // Populate the factory with persisted peers (Connected + OutgoingPending).
         sync_peers_factory(&mut model);
@@ -847,33 +893,109 @@ impl AsyncComponent for AppModel {
                 }
                 // Slow path: publish to the p2panda log for offline catch-up sync.
                 if let Some(tx) = &self.sync_publish_tx {
-                    if entry.author_sig.len() == 64 {
-                        let mut sig = [0u8; 64];
-                        sig.copy_from_slice(&entry.author_sig);
-                        let _ = tx.try_send(SyncPublishMsg::Publish {
-                            interp_key: entry.interp_key,
-                            body: entry.body,
-                            author_sig: sig,
-                        });
+                    let op = InterpOp::Author {
+                        interp_key: entry.interp_key,
+                        body:       entry.body,
+                    };
+                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
+                }
+            }
+            AppMsg::SyncStateEvent(event) => {
+                match event {
+                    StateEvent::InterpAuthored { author, interp_key, body, .. } => {
+                        let author_pk: [u8; 32] = *author.as_bytes();
+                        match self.store
+                            .insert_from_op(&interp_key, &body, &author_pk)
+                            .await
+                        {
+                            Ok(true) => {
+                                debug!(
+                                    key    = %interp_key,
+                                    author = %hex::encode(&author_pk[..4]),
+                                    "interp authored via sync — stored"
+                                );
+                                self.recent_interps = self.store
+                                    .recent_community_interps(12).await.unwrap_or_default();
+                                self.network_changed_token += 1;
+                            }
+                            Ok(false) => {} // duplicate, nothing to do
+                            Err(e) => warn!("sync insert_from_op failed: {e}"),
+                        }
+                    }
+                    StateEvent::AffirmAdded { target_log_id, voter } => {
+                        let log_id: [u8; 32] = *target_log_id.as_bytes();
+                        let voter_pk: [u8; 32] = *voter.as_bytes();
+                        match self.store.affirm(&log_id, &voter_pk).await {
+                            Ok(true) => {
+                                debug!(
+                                    voter = %hex::encode(&voter_pk[..4]),
+                                    "remote affirmation persisted"
+                                );
+                                self.network_changed_token += 1;
+                            }
+                            Ok(false) => {} // already had this affirm
+                            Err(e) => warn!("sync affirm persist failed: {e}"),
+                        }
+                    }
+                    StateEvent::ResponseAdded { parent_log_id, author, body, .. } => {
+                        let parent: [u8; 32] = *parent_log_id.as_bytes();
+                        let voter_pk: [u8; 32] = *author.as_bytes();
+                        match self.store
+                            .insert_response_from_op(&parent, &body, &voter_pk)
+                            .await
+                        {
+                            Ok(true) => {
+                                debug!(
+                                    author = %hex::encode(&voter_pk[..4]),
+                                    parent = %hex::encode(&parent[..4]),
+                                    "remote response persisted"
+                                );
+                                self.network_changed_token += 1;
+                            }
+                            Ok(false) => {} // already had this response
+                            Err(e) => warn!("sync response persist failed: {e}"),
+                        }
+                    }
+                    StateEvent::Skipped { reason } => {
+                        debug!(?reason, "sync op skipped");
                     }
                 }
             }
-            AppMsg::SyncInterpReceived(interp) => {
+            AppMsg::SyncLifecycle(lifecycle) => {
+                let (remote_pk, status) = match lifecycle {
+                    SyncLifecycle::Started { remote_pk } => {
+                        (remote_pk, SyncPeerStatus::Syncing)
+                    }
+                    SyncLifecycle::Finished { remote_pk, received_ops } => {
+                        (remote_pk, SyncPeerStatus::CaughtUp { received_ops })
+                    }
+                    SyncLifecycle::Failed { remote_pk, error } => {
+                        (remote_pk, SyncPeerStatus::Failed { error })
+                    }
+                };
                 debug!(
-                    key = %interp.interp_key,
-                    author = %hex::encode(&interp.author_pk[..4]),
-                    "new interpretation received via sync"
+                    peer = %hex::encode_upper(&remote_pk[..4]),
+                    ?status,
+                    "sync lifecycle"
                 );
-                // Reload activity feed and trigger a network view refresh.
-                self.recent_interps = self.store
-                    .recent_community_interps(12).await.unwrap_or_default();
+                self.sync_peer_status.insert(remote_pk, status);
                 self.network_changed_token += 1;
             }
             AppMsg::AffirmInterp { log_id } => {
                 let author_pk = self.identity.public_key();
+                // Local write — the count we display updates immediately.
                 match self.store.affirm(&log_id, &author_pk).await {
                     Ok(_) => self.network_changed_token += 1,
                     Err(e) => warn!("affirm failed: {e}"),
+                }
+                // Network propagation — peers' AffirmAdded handlers will
+                // mirror the same (log_id, our pubkey) row into their stores,
+                // so counts converge.
+                if let Some(tx) = &self.sync_publish_tx {
+                    let op = InterpOp::Affirm {
+                        target_log_id: p2panda_core::Hash::from_bytes(log_id),
+                    };
+                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
                 }
             }
             AppMsg::SubmitInterp { key, body } => {
@@ -893,6 +1015,27 @@ impl AsyncComponent for AppModel {
                         }));
                     }
                     Err(e) => warn!("insert_signed failed: {e}"),
+                }
+            }
+            AppMsg::SubmitResponse { parent_log_id, body } => {
+                let author_pk = self.identity.public_key();
+                // Local write — response shows up immediately under the parent
+                // in any open detail page.
+                match self.store
+                    .insert_response_from_op(&parent_log_id, &body, &author_pk)
+                    .await
+                {
+                    Ok(_) => self.network_changed_token += 1,
+                    Err(e) => warn!("submit response local insert: {e}"),
+                }
+                // Network propagation — peers' ResponseAdded handlers persist
+                // the same row and join it under the parent on display.
+                if let Some(tx) = &self.sync_publish_tx {
+                    let op = InterpOp::RespondTo {
+                        parent_log_id: p2panda_core::Hash::from_bytes(parent_log_id),
+                        body,
+                    };
+                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
                 }
             }
         }
@@ -968,13 +1111,24 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
-                // Mutual-pending fast path: if we're already seeking them, skip
-                // the consent bar and auto-accept the exchange.
-                if matches!(
-                    self.stargazers.get(&peer_id).map(|s| &s.state),
-                    Some(StargazerState::OutgoingPending)
-                ) {
-                    info!(peer = %peer_hex, "mutual pending — auto-accepting incoming channel");
+                // Auto-accept fast paths — skip the consent bar when we
+                // already trust this peer:
+                //   * `OutgoingPending`     — we're seeking them too (mutual
+                //                             pending, classic happy path)
+                //   * `Connected { .. }`    — we've consented before, this is
+                //                             just a reconnection after one
+                //                             side restarted or roamed
+                let auto_kind = match self.stargazers.get(&peer_id).map(|s| &s.state) {
+                    Some(StargazerState::OutgoingPending)      => Some(AutoAcceptKind::FirstTime),
+                    Some(StargazerState::Connected { .. })     => Some(AutoAcceptKind::Reconnect),
+                    _                                          => None,
+                };
+                if let Some(kind) = auto_kind {
+                    let reason = match kind {
+                        AutoAcceptKind::FirstTime => "mutual pending",
+                        AutoAcceptKind::Reconnect => "already-connected peer reconnecting",
+                    };
+                    info!(peer = %peer_hex, reason, "auto-accepting incoming channel");
                     if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
                         let s = _sender.clone();
                         let pid = peer_id.clone();
@@ -986,10 +1140,10 @@ impl AsyncComponent for AppModel {
                                         their_blob,
                                         channel,
                                         navigate: false,
-                                        is_new: true,
+                                        is_new: matches!(kind, AutoAcceptKind::FirstTime),
                                     });
                                 }
-                                Err(e) => warn!(peer = %peer_hex, "mutual auto-accept failed: {e}"),
+                                Err(e) => warn!(peer = %peer_hex, "auto-accept failed: {e}"),
                             }
                         });
                     }
@@ -1537,7 +1691,20 @@ fn send_network_refresh(model: &AppModel) {
         })
         .collect();
 
-    let _ = s.send(crate::network_tab::NetworkTabMsg::Refresh { peers, recent });
+    let sync_status: Vec<crate::network_tab::NetSyncStatus> = model.sync_peer_status.iter()
+        .map(|(pk, status)| crate::network_tab::NetSyncStatus {
+            pubkey_tag: hex::encode_upper(&pk[..4]),
+            label:      match status {
+                SyncPeerStatus::Syncing                       => "Syncing…".to_string(),
+                SyncPeerStatus::CaughtUp { received_ops: 0 }  => "Caught up".to_string(),
+                SyncPeerStatus::CaughtUp { received_ops: 1 }  => "Caught up · 1 op received".to_string(),
+                SyncPeerStatus::CaughtUp { received_ops: n }  => format!("Caught up · {n} ops received"),
+                SyncPeerStatus::Failed   { error }            => format!("Failed: {error}"),
+            },
+        })
+        .collect();
+
+    let _ = s.send(crate::network_tab::NetworkTabMsg::Refresh { peers, recent, sync_status });
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1555,26 +1722,27 @@ async fn try_spawn_network(
 
 /// Message type for sending publish requests to the background sync task.
 pub(crate) enum SyncPublishMsg {
-    Publish { interp_key: String, body: String, author_sig: [u8; 64] },
+    Publish(InterpOp),
 }
 
-/// Spawn the LogSync background task and return a channel for publishing.
+/// Spawn the LogSync background pump and return a channel for publishing.
 ///
-/// Opens a second connection to the same SQLite file so the sync task can
-/// call `insert_received` without conflicting with the main-thread store
-/// (WAL mode allows concurrent readers + one writer).
+/// Architecture:
+///   - `ZodiaSyncNode` exposes raw `Operation<()>` on `inbound_ops`.
+///   - A `ZodiaPipeline` decodes / materialises each op into `StateEvent`s.
+///   - We dispatch each `StateEvent` back to the model as `AppMsg::SyncStateEvent`.
+///   - Outbound publishes (`SyncPublishMsg::Publish(InterpOp)`) go straight
+///     to `node.publish`.
+///
+/// The pipeline is `!Send` (p2panda-stream is single-threaded by design),
+/// so the pump task runs on glib's main-thread context via
+/// `spawn_future_local`, not on tokio's multi-thread runtime.
 async fn try_spawn_sync(
     config: &LocalConfig,
     net: &ZodiaNetwork,
     sender: &AsyncComponentSender<AppModel>,
 ) -> Option<tokio::sync::mpsc::Sender<SyncPublishMsg>> {
     use zodia_core::topic_key_global;
-
-    let store_path = config.data_dir().join("interpretations.db");
-    let sync_store = match ZodiaStore::open(&store_path).await {
-        Ok(s) => s,
-        Err(e) => { warn!("sync store open failed: {e}"); return None; }
-    };
 
     let signing_key = config.identity.to_panda_key();
     let topic = p2panda_core::Topic::from(topic_key_global().0);
@@ -1583,7 +1751,6 @@ async fn try_spawn_sync(
         signing_key,
         net.endpoint(),
         net.gossip(),
-        sync_store,
         topic,
         config.data_dir(),
     ).await {
@@ -1594,21 +1761,54 @@ async fn try_spawn_sync(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<SyncPublishMsg>(32);
     let sender_bg = sender.clone();
 
-    tokio::spawn(async move {
+    glib::MainContext::default().spawn_local(async move {
         let mut node = node;
+        let pipeline = ZodiaPipeline::new();
         loop {
             tokio::select! {
                 Some(msg) = rx.recv() => {
                     match msg {
-                        SyncPublishMsg::Publish { interp_key, body, author_sig } => {
-                            if let Err(e) = node.publish(&interp_key, &body, &author_sig).await {
+                        SyncPublishMsg::Publish(op) => {
+                            if let Err(e) = node.publish(op).await {
                                 warn!("sync publish: {e}");
                             }
                         }
                     }
                 }
-                Some(interp) = node.received.recv() => {
-                    sender_bg.input(AppMsg::SyncInterpReceived(interp));
+                Some(sync_event) = node.inbound.recv() => {
+                    match sync_event {
+                        SyncEvent::OperationReceived(op) => {
+                            if pipeline.process(*op).await.is_err() {
+                                warn!("pipeline closed unexpectedly");
+                                break;
+                            }
+                            match pipeline.next().await {
+                                Ok(event) => sender_bg.input(AppMsg::SyncStateEvent(event)),
+                                Err(e)    => warn!("pipeline next: {e}"),
+                            }
+                        }
+                        SyncEvent::SyncStarted { remote } => {
+                            sender_bg.input(AppMsg::SyncLifecycle(
+                                SyncLifecycle::Started { remote_pk: *remote.as_bytes() },
+                            ));
+                        }
+                        SyncEvent::SyncFinished { remote, received_ops, .. } => {
+                            sender_bg.input(AppMsg::SyncLifecycle(
+                                SyncLifecycle::Finished {
+                                    remote_pk: *remote.as_bytes(),
+                                    received_ops,
+                                },
+                            ));
+                        }
+                        SyncEvent::Failed { remote, error } => {
+                            sender_bg.input(AppMsg::SyncLifecycle(
+                                SyncLifecycle::Failed {
+                                    remote_pk: *remote.as_bytes(),
+                                    error,
+                                },
+                            ));
+                        }
+                    }
                 }
                 else => break,
             }

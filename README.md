@@ -8,13 +8,15 @@ A peer-to-peer astrological companion. Zodia connects you with others who share 
 
 ## How it works
 
-Zodia announces a coarse astrological fingerprint (solar month + approximate location) to a local gossip network. Nearby peers with compatible aspects appear in the Network view. Adding someone opens a direct encrypted channel where you exchange exact birth data by mutual consent, compute synastry, and can chat or call.
+Zodia announces a coarse astrological fingerprint (solar month + approximate location) to a peer-to-peer network. Other Zodia users appear in the Network view as their announces reach you — over your local network or across the wider [p2panda](https://p2panda.org) overlay.
 
-Everything stays between you and the people you choose to connect with thanks to [p2panda](https://p2panda.org)'s most eloquent networking toolbox.
+When you and another user mutually consent, you exchange exact birth data over a direct encrypted channel, compute your synastry, and can chat, place voice calls, and share interpretations of specific aspects.
+
+Interpretations are signed by their author and replicated across the network through the same gossip layer, so the body of community readings grows whenever Zodia users meet. There's no central authority — contributions stand on their own.
 
 ## Privacy
 
-Everything is stored locally. Zodia announces only your solar month and a rough location (~600 km) to the gossip network. Exact birth data is only exchanged after you explicitly choose to connect with someone. Because there is no central authority, Zodia cannot verify peer identities — share at your own discretion.
+Everything you don't share stays on your device. Zodia's announces carry only your solar month and a rough location (~600 km); exact birth data is exchanged only after you choose to connect with someone. Interpretations you publish are signed with your local identity key and replicated across the network — they cannot be unpublished once shared. Zodia has no central authority to verify identities, so share at your own discretion.
 
 ## Building from source
 

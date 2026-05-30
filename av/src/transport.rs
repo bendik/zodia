@@ -92,29 +92,40 @@ pub fn start_transport(
     let conn_send = conn.clone();
     tokio::spawn(async move {
         let mut enc_rx = enc_rx;
+        let mut sent = 0u64;
         while let Some(pkt) = enc_rx.recv().await {
-            if let Err(e) = conn_send.send_datagram(pkt) {
-                tracing::debug!("datagram send: {e}");
-                break;
+            match conn_send.send_datagram(pkt) {
+                Ok(()) => { sent += 1; }
+                Err(e) => {
+                    // `Disabled` here means the peer turned off datagrams.
+                    // `UnsupportedByPeer` means the handshake never negotiated
+                    // them.  Either is fatal for the call — surface it.
+                    tracing::warn!(sent, "datagram send: {e}");
+                    break;
+                }
             }
         }
+        tracing::info!(sent, "datagram send task exiting");
     });
 
     // ── QUIC datagram recv task ───────────────────────────────────────────────
     tokio::spawn(async move {
+        let mut recv = 0u64;
         loop {
             match conn.read_datagram().await {
                 Ok(bytes) => {
+                    recv += 1;
                     if dec_tx.send(bytes).await.is_err() {
                         break; // decoder thread dropped — session ended
                     }
                 }
                 Err(e) => {
-                    tracing::debug!("datagram recv: {e}");
+                    tracing::warn!(recv, "datagram recv: {e}");
                     break;
                 }
             }
         }
+        tracing::info!(recv, "datagram recv task exiting");
     });
 
     // ── decoder std::thread ───────────────────────────────────────────────────

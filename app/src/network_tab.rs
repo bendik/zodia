@@ -31,6 +31,15 @@ pub struct NetInterp {
     pub body:       String,
 }
 
+/// One row in the "Sync activity" group — derived from `AppModel::sync_peer_status`.
+#[derive(Debug, Clone)]
+pub struct NetSyncStatus {
+    /// Short 4-byte hex tag of the remote's p2panda VerifyingKey.
+    pub pubkey_tag: String,
+    /// Human-readable status line: "Syncing…", "Caught up · 14 ops", "Failed".
+    pub label:      String,
+}
+
 /// Spawn the Network tab, return its `ToolbarView` root + an input sender.
 /// `split_view` is captured for the sidebar toggle button.
 pub fn launch<F, M>(
@@ -58,8 +67,9 @@ where
 pub enum NetworkTabMsg {
     SetStatus(String),
     Refresh {
-        peers:  Vec<NetPeer>,
-        recent: Vec<NetInterp>,
+        peers:       Vec<NetPeer>,
+        recent:      Vec<NetInterp>,
+        sync_status: Vec<NetSyncStatus>,
     },
 }
 
@@ -71,9 +81,10 @@ pub enum NetworkTabOut {
 // ── model ─────────────────────────────────────────────────────────────────────
 
 pub struct NetworkTab {
-    status: String,
-    peers:  Vec<NetPeer>,
-    recent: Vec<NetInterp>,
+    status:      String,
+    peers:       Vec<NetPeer>,
+    recent:      Vec<NetInterp>,
+    sync_status: Vec<NetSyncStatus>,
     /// Bumped on every Refresh so update_view rebuilds the dynamic content.
     /// SetStatus does not bump this — only the status label is touched.
     refresh_token:        u64,
@@ -184,9 +195,10 @@ impl SimpleComponent for NetworkTab {
             model: NetworkTab {
                 status:              String::new(),
                 peers:               Vec::new(),
-                recent:               Vec::new(),
-                refresh_token:        0,
-                refresh_token_shown:  std::cell::Cell::new(u64::MAX),
+                recent:              Vec::new(),
+                sync_status:         Vec::new(),
+                refresh_token:       0,
+                refresh_token_shown: std::cell::Cell::new(u64::MAX),
             },
             widgets: NetworkTabWidgets { status_label, content_box, sidebar_btn },
         }
@@ -197,9 +209,10 @@ impl SimpleComponent for NetworkTab {
             NetworkTabMsg::SetStatus(s) => {
                 self.status = s;
             }
-            NetworkTabMsg::Refresh { peers, recent } => {
-                self.peers  = peers;
-                self.recent = recent;
+            NetworkTabMsg::Refresh { peers, recent, sync_status } => {
+                self.peers       = peers;
+                self.recent      = recent;
+                self.sync_status = sync_status;
                 self.refresh_token = self.refresh_token.wrapping_add(1);
             }
         }
@@ -304,6 +317,24 @@ impl SimpleComponent for NetworkTab {
                 contrib_group.add(&row);
             }
             widgets.content_box.append(&contrib_group);
+        }
+
+        if !self.sync_status.is_empty() {
+            let sync_group = adw::PreferencesGroup::new();
+            sync_group.set_title("Sync activity");
+            sync_group.set_description(Some(
+                "Catch-up sessions with other Zodia users sharing the community log",
+            ));
+
+            for entry in &self.sync_status {
+                let row = adw::ActionRow::new();
+                row.set_title(&format!("···{}", entry.pubkey_tag));
+                row.set_subtitle(&entry.label);
+                row.set_activatable(false);
+                sync_group.add(&row);
+            }
+
+            widgets.content_box.append(&sync_group);
         }
     }
 }

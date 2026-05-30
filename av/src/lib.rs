@@ -100,8 +100,19 @@ impl AudioSession {
             }
         };
 
+        // Surface a one-line summary so a silently-degraded call (no mic,
+        // no speaker, or both) is visible in the default log filter.
+        let conn = channel.connection();
+        let max_dg = conn.max_datagram_size();
+        tracing::info!(
+            mic       = _capture.is_some(),
+            speaker   = _playback.is_some(),
+            ?max_dg,
+            "audio session starting"
+        );
+
         transport::start_transport(
-            channel.connection(),
+            conn,
             Arc::clone(&shutdown),
             cap_cons,
             play_prod,

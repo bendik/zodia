@@ -7,7 +7,7 @@ description = "Offline-first interpretation sync built on p2panda LogSync"
 
 [dependencies]
 zodia-core.workspace = true
-zodia-store.workspace = true
+zodia-ops.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -1,15 +1,19 @@
-//! Offline-first interpretation sync for the Zodia community index.
+//! Offline-first interpretation sync driver.
 //!
-//! # Design
+//! `ZodiaSyncNode` owns the `p2panda-net::LogSync` machinery and exposes
+//! two simple channels to the app layer:
 //!
-//! Each user maintains an append-only p2panda log (log id `0`) of the
-//! interpretations they have authored.  When two peers share the same sync
-//! topic they perform a **set-reconciliation catch-up** (exchanging log
-//! heights) and then enter **live mode** where newly published operations
-//! are gossip-broadcast immediately.
+//! * `inbound_ops` — every received `Operation<()>`, raw.  The app feeds
+//!   these into a `zodia-pipeline::ZodiaPipeline` for decoding, ordering,
+//!   access-control, materialisation.
+//! * `publish(op: InterpOp)` — encode the canonical Zodia op into a body,
+//!   build + sign the p2panda header, persist to the local log, broadcast
+//!   via LogSync.
 //!
-//! `ZodiaSyncNode` wraps `p2panda-net`'s `LogSync` and translates between the
-//! p2panda operation layer and `ZodiaStore`'s application-level records.
+//! The Zodia-level "author_sig over BLAKE3(key||body)" that the old
+//! `InterpPayload` carried is gone: the p2panda header signature IS the
+//! authentication for LogSync-replicated ops, and `zodia-store::insert_from_op`
+//! trusts that the caller (the pipeline) verified the chain.
 //!
 //! # Storage
 //!
@@ -21,83 +25,67 @@
 use std::path::Path;
 
 use futures_util::StreamExt;
-use p2panda_core::{Body, Header, Operation, SigningKey, Timestamp, Topic};
+use p2panda_core::{Body, Header, Operation, SigningKey, Timestamp, Topic, VerifyingKey};
 use p2panda_net::sync::LogSync;
 use p2panda_net::{Endpoint, Gossip};
 use p2panda_store::logs::LogStore;
 use p2panda_store::operations::OperationStore;
 use p2panda_store::{SqliteStore, SqliteStoreBuilder};
 use p2panda_sync::protocols::TopicLogSyncEvent;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use zodia_store::{StoreError, ZodiaStore};
+use zodia_ops::InterpOp;
+
+// ── sync event ────────────────────────────────────────────────────────────────
+
+/// Everything the subscription task wants to tell the app about: data
+/// (one received operation) and lifecycle (sync sessions starting,
+/// finishing, failing).
+#[derive(Debug)]
+pub enum SyncEvent {
+    /// A peer's operation came down the wire.  Will get decoded + materialised
+    /// by `zodia-pipeline` downstream.
+    OperationReceived(Box<Operation<()>>),
+    /// A catch-up sync session opened with `remote`.
+    SyncStarted {
+        remote: VerifyingKey,
+    },
+    /// A catch-up sync session with `remote` finished.  `received_ops` is the
+    /// running total of ops we have received from this session and any live
+    /// gossip after it — a usable proxy for "are we caught up".
+    SyncFinished {
+        remote:         VerifyingKey,
+        received_ops:   u64,
+        received_bytes: u64,
+    },
+    /// A sync session with `remote` failed mid-flight.
+    Failed {
+        remote: VerifyingKey,
+        error:  String,
+    },
+}
 
 // ── log id ────────────────────────────────────────────────────────────────────
 
 /// Each author has exactly one log containing all their interpretations.
 const INTERP_LOG_ID: u64 = 0;
 
-// ── payload ───────────────────────────────────────────────────────────────────
+// ── errors ────────────────────────────────────────────────────────────────────
 
-/// CBOR-encoded body of a p2panda interpretation operation.
-///
-/// The `author_sig` is the Zodia-level ed25519 signature over
-/// `BLAKE3(interp_key || body)` — the same payload verified by
-/// `ZodiaStore::insert_received`.  Because the p2panda header already carries
-/// an ed25519 signature from the same key pair, this is redundant but lets us
-/// feed received operations directly into `ZodiaStore::insert_received`
-/// without modifying its verification contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InterpPayload {
-    pub interp_key: String,
-    pub body:       String,
-    /// ed25519 signature, 64 bytes.
-    pub author_sig: Vec<u8>,
-}
-
-impl InterpPayload {
-    fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf).expect("ciborium encode infallible");
-        buf
-    }
-
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        ciborium::from_reader(bytes).ok()
-    }
-}
-
-// ── sync node ─────────────────────────────────────────────────────────────────
-
-/// Error type for sync operations.
 #[derive(Debug, Error)]
 pub enum SyncError {
-    #[error("store error: {0}")]
-    Store(#[from] StoreError),
     #[error("p2panda store: {0}")]
     PandaStore(String),
     #[error("p2panda sync: {0}")]
     Sync(String),
-    #[error("payload encode/decode failed")]
-    Payload,
 }
 
-/// A decoded interpretation that arrived via LogSync from a remote peer.
-#[derive(Debug, Clone)]
-pub struct ReceivedInterp {
-    pub interp_key: String,
-    pub body:       String,
-    pub author_pk:  [u8; 32],
-    pub author_sig: [u8; 64],
-}
+// ── sync node ─────────────────────────────────────────────────────────────────
 
-/// The live sync handle.
-///
-/// Keeps the p2panda LogSync machinery alive and mediates between the
-/// application and the sync layer.
+/// The live sync handle.  Keeps the p2panda LogSync machinery alive and
+/// exposes a raw `Operation<()>` channel for the app's pipeline to consume.
 pub struct ZodiaSyncNode {
     /// p2panda signing key — same bytes as the Zodia identity `SigningKey`.
     signing_key: SigningKey,
@@ -105,8 +93,10 @@ pub struct ZodiaSyncNode {
     sync_store:  SqliteStore,
     /// LogSync handle for our single sync topic.
     handle:      p2panda_net::sync::SyncHandle<Operation<()>, TopicLogSyncEvent<()>>,
-    /// Interpretations received from remote peers, ready for the app to consume.
-    pub received: mpsc::Receiver<ReceivedInterp>,
+    /// Mixed-purpose channel: operation arrivals plus lifecycle events
+    /// (session start / finish / failure).  Operations feed the pipeline;
+    /// lifecycle events drive UI sync-status indicators.
+    pub inbound: mpsc::Receiver<SyncEvent>,
 }
 
 impl ZodiaSyncNode {
@@ -115,15 +105,12 @@ impl ZodiaSyncNode {
     /// * `signing_key` — the local identity p2panda `SigningKey`
     /// * `endpoint`    — clone of `ZodiaNetwork`'s iroh endpoint
     /// * `gossip`      — clone of `ZodiaNetwork`'s gossip engine
-    /// * `zodia_store` — shared handle to the application `ZodiaStore` for
-    ///                   persisting received interpretations
     /// * `sync_topic`  — the sync topic (use `Topic::from(topic_key_global().0)`)
     /// * `store_dir`   — directory in which the sync-store SQLite file lives
     pub async fn spawn(
         signing_key:  SigningKey,
         endpoint:     Endpoint,
         gossip:       Gossip,
-        zodia_store:  ZodiaStore,
         sync_topic:   Topic,
         store_dir:    &Path,
     ) -> Result<Self, SyncError> {
@@ -147,15 +134,17 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
 
-        let (recv_tx, recv_rx) = mpsc::channel(256);
+        let (ev_tx, ev_rx) = mpsc::channel::<SyncEvent>(256);
 
         // ── subscription background task ──────────────────────────────────────
+        //
+        // Thin forwarder: every `OperationReceived` becomes a SyncEvent::
+        // OperationReceived; lifecycle events become SyncEvent variants so
+        // the app can drive sync-status UI off them.
         let mut subscription = handle
             .subscribe()
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
-
-        let zodia_store_bg = zodia_store.clone();
 
         tokio::spawn(async move {
             while let Some(result) = subscription.next().await {
@@ -167,78 +156,34 @@ impl ZodiaSyncNode {
                     }
                 };
 
-                match from_sync.event {
+                let remote = from_sync.remote;
+                let remote_tag = hex::encode(&remote.as_bytes()[..4]);
+                let event = match from_sync.event {
                     TopicLogSyncEvent::OperationReceived { operation, .. } => {
-                        let author_pk_bytes: [u8; 32] =
-                            *operation.header.verifying_key.as_bytes();
-
-                        let body_bytes = match &operation.body {
-                            Some(b) => b.to_bytes(),
-                            None => {
-                                debug!("sync: operation without body, skipping");
-                                continue;
-                            }
-                        };
-
-                        let payload = match InterpPayload::decode(&body_bytes) {
-                            Some(p) => p,
-                            None => {
-                                warn!("sync: failed to decode InterpPayload");
-                                continue;
-                            }
-                        };
-
-                        if payload.author_sig.len() != 64 {
-                            warn!("sync: author_sig wrong length ({})", payload.author_sig.len());
-                            continue;
-                        }
-                        let mut sig_arr = [0u8; 64];
-                        sig_arr.copy_from_slice(&payload.author_sig);
-
-                        let interp_key = payload.interp_key.clone();
-                        let body_text  = payload.body.clone();
-
-                        match zodia_store_bg
-                            .insert_received(&interp_key, &body_text, &author_pk_bytes, &sig_arr)
-                            .await
-                        {
-                            Ok(true) => {
-                                debug!(key = %payload.interp_key, "sync: new interpretation received");
-                                let _ = recv_tx.send(ReceivedInterp {
-                                    interp_key: payload.interp_key,
-                                    body:       payload.body,
-                                    author_pk:  author_pk_bytes,
-                                    author_sig: sig_arr,
-                                }).await;
-                            }
-                            Ok(false) => {
-                                debug!(key = %payload.interp_key, "sync: duplicate, skipped");
-                            }
-                            Err(StoreError::InvalidSignature) => {
-                                warn!(key = %payload.interp_key, "sync: invalid sig, discarded");
-                            }
-                            Err(e) => {
-                                warn!(key = %payload.interp_key, "sync: store error: {e}");
-                            }
-                        }
+                        SyncEvent::OperationReceived(operation)
                     }
                     TopicLogSyncEvent::SyncStarted { .. } => {
-                        debug!(
-                            remote = %hex::encode(&from_sync.remote.as_bytes()[..4]),
-                            "sync: catch-up started"
-                        );
+                        debug!(remote = %remote_tag, "sync: catch-up started");
+                        SyncEvent::SyncStarted { remote }
                     }
-                    TopicLogSyncEvent::SyncFinished { .. } => {
-                        debug!(
-                            remote = %hex::encode(&from_sync.remote.as_bytes()[..4]),
-                            "sync: catch-up finished"
-                        );
+                    TopicLogSyncEvent::SyncFinished { metrics } => {
+                        debug!(remote = %remote_tag, "sync: catch-up finished");
+                        SyncEvent::SyncFinished {
+                            remote,
+                            received_ops:   metrics.received_operations(),
+                            received_bytes: metrics.received_bytes(),
+                        }
                     }
                     TopicLogSyncEvent::Failed { error } => {
-                        warn!(remote = %hex::encode(&from_sync.remote.as_bytes()[..4]),
-                              "sync session failed: {error}");
+                        warn!(remote = %remote_tag, "sync session failed: {error}");
+                        SyncEvent::Failed { remote, error }
                     }
-                    _ => {}
+                    _ => continue,
+                };
+
+                if ev_tx.send(event).await.is_err() {
+                    debug!("inbound sync channel closed, stopping subscription pump");
+                    break;
                 }
             }
         });
@@ -247,30 +192,17 @@ impl ZodiaSyncNode {
             signing_key,
             sync_store,
             handle,
-            received: recv_rx,
+            inbound: ev_rx,
         })
     }
 
-    /// Publish a locally authored interpretation to the p2panda log.
+    /// Publish a locally authored `InterpOp` to the p2panda log.
     ///
-    /// Callers must have already inserted the entry into `ZodiaStore` via
-    /// `insert_signed`.  This method adds the operation to the p2panda log
-    /// so that it will be propagated to peers via gossip and catch-up sync.
-    ///
-    /// `author_sig` is the Zodia-level ed25519 signature already stored in
-    /// `ZodiaStore` — 64 bytes.
-    pub async fn publish(
-        &mut self,
-        interp_key: &str,
-        body: &str,
-        author_sig: &[u8; 64],
-    ) -> Result<(), SyncError> {
-        let payload = InterpPayload {
-            interp_key: interp_key.to_owned(),
-            body:       body.to_owned(),
-            author_sig: author_sig.to_vec(),
-        };
-        let payload_bytes = payload.encode();
+    /// Encodes the op, builds + signs a p2panda header, persists locally
+    /// (so the next publish picks up the right backlink and crash-mid-publish
+    /// recovers), then broadcasts via LogSync.
+    pub async fn publish(&mut self, op: InterpOp) -> Result<(), SyncError> {
+        let payload_bytes = op.encode();
 
         // Determine the next sequence number + backlink from our log tip.
         let latest: Option<Operation<()>> = self.sync_store
@@ -279,8 +211,8 @@ impl ZodiaSyncNode {
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
         let (seq_num, backlink) = match latest {
-            Some(op) => (op.header.seq_num + 1, Some(op.header.hash())),
-            None     => (0, None),
+            Some(prev) => (prev.header.seq_num + 1, Some(prev.header.hash())),
+            None       => (0, None),
         };
 
         let body_op = Body::new(&payload_bytes);
@@ -305,14 +237,11 @@ impl ZodiaSyncNode {
             body:   Some(body_op),
         };
 
-        // Persist locally so the next publish picks up the right backlink and
-        // peers that catch us mid-publish can complete the log.
         self.sync_store
             .insert_operation(&op_hash, &operation, &INTERP_LOG_ID)
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
-        // Broadcast to connected peers via gossip.
         self.handle
             .publish(operation)
             .await

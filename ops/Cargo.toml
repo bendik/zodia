@@ -1,0 +1,12 @@
+[package]
+name = "zodia-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canonical operation enum (Author / Affirm / RespondTo) — Zodia's wire format"
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+p2panda-core = "0.6"
