@@ -25,7 +25,7 @@
 use std::path::Path;
 
 use futures_util::StreamExt;
-use p2panda_core::{Body, Header, Operation, SigningKey, Timestamp, Topic};
+use p2panda_core::{Body, Header, Operation, SigningKey, Timestamp, Topic, VerifyingKey};
 use p2panda_net::sync::LogSync;
 use p2panda_net::{Endpoint, Gossip};
 use p2panda_store::logs::LogStore;
@@ -37,6 +37,35 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use zodia_ops::InterpOp;
+
+// ── sync event ────────────────────────────────────────────────────────────────
+
+/// Everything the subscription task wants to tell the app about: data
+/// (one received operation) and lifecycle (sync sessions starting,
+/// finishing, failing).
+#[derive(Debug)]
+pub enum SyncEvent {
+    /// A peer's operation came down the wire.  Will get decoded + materialised
+    /// by `zodia-pipeline` downstream.
+    OperationReceived(Box<Operation<()>>),
+    /// A catch-up sync session opened with `remote`.
+    SyncStarted {
+        remote: VerifyingKey,
+    },
+    /// A catch-up sync session with `remote` finished.  `received_ops` is the
+    /// running total of ops we have received from this session and any live
+    /// gossip after it — a usable proxy for "are we caught up".
+    SyncFinished {
+        remote:         VerifyingKey,
+        received_ops:   u64,
+        received_bytes: u64,
+    },
+    /// A sync session with `remote` failed mid-flight.
+    Failed {
+        remote: VerifyingKey,
+        error:  String,
+    },
+}
 
 // ── log id ────────────────────────────────────────────────────────────────────
 
@@ -64,9 +93,10 @@ pub struct ZodiaSyncNode {
     sync_store:  SqliteStore,
     /// LogSync handle for our single sync topic.
     handle:      p2panda_net::sync::SyncHandle<Operation<()>, TopicLogSyncEvent<()>>,
-    /// Raw operations received from remote peers, ready for the app's
-    /// `ZodiaPipeline` to consume.
-    pub inbound_ops: mpsc::Receiver<Operation<()>>,
+    /// Mixed-purpose channel: operation arrivals plus lifecycle events
+    /// (session start / finish / failure).  Operations feed the pipeline;
+    /// lifecycle events drive UI sync-status indicators.
+    pub inbound: mpsc::Receiver<SyncEvent>,
 }
 
 impl ZodiaSyncNode {
@@ -104,14 +134,13 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
 
-        let (op_tx, op_rx) = mpsc::channel::<Operation<()>>(256);
+        let (ev_tx, ev_rx) = mpsc::channel::<SyncEvent>(256);
 
         // ── subscription background task ──────────────────────────────────────
         //
-        // The task is intentionally thin: forward every received operation
-        // to the channel and log non-operation lifecycle events.  All
-        // decoding / verification / storage decisions happen downstream in
-        // the app's `ZodiaPipeline`.
+        // Thin forwarder: every `OperationReceived` becomes a SyncEvent::
+        // OperationReceived; lifecycle events become SyncEvent variants so
+        // the app can drive sync-status UI off them.
         let mut subscription = handle
             .subscribe()
             .await
@@ -127,26 +156,34 @@ impl ZodiaSyncNode {
                     }
                 };
 
-                let remote_tag = hex::encode(&from_sync.remote.as_bytes()[..4]);
-                match from_sync.event {
+                let remote = from_sync.remote;
+                let remote_tag = hex::encode(&remote.as_bytes()[..4]);
+                let event = match from_sync.event {
                     TopicLogSyncEvent::OperationReceived { operation, .. } => {
-                        // `Box<Operation<()>>` → owned `Operation<()>`.
-                        let op = *operation;
-                        if op_tx.send(op).await.is_err() {
-                            debug!("inbound_ops channel closed, stopping subscription pump");
-                            break;
-                        }
+                        SyncEvent::OperationReceived(operation)
                     }
                     TopicLogSyncEvent::SyncStarted { .. } => {
                         debug!(remote = %remote_tag, "sync: catch-up started");
+                        SyncEvent::SyncStarted { remote }
                     }
-                    TopicLogSyncEvent::SyncFinished { .. } => {
+                    TopicLogSyncEvent::SyncFinished { metrics } => {
                         debug!(remote = %remote_tag, "sync: catch-up finished");
+                        SyncEvent::SyncFinished {
+                            remote,
+                            received_ops:   metrics.received_operations(),
+                            received_bytes: metrics.received_bytes(),
+                        }
                     }
                     TopicLogSyncEvent::Failed { error } => {
                         warn!(remote = %remote_tag, "sync session failed: {error}");
+                        SyncEvent::Failed { remote, error }
                     }
-                    _ => {}
+                    _ => continue,
+                };
+
+                if ev_tx.send(event).await.is_err() {
+                    debug!("inbound sync channel closed, stopping subscription pump");
+                    break;
                 }
             }
         });
@@ -155,7 +192,7 @@ impl ZodiaSyncNode {
             signing_key,
             sync_store,
             handle,
-            inbound_ops: op_rx,
+            inbound: ev_rx,
         })
     }
 

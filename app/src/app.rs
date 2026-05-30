@@ -30,7 +30,7 @@ use zodia_crypto::{ecies_decrypt, ecies_encrypt};
 use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
                 NetworkConfig, PeerId, PeerStatus, RelayPayload, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore, BaselineStore};
-use zodia_sync::ZodiaSyncNode;
+use zodia_sync::{SyncEvent, ZodiaSyncNode};
 use zodia_ops::InterpOp;
 use zodia_pipeline::{StateEvent, ZodiaPipeline};
 
@@ -72,6 +72,24 @@ impl CallState {
             CallState::Idle => None,
         }
     }
+}
+
+// ── sync status ───────────────────────────────────────────────────────────────
+
+/// Tagged sync lifecycle event for AppMsg routing.
+#[derive(Debug, Clone)]
+pub enum SyncLifecycle {
+    Started  { remote_pk: [u8; 32] },
+    Finished { remote_pk: [u8; 32], received_ops: u64 },
+    Failed   { remote_pk: [u8; 32], error: String },
+}
+
+/// Per-peer sync state shown in the Network tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncPeerStatus {
+    Syncing,
+    CaughtUp { received_ops: u64 },
+    Failed   { error: String },
 }
 
 // ── messages ──────────────────────────────────────────────────────────────────
@@ -133,6 +151,9 @@ pub enum AppMsg {
     /// the legacy `SyncInterpReceived` path: now everything that arrives
     /// over LogSync flows through the pipeline first.
     SyncStateEvent(StateEvent),
+    /// A LogSync session lifecycle event (started / finished / failed)
+    /// for surfacing in the Network tab.
+    SyncLifecycle(SyncLifecycle),
     /// User tapped the affirm button on a community interpretation row.
     AffirmInterp { log_id: [u8; 32] },
     /// User submitted a fresh community interpretation from a detail page.
@@ -201,6 +222,10 @@ pub struct AppModel {
 
     /// Most recent community interpretation contributions, for the network tab.
     recent_interps: Vec<zodia_store::RecentInterp>,
+
+    /// Per-remote-pubkey LogSync session status, surfaced in the network tab.
+    /// Keyed by the p2panda `VerifyingKey` bytes of the remote peer.
+    sync_peer_status: HashMap<[u8; 32], SyncPeerStatus>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -352,6 +377,7 @@ impl AsyncComponent for AppModel {
             unread_messages: HashMap::new(),
             sync_publish_tx: None,
             recent_interps: Vec::new(),
+            sync_peer_status: HashMap::new(),
         };
         // Populate the factory with persisted peers (Connected + OutgoingPending).
         sync_peers_factory(&mut model);
@@ -902,6 +928,26 @@ impl AsyncComponent for AppModel {
                         debug!(?reason, "sync op skipped");
                     }
                 }
+            }
+            AppMsg::SyncLifecycle(lifecycle) => {
+                let (remote_pk, status) = match lifecycle {
+                    SyncLifecycle::Started { remote_pk } => {
+                        (remote_pk, SyncPeerStatus::Syncing)
+                    }
+                    SyncLifecycle::Finished { remote_pk, received_ops } => {
+                        (remote_pk, SyncPeerStatus::CaughtUp { received_ops })
+                    }
+                    SyncLifecycle::Failed { remote_pk, error } => {
+                        (remote_pk, SyncPeerStatus::Failed { error })
+                    }
+                };
+                debug!(
+                    peer = %hex::encode_upper(&remote_pk[..4]),
+                    ?status,
+                    "sync lifecycle"
+                );
+                self.sync_peer_status.insert(remote_pk, status);
+                self.network_changed_token += 1;
             }
             AppMsg::AffirmInterp { log_id } => {
                 let author_pk = self.identity.public_key();
@@ -1581,7 +1627,20 @@ fn send_network_refresh(model: &AppModel) {
         })
         .collect();
 
-    let _ = s.send(crate::network_tab::NetworkTabMsg::Refresh { peers, recent });
+    let sync_status: Vec<crate::network_tab::NetSyncStatus> = model.sync_peer_status.iter()
+        .map(|(pk, status)| crate::network_tab::NetSyncStatus {
+            pubkey_tag: hex::encode_upper(&pk[..4]),
+            label:      match status {
+                SyncPeerStatus::Syncing                       => "Syncing…".to_string(),
+                SyncPeerStatus::CaughtUp { received_ops: 0 }  => "Caught up".to_string(),
+                SyncPeerStatus::CaughtUp { received_ops: 1 }  => "Caught up · 1 op received".to_string(),
+                SyncPeerStatus::CaughtUp { received_ops: n }  => format!("Caught up · {n} ops received"),
+                SyncPeerStatus::Failed   { error }            => format!("Failed: {error}"),
+            },
+        })
+        .collect();
+
+    let _ = s.send(crate::network_tab::NetworkTabMsg::Refresh { peers, recent, sync_status });
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1652,14 +1711,39 @@ async fn try_spawn_sync(
                         }
                     }
                 }
-                Some(op) = node.inbound_ops.recv() => {
-                    if pipeline.process(op).await.is_err() {
-                        warn!("pipeline closed unexpectedly");
-                        break;
-                    }
-                    match pipeline.next().await {
-                        Ok(event)  => sender_bg.input(AppMsg::SyncStateEvent(event)),
-                        Err(e)     => warn!("pipeline next: {e}"),
+                Some(sync_event) = node.inbound.recv() => {
+                    match sync_event {
+                        SyncEvent::OperationReceived(op) => {
+                            if pipeline.process(*op).await.is_err() {
+                                warn!("pipeline closed unexpectedly");
+                                break;
+                            }
+                            match pipeline.next().await {
+                                Ok(event) => sender_bg.input(AppMsg::SyncStateEvent(event)),
+                                Err(e)    => warn!("pipeline next: {e}"),
+                            }
+                        }
+                        SyncEvent::SyncStarted { remote } => {
+                            sender_bg.input(AppMsg::SyncLifecycle(
+                                SyncLifecycle::Started { remote_pk: *remote.as_bytes() },
+                            ));
+                        }
+                        SyncEvent::SyncFinished { remote, received_ops, .. } => {
+                            sender_bg.input(AppMsg::SyncLifecycle(
+                                SyncLifecycle::Finished {
+                                    remote_pk: *remote.as_bytes(),
+                                    received_ops,
+                                },
+                            ));
+                        }
+                        SyncEvent::Failed { remote, error } => {
+                            sender_bg.input(AppMsg::SyncLifecycle(
+                                SyncLifecycle::Failed {
+                                    remote_pk: *remote.as_bytes(),
+                                    error,
+                                },
+                            ));
+                        }
                     }
                 }
                 else => break,
