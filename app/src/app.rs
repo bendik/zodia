@@ -74,6 +74,19 @@ impl CallState {
     }
 }
 
+// ── incoming-channel routing ──────────────────────────────────────────────────
+
+/// Why we're auto-accepting an incoming consent exchange without showing
+/// the user a prompt.  Determines whether `ConnectionComplete` runs the
+/// first-time-connect side-effects (notification, persistence write).
+#[derive(Debug, Clone, Copy)]
+enum AutoAcceptKind {
+    /// We're seeking them too — first-time mutual consent.
+    FirstTime,
+    /// They were Connected previously and are reconnecting; suppress notify.
+    Reconnect,
+}
+
 // ── sync status ───────────────────────────────────────────────────────────────
 
 /// Tagged sync lifecycle event for AppMsg routing.
@@ -1058,13 +1071,24 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::IncomingChannel { peer_id, channel } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
-                // Mutual-pending fast path: if we're already seeking them, skip
-                // the consent bar and auto-accept the exchange.
-                if matches!(
-                    self.stargazers.get(&peer_id).map(|s| &s.state),
-                    Some(StargazerState::OutgoingPending)
-                ) {
-                    info!(peer = %peer_hex, "mutual pending — auto-accepting incoming channel");
+                // Auto-accept fast paths — skip the consent bar when we
+                // already trust this peer:
+                //   * `OutgoingPending`     — we're seeking them too (mutual
+                //                             pending, classic happy path)
+                //   * `Connected { .. }`    — we've consented before, this is
+                //                             just a reconnection after one
+                //                             side restarted or roamed
+                let auto_kind = match self.stargazers.get(&peer_id).map(|s| &s.state) {
+                    Some(StargazerState::OutgoingPending)      => Some(AutoAcceptKind::FirstTime),
+                    Some(StargazerState::Connected { .. })     => Some(AutoAcceptKind::Reconnect),
+                    _                                          => None,
+                };
+                if let Some(kind) = auto_kind {
+                    let reason = match kind {
+                        AutoAcceptKind::FirstTime => "mutual pending",
+                        AutoAcceptKind::Reconnect => "already-connected peer reconnecting",
+                    };
+                    info!(peer = %peer_hex, reason, "auto-accepting incoming channel");
                     if let Some(our_blob) = make_consent_blob(&self.config, &self.identity) {
                         let s = _sender.clone();
                         let pid = peer_id.clone();
@@ -1076,10 +1100,10 @@ impl AsyncComponent for AppModel {
                                         their_blob,
                                         channel,
                                         navigate: false,
-                                        is_new: true,
+                                        is_new: matches!(kind, AutoAcceptKind::FirstTime),
                                     });
                                 }
-                                Err(e) => warn!(peer = %peer_hex, "mutual auto-accept failed: {e}"),
+                                Err(e) => warn!(peer = %peer_hex, "auto-accept failed: {e}"),
                             }
                         });
                     }
