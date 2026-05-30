@@ -121,7 +121,6 @@ const CSS: &str = r#"
 .aspect-list {
     font-family: monospace;
     font-size: 13px;
-    line-height: 1.7;
 }
 
 /* ── node id ────────────────────────────────────────────────────────────────── */
