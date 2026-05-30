@@ -110,8 +110,11 @@ impl ZodiaStore {
         for stmt in SCHEMA_STMTS {
             sqlx::query(stmt).execute(&self.pool).await?;
         }
-        // Best-effort migration for older DBs (column may already exist).
+        // Best-effort migrations for older DBs (column may already exist).
         let _ = sqlx::query("ALTER TABLE interpretations ADD COLUMN author_sig BLOB")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE interpretations ADD COLUMN parent_log_id BLOB")
             .execute(&self.pool)
             .await;
         Ok(())
@@ -496,6 +499,78 @@ impl ZodiaStore {
             .collect())
     }
 
+    // ── responses (causal threads) ────────────────────────────────────────────
+
+    /// Persist a response that hangs off `parent_log_id`.  Uses the same
+    /// content-hash log_id derivation as a plain authored interpretation, so
+    /// affirmations on responses Just Work via the existing affirmations table.
+    ///
+    /// `parent_log_id` is stored verbatim; orphan responses (parent not yet
+    /// known locally) are still persisted so the join-on-display picks them up
+    /// when the parent eventually arrives via sync.
+    ///
+    /// Returns the response's own `log_id`.
+    pub async fn insert_response_from_op(
+        &self,
+        parent_log_id: &[u8; 32],
+        body:          &str,
+        author_pk:     &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        // The response shares the parent's `interp_key` for ranking/lookups —
+        // it's part of the same conversation about that key.  We look that up
+        // from the parent row; if the parent is unknown, we still insert with
+        // `interp_key` = "" and `interp_kind` = "response_orphan" so the row
+        // is materialised and can be reconciled later.
+        let parent_key: Option<(String, String)> = sqlx::query_as(
+            "SELECT interp_key, interp_kind FROM interpretations WHERE log_id = ?",
+        )
+        .bind(parent_log_id.as_slice())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (interp_key, kind) = match parent_key {
+            Some((k, _)) => (k.clone(), "response".to_string()),
+            None         => (String::new(), "response_orphan".to_string()),
+        };
+
+        let log_id = derive_log_id(&interp_key, body);
+        let now    = unix_secs() as i64;
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO interpretations
+             (log_id, interp_key, interp_kind, body, author_pk, parent_log_id, received_at, is_baseline)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(log_id.as_slice())
+        .bind(&interp_key)
+        .bind(&kind)
+        .bind(body)
+        .bind(author_pk.as_slice())
+        .bind(parent_log_id.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// All responses authored under `parent_log_id`, oldest-first.
+    pub async fn responses_for(
+        &self,
+        parent_log_id: &[u8; 32],
+    ) -> Result<Vec<InterpRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT log_id, body, author_pk, received_at, is_baseline,
+                    (SELECT COUNT(*) FROM affirmations WHERE interp_log_id = i.log_id) AS aff_count
+             FROM interpretations i
+             WHERE parent_log_id = ?
+             ORDER BY received_at ASC",
+        )
+        .bind(parent_log_id.as_slice())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(row_to_interp_row).collect())
+    }
+
     // ── migration ─────────────────────────────────────────────────────────────
 
     /// Delete all legacy seeded baseline rows. Idempotent — safe every startup.
@@ -506,6 +581,33 @@ impl ZodiaStore {
         Ok(result.rows_affected())
     }
 
+}
+
+// ── row decoder ───────────────────────────────────────────────────────────────
+
+fn row_to_interp_row(row: sqlx::sqlite::SqliteRow) -> InterpRow {
+    use sqlx::Row as _;
+    let log_id_bytes: Vec<u8> = row.get(0);
+    let mut log_id = [0u8; 32];
+    log_id.copy_from_slice(&log_id_bytes[..32.min(log_id_bytes.len())]);
+    let author_bytes: Option<Vec<u8>> = row.get(2);
+    let author_pk = author_bytes.and_then(|b| {
+        if b.len() == 32 {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&b);
+            Some(a)
+        } else {
+            None
+        }
+    });
+    InterpRow {
+        log_id,
+        body: row.get(1),
+        author_pk,
+        received_at: row.get::<i64, _>(3) as u64,
+        is_baseline: row.get::<i32, _>(4) != 0,
+        affirmation_count: row.get::<i64, _>(5) as u64,
+    }
 }
 
 // ── BaselineStore: row synthesis ──────────────────────────────────────────────

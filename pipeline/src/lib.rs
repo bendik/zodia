@@ -56,11 +56,14 @@ pub enum StateEvent {
         voter:         VerifyingKey,
     },
     /// Someone wrote a response that hangs off a parent interpretation.
+    /// `parent_log_id` is the content hash of the parent — orphan responses
+    /// (parent not yet known locally) still get persisted; the join-on-display
+    /// resolves them when the parent eventually arrives.
     ResponseAdded {
-        op_id:        Hash,
-        author:       VerifyingKey,
-        parent_op_id: Hash,
-        body:         String,
+        op_id:         Hash,
+        author:        VerifyingKey,
+        parent_log_id: Hash,
+        body:          String,
     },
     /// An op was decoded but skipped — malformed body, unsupported variant,
     /// missing parent, denied access, etc.  Reported for observability so
@@ -175,8 +178,8 @@ impl Processor<DecodeOutput> for MaterializationProcessor {
                         target_log_id,
                         voter: author,
                     },
-                    InterpOp::RespondTo { parent_op_id, body } => StateEvent::ResponseAdded {
-                        op_id, author, parent_op_id, body,
+                    InterpOp::RespondTo { parent_log_id, body } => StateEvent::ResponseAdded {
+                        op_id, author, parent_log_id, body,
                     },
                 }
             }

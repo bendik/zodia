@@ -171,6 +171,9 @@ pub enum AppMsg {
     AffirmInterp { log_id: [u8; 32] },
     /// User submitted a fresh community interpretation from a detail page.
     SubmitInterp { key: InterpKey, body: String },
+    /// User wrote a response under an existing community interpretation.
+    /// `parent_log_id` is the BLAKE3 content-hash of the parent.
+    SubmitResponse { parent_log_id: [u8; 32], body: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -934,8 +937,24 @@ impl AsyncComponent for AppModel {
                             Err(e) => warn!("sync affirm persist failed: {e}"),
                         }
                     }
-                    StateEvent::ResponseAdded { .. } => {
-                        // Phase C will wire response threading.  No-op for now.
+                    StateEvent::ResponseAdded { parent_log_id, author, body, .. } => {
+                        let parent: [u8; 32] = *parent_log_id.as_bytes();
+                        let voter_pk: [u8; 32] = *author.as_bytes();
+                        match self.store
+                            .insert_response_from_op(&parent, &body, &voter_pk)
+                            .await
+                        {
+                            Ok(true) => {
+                                debug!(
+                                    author = %hex::encode(&voter_pk[..4]),
+                                    parent = %hex::encode(&parent[..4]),
+                                    "remote response persisted"
+                                );
+                                self.network_changed_token += 1;
+                            }
+                            Ok(false) => {} // already had this response
+                            Err(e) => warn!("sync response persist failed: {e}"),
+                        }
                     }
                     StateEvent::Skipped { reason } => {
                         debug!(?reason, "sync op skipped");
@@ -996,6 +1015,27 @@ impl AsyncComponent for AppModel {
                         }));
                     }
                     Err(e) => warn!("insert_signed failed: {e}"),
+                }
+            }
+            AppMsg::SubmitResponse { parent_log_id, body } => {
+                let author_pk = self.identity.public_key();
+                // Local write — response shows up immediately under the parent
+                // in any open detail page.
+                match self.store
+                    .insert_response_from_op(&parent_log_id, &body, &author_pk)
+                    .await
+                {
+                    Ok(_) => self.network_changed_token += 1,
+                    Err(e) => warn!("submit response local insert: {e}"),
+                }
+                // Network propagation — peers' ResponseAdded handlers persist
+                // the same row and join it under the parent on display.
+                if let Some(tx) = &self.sync_publish_tx {
+                    let op = InterpOp::RespondTo {
+                        parent_log_id: p2panda_core::Hash::from_bytes(parent_log_id),
+                        body,
+                    };
+                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
                 }
             }
         }

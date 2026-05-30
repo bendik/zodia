@@ -47,12 +47,15 @@ pub enum InterpOp {
         target_log_id: Hash,
     },
 
-    /// User wrote a response that hangs off another peer's interpretation.
-    /// The response is its own contribution; the `parent_op_id` link is
-    /// what lets the pipeline assemble threads.
+    /// User wrote a response that hangs off another interpretation.
+    /// The response is its own contribution; the `parent_log_id` link
+    /// (`BLAKE3(interp_key || body)` of the parent) is what lets the
+    /// pipeline assemble threads.  Same content-hash targeting model
+    /// as `Affirm` — collapses duplicate-content parents and works
+    /// regardless of which peer authored the parent.
     RespondTo {
-        parent_op_id: Hash,
-        body: String,
+        parent_log_id: Hash,
+        body:          String,
     },
 }
 
@@ -120,8 +123,8 @@ mod tests {
     #[test]
     fn respond_to_roundtrip() {
         let op = InterpOp::RespondTo {
-            parent_op_id: sample_hash(),
-            body: "Yes, and also the body knows it.".into(),
+            parent_log_id: sample_hash(),
+            body:          "Yes, and also the body knows it.".into(),
         };
         let bytes = op.encode();
         assert_eq!(op, InterpOp::decode(&bytes).unwrap());

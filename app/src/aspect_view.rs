@@ -313,9 +313,15 @@ pub async fn detail_page(
 }
 
 /// Build the Interpretations group for `key`.  When `identity` is provided
-/// and `affirm_enabled` is true, community rows show an active affirm button.
-/// Affirm clicks route through `AppMsg::AffirmInterp` so the store write
-/// happens on the parent's async runtime.
+/// and `affirm_enabled` is true, community rows show an active affirm button
+/// and a respond button.  Affirm/Respond clicks route through `AppMsg` so
+/// store writes happen on the parent's async runtime.
+///
+/// Each non-baseline parent row is followed by any responses it has —
+/// rendered as smaller indented action rows.  Responses are pre-fetched
+/// here from the store; new responses added during the current detail-page
+/// session won't appear until the user navigates away and back (a known
+/// limitation until Phase D wires the pipeline directly into UI updates).
 async fn build_interpretations_group(
     key: &InterpKey,
     store: &ZodiaStore,
@@ -365,13 +371,102 @@ async fn build_interpretations_group(
                     });
                 }
                 r.add_suffix(&affirm_btn);
+
+                // Respond button — only on community rows, not baseline.
+                if !row_data.is_baseline {
+                    let respond_btn = gtk::Button::from_icon_name(
+                        "mail-reply-sender-symbolic",
+                    );
+                    respond_btn.add_css_class("flat");
+                    respond_btn.set_valign(gtk::Align::Center);
+                    respond_btn.set_tooltip_text(Some("Respond to this interpretation"));
+                    let parent_log_id = row_data.log_id;
+                    let parent_body   = row_data.body.clone();
+                    let sender_c      = sender.clone();
+                    respond_btn.connect_clicked(move |btn| {
+                        let parent_window = btn
+                            .root()
+                            .and_then(|r| r.downcast::<gtk::Window>().ok());
+                        open_respond_dialog(
+                            parent_window.as_ref(),
+                            parent_log_id,
+                            &parent_body,
+                            sender_c.clone(),
+                        );
+                    });
+                    r.add_suffix(&respond_btn);
+                }
             }
 
             group.add(&r);
+
+            // Pre-fetched response rows beneath the parent, indented.
+            if !row_data.is_baseline {
+                if let Ok(responses) = store.responses_for(&row_data.log_id).await {
+                    for resp in &responses {
+                        let rr = adw::ActionRow::new();
+                        rr.set_title(&resp.body);
+                        let author_tag = resp.author_pk
+                            .as_ref()
+                            .map(|pk| hex::encode_upper(&pk[..4]))
+                            .unwrap_or_else(|| "anon".to_string());
+                        rr.set_subtitle(&format!("response · ···{author_tag}"));
+                        rr.set_margin_start(24);
+                        rr.add_css_class("caption");
+                        group.add(&rr);
+                    }
+                }
+            }
         }
     }
 
     group
+}
+
+/// Open a modal dialog asking the user for a response body, then dispatch
+/// `AppMsg::SubmitResponse` on submit.  Inline-dispatch keeps the dialog
+/// uncoupled from any specific component.
+fn open_respond_dialog(
+    parent: Option<&gtk::Window>,
+    parent_log_id: [u8; 32],
+    parent_body:   &str,
+    sender: AsyncComponentSender<AppModel>,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some("Respond"),
+        Some(&format!(
+            "Your response will hang as a thread under:\n\n“{}”",
+            if parent_body.len() > 200 {
+                format!("{}…", &parent_body[..200])
+            } else {
+                parent_body.to_string()
+            },
+        )),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("send", "Send");
+    dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("send"));
+    dialog.set_close_response("cancel");
+
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("Your response…"));
+    entry.set_hexpand(true);
+    entry.set_margin_top(8);
+    dialog.set_extra_child(Some(&entry));
+
+    let entry_c = entry.clone();
+    dialog.connect_response(None, move |dlg, response| {
+        if response == "send" {
+            let body = entry_c.text().trim().to_string();
+            if !body.is_empty() {
+                sender.input(AppMsg::SubmitResponse { parent_log_id, body });
+            }
+        }
+        dlg.close();
+    });
+
+    dialog.present(parent);
 }
 
 /// Build the Contribute group.  Single text entry + Share button.  When
