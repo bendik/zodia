@@ -22,11 +22,12 @@
 //! `LogSync` uses for both `LogStore` and `TopicStore` duties.  Crashing
 //! mid-sync no longer loses the local log; the new node will reuse it.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use futures_util::StreamExt;
 use p2panda_core::{Body, Header, Operation, SigningKey, Timestamp, Topic, VerifyingKey};
-use p2panda_net::sync::LogSync;
+use p2panda_net::sync::{LogSync, SyncHandle};
 use p2panda_net::{Endpoint, Gossip};
 use p2panda_store::logs::LogStore;
 use p2panda_store::operations::OperationStore;
@@ -36,7 +37,8 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use zodia_ops::{DocOp, InterpOp};
+use zodia_core::topic_key_for_interp;
+use zodia_ops::{DocOp, InterpOp, log_id_for_key};
 
 // ── sync event ────────────────────────────────────────────────────────────────
 
@@ -69,7 +71,12 @@ pub enum SyncEvent {
 
 // ── log id ────────────────────────────────────────────────────────────────────
 
-/// Each author has exactly one log containing all their interpretations.
+/// Legacy log: every pre-Phase-C-2 `InterpOp` an author ever published.
+/// Signed operations can't be re-homed to a derived `log_id` (the p2panda
+/// header signature covers `log_id`), so this stays the permanent address
+/// of pre-migration history — `InterpOp::publish` still targets it.  New
+/// `DocOp` writes use `zodia_ops::log_id_for_key` instead (see
+/// `docs/prd/granular-topic-subscription.md`).
 const INTERP_LOG_ID: u64 = 0;
 
 // ── errors ────────────────────────────────────────────────────────────────────
@@ -86,13 +93,26 @@ pub enum SyncError {
 
 /// The live sync handle.  Keeps the p2panda LogSync machinery alive and
 /// exposes a raw `Operation<()>` channel for the app's pipeline to consume.
+///
+/// Phase C-2: holds one `SyncHandle` per subscribed topic rather than a
+/// single fixed one.  `global_topic` (legacy `InterpOp` traffic, log 0)
+/// is always subscribed; per-key topics for `DocOp` traffic come and go
+/// as the app calls `subscribe`/`unsubscribe`.
 pub struct ZodiaSyncNode {
     /// p2panda signing key — same bytes as the Zodia identity `SigningKey`.
-    signing_key: SigningKey,
+    signing_key:  SigningKey,
     /// File-backed p2panda operation store.
-    sync_store:  SqliteStore,
-    /// LogSync handle for our single sync topic.
-    handle:      p2panda_net::sync::SyncHandle<Operation<()>, TopicLogSyncEvent<()>>,
+    sync_store:   SqliteStore,
+    /// Shared LogSync engine — `.stream()` opens a new topic subscription
+    /// without needing a fresh endpoint/gossip pair.
+    log_sync:     LogSync<SqliteStore, u64, ()>,
+    /// The always-on legacy topic; `publish` (InterpOp) targets this one.
+    global_topic: Topic,
+    /// Forwarder-task sender, cloned into each newly opened topic's pump.
+    ev_tx:        mpsc::Sender<SyncEvent>,
+    /// Live handles keyed by topic. Dropping an entry ends that topic's
+    /// sync session (`SyncHandle::drop` sends `ToSyncManager::Close`).
+    handles:      HashMap<Topic, SyncHandle<Operation<()>, TopicLogSyncEvent<()>>>,
     /// Mixed-purpose channel: operation arrivals plus lifecycle events
     /// (session start / finish / failure).  Operations feed the pipeline;
     /// lifecycle events drive UI sync-status indicators.
@@ -100,12 +120,13 @@ pub struct ZodiaSyncNode {
 }
 
 impl ZodiaSyncNode {
-    /// Spawn the sync node.
+    /// Spawn the sync node, opening `sync_topic` (the legacy global topic)
+    /// immediately.
     ///
     /// * `signing_key` — the local identity p2panda `SigningKey`
     /// * `endpoint`    — clone of `ZodiaNetwork`'s iroh endpoint
     /// * `gossip`      — clone of `ZodiaNetwork`'s gossip engine
-    /// * `sync_topic`  — the sync topic (use `Topic::from(topic_key_global().0)`)
+    /// * `sync_topic`  — the legacy sync topic (use `Topic::from(topic_key_global().0)`)
     /// * `store_dir`   — directory in which the sync-store SQLite file lives
     pub async fn spawn(
         signing_key:  SigningKey,
@@ -129,15 +150,49 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
 
-        let handle = log_sync
-            .stream(sync_topic, true)
+        let (ev_tx, ev_rx) = mpsc::channel::<SyncEvent>(256);
+
+        let mut node = Self {
+            signing_key,
+            sync_store,
+            log_sync,
+            global_topic: sync_topic,
+            ev_tx,
+            handles: HashMap::new(),
+            inbound: ev_rx,
+        };
+        node.open_topic(sync_topic).await?;
+
+        Ok(node)
+    }
+
+    /// Subscribe to a key's per-key topic (Phase C-2).  Idempotent — a
+    /// key already subscribed is a no-op.  `DocOp` traffic for `interp_key`
+    /// only reaches this device while subscribed.
+    pub async fn subscribe(&mut self, interp_key: &str) -> Result<(), SyncError> {
+        self.open_topic(Topic::from(topic_key_for_interp(interp_key).0)).await
+    }
+
+    /// Unsubscribe from a key's per-key topic.  No-op if not subscribed.
+    /// Dropping the handle ends the sync session (`SyncHandle::drop`).
+    pub fn unsubscribe(&mut self, interp_key: &str) {
+        let topic = Topic::from(topic_key_for_interp(interp_key).0);
+        self.handles.remove(&topic);
+    }
+
+    /// Open (if not already) a LogSync stream for `topic` and start its
+    /// forwarder task.  Shared by `spawn`'s global-topic bootstrap and
+    /// `subscribe`'s per-key topics.
+    async fn open_topic(&mut self, topic: Topic) -> Result<(), SyncError> {
+        if self.handles.contains_key(&topic) {
+            return Ok(());
+        }
+
+        let handle = self.log_sync
+            .stream(topic, true)
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
 
-        let (ev_tx, ev_rx) = mpsc::channel::<SyncEvent>(256);
-
-        // ── subscription background task ──────────────────────────────────────
-        //
         // Thin forwarder: every `OperationReceived` becomes a SyncEvent::
         // OperationReceived; lifecycle events become SyncEvent variants so
         // the app can drive sync-status UI off them.
@@ -145,6 +200,7 @@ impl ZodiaSyncNode {
             .subscribe()
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
+        let ev_tx = self.ev_tx.clone();
 
         tokio::spawn(async move {
             while let Some(result) = subscription.next().await {
@@ -188,27 +244,37 @@ impl ZodiaSyncNode {
             }
         });
 
-        Ok(Self {
-            signing_key,
-            sync_store,
-            handle,
-            inbound: ev_rx,
-        })
+        self.handles.insert(topic, handle);
+        Ok(())
     }
 
-    /// Publish a locally authored `InterpOp` to the p2panda log.  See
-    /// [`Self::publish_doc`] for the Phase F-collab `DocOp` equivalent.
+    /// Publish a locally authored `InterpOp` to the legacy global log
+    /// (log 0). See [`Self::publish_doc`] for the Phase F-collab `DocOp`
+    /// equivalent, which routes to a per-key log/topic instead.
     pub async fn publish(&mut self, op: InterpOp) -> Result<(), SyncError> {
-        self.publish_bytes(op.encode()).await
+        let topic = self.global_topic;
+        self.publish_bytes(op.encode(), INTERP_LOG_ID, topic).await
     }
 
-    /// Publish a locally authored `DocOp` (Phase F-collab) to the same
-    /// log.  Same backlink/seq/sign mechanics as [`Self::publish`].
+    /// Publish a locally authored `DocOp` (Phase F-collab) to its key's
+    /// per-key log/topic (Phase C-2), subscribing first if not already —
+    /// publishing into a topic you're not on isn't meaningful, so this
+    /// implicitly opens it, mirroring "the page you're editing is already
+    /// subscribed" from the app-layer lifecycle policy.
     pub async fn publish_doc(&mut self, op: DocOp) -> Result<(), SyncError> {
-        self.publish_bytes(op.encode()).await
+        let interp_key = op.interp_key().to_string();
+        let log_id = log_id_for_key(&interp_key);
+        let topic = Topic::from(topic_key_for_interp(&interp_key).0);
+        self.open_topic(topic).await?;
+        self.publish_bytes(op.encode(), log_id, topic).await
     }
 
-    async fn publish_bytes(&mut self, payload_bytes: Vec<u8>) -> Result<(), SyncError> {
+    async fn publish_bytes(
+        &mut self,
+        payload_bytes: Vec<u8>,
+        log_id:        u64,
+        topic:         Topic,
+    ) -> Result<(), SyncError> {
         // p2panda-store's `insert_operation` runs inside a transaction
         // started by `begin()`.  Without it, the store returns
         // `TransactionMissing` ("tried to interact with inexistant
@@ -222,7 +288,7 @@ impl ZodiaSyncNode {
 
         // Determine the next sequence number + backlink from our log tip.
         let latest: Option<Operation<()>> = self.sync_store
-            .get_latest_entry(&self.signing_key.verifying_key(), &INTERP_LOG_ID)
+            .get_latest_entry(&self.signing_key.verifying_key(), &log_id)
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
@@ -254,7 +320,7 @@ impl ZodiaSyncNode {
         };
 
         if let Err(e) = self.sync_store
-            .insert_operation(&op_hash, &operation, &INTERP_LOG_ID)
+            .insert_operation(&op_hash, &operation, &log_id)
             .await
         {
             // Rollback drops the permit and frees the semaphore so the
@@ -268,7 +334,11 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
-        self.handle
+        // `open_topic` (called by every publish path above) guarantees an
+        // entry exists for `topic` by the time we get here.
+        self.handles
+            .get(&topic)
+            .expect("publish_bytes called after open_topic")
             .publish(operation)
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;

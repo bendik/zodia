@@ -581,6 +581,9 @@ impl AsyncComponent for AppModel {
                 info!("network up, node ···{}", model.node_id_text);
                 let _ = net.publish_announce().await;
                 model.sync_publish_tx = try_spawn_sync(&model.config, &net, &sender).await;
+                if let (Some(tx), Some(chart)) = (&model.sync_publish_tx, &model.chart) {
+                    subscribe_own_chart_keys(chart, tx);
+                }
                 model.network = Some(Arc::new(net));
                 start_network_command(&sender, rx);
                 sender.input(AppMsg::NetworkReady);
@@ -646,6 +649,9 @@ impl AsyncComponent for AppModel {
                     };
                     let _ = net.publish_announce().await;
                     self.sync_publish_tx = try_spawn_sync(&self.config, &net, &sender).await;
+                    if let (Some(tx), Some(chart)) = (&self.sync_publish_tx, &self.chart) {
+                        subscribe_own_chart_keys(chart, tx);
+                    }
                     self.network = Some(Arc::new(net));
                     start_network_command(&sender, rx);
                     sender.input(AppMsg::NetworkReady);
@@ -2406,10 +2412,31 @@ async fn try_spawn_network(
     }
 }
 
+/// Always-subscribed set (Phase C-2): the keys in the user's own natal
+/// chart, so the home aspect list and Sky feed stay live without needing a
+/// per-page subscribe on every cold start. Fire-and-forget over `try_send`
+/// like every other publish-channel send in this file — subscribing is not
+/// latency-critical and the channel has slack.
+fn subscribe_own_chart_keys(chart: &Chart, tx: &tokio::sync::mpsc::Sender<SyncPublishMsg>) {
+    for aspect in chart.natal_aspects() {
+        let key = zodia_core::InterpKey::from_natal(&aspect).to_sig();
+        let _ = tx.try_send(SyncPublishMsg::Subscribe(key));
+    }
+}
+
 /// Message type for sending publish requests to the background sync task.
 pub(crate) enum SyncPublishMsg {
     Publish(InterpOp),
     PublishDoc(zodia_ops::DocOp),
+    /// Open a key's per-key sync topic (Phase C-2). Idempotent.
+    Subscribe(String),
+    /// Close a key's per-key sync topic. Idempotent. Not yet sent by any
+    /// caller — the grace-period-unsubscribe UI wiring (open on aspect-page
+    /// visit, unsubscribe after N idle minutes) is unimplemented; this
+    /// variant exists so `zodia_sync::ZodiaSyncNode::unsubscribe` is already
+    /// reachable once that lands. See docs/prd/granular-topic-subscription.md.
+    #[allow(dead_code)]
+    Unsubscribe(String),
 }
 
 /// Spawn the LogSync background pump and return a channel for publishing.
@@ -2464,6 +2491,14 @@ async fn try_spawn_sync(
                             if let Err(e) = node.publish_doc(op).await {
                                 warn!("sync publish_doc: {e}");
                             }
+                        }
+                        SyncPublishMsg::Subscribe(key) => {
+                            if let Err(e) = node.subscribe(&key).await {
+                                warn!("sync subscribe {key}: {e}");
+                            }
+                        }
+                        SyncPublishMsg::Unsubscribe(key) => {
+                            node.unsubscribe(&key);
                         }
                     }
                 }

@@ -93,6 +93,14 @@ pub fn topic_key_global() -> TopicKey {
     hash_topic("zodia:v1:global")
 }
 
+/// Per-`interp_key` sync topic (Phase C-2 — granular subscription).  Scopes
+/// LogSync replication to exactly the key a subscriber cares about, paired
+/// with a `log_id` derived the same way (see `zodia_ops::log_id_for_key`)
+/// so the log synced over this topic actually contains only this key's ops.
+pub fn topic_key_for_interp(interp_key: &str) -> TopicKey {
+    hash_topic(&format!("zodia:v1:interp:{interp_key}"))
+}
+
 // ── solar position helpers (kept for Tier-0 blob metadata) ───────────────────
 
 

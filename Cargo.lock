@@ -7423,6 +7423,7 @@ dependencies = [
 name = "zodia-ops"
 version = "0.7.1"
 dependencies = [
+ "blake3",
  "ciborium",
  "p2panda-core",
  "serde",

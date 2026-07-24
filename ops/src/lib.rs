@@ -125,6 +125,17 @@ pub enum DocOp {
 }
 
 impl DocOp {
+    /// The key this op targets. Every variant carries one — used to route
+    /// publishes to the per-key log (see `log_id_for_key`).
+    pub fn interp_key(&self) -> &str {
+        match self {
+            DocOp::Edit { interp_key, .. }
+            | DocOp::Veto { interp_key, .. }
+            | DocOp::AffirmRev { interp_key, .. }
+            | DocOp::EditorPresence { interp_key, .. } => interp_key,
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).expect("ciborium encode infallible for owned data");
@@ -141,6 +152,23 @@ mod doc_op_tests {
 
     fn sample_hash() -> Hash {
         Hash::from_bytes([7u8; 32])
+    }
+
+    #[test]
+    fn interp_key_accessor_covers_every_variant() {
+        assert_eq!(DocOp::Edit {
+            interp_key: "natal:sun_trine_moon".into(), base_rev: sample_hash(),
+            crdt_update: vec![], affected_blocks: vec![],
+        }.interp_key(), "natal:sun_trine_moon");
+        assert_eq!(DocOp::Veto {
+            interp_key: "natal:x".into(), target_edit_op_id: sample_hash(),
+        }.interp_key(), "natal:x");
+        assert_eq!(DocOp::AffirmRev {
+            interp_key: "natal:y".into(), target_rev: [0u8; 32],
+        }.interp_key(), "natal:y");
+        assert_eq!(DocOp::EditorPresence {
+            interp_key: "natal:z".into(), joined: true,
+        }.interp_key(), "natal:z");
     }
 
     #[test]
@@ -201,6 +229,16 @@ impl InterpOp {
     }
 }
 
+// ── per-key log routing (Phase C-2) ─────────────────────────────────────────────
+
+/// Derive a p2panda `log_id` from an `interp_key` so each key gets its own
+/// per-author log — required for per-key sync topics to actually scope
+/// what they replicate (see `docs/prd/granular-topic-subscription.md`).
+pub fn log_id_for_key(interp_key: &str) -> u64 {
+    let hash = blake3::hash(format!("interp-log:v1:{interp_key}").as_bytes());
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
+}
+
 // ── error ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -259,6 +297,43 @@ mod tests {
         };
         let bytes = op.encode();
         assert_eq!(op, InterpOp::decode(&bytes).unwrap());
+    }
+
+    #[test]
+    fn log_id_for_key_deterministic() {
+        assert_eq!(log_id_for_key("natal:sun_trine_moon"), log_id_for_key("natal:sun_trine_moon"));
+    }
+
+    #[test]
+    fn log_id_for_key_no_collisions_over_synthetic_keyspace() {
+        // Every planet pair x every aspect kind x natal/transit/sky/house
+        // prefix — a realistic upper bound on real key volume, larger than
+        // any single author will plausibly publish to.
+        const PLANETS: &[&str] = &[
+            "sun", "moon", "mercury", "venus", "mars",
+            "jupiter", "saturn", "uranus", "neptune", "pluto",
+        ];
+        const ASPECTS: &[&str] = &[
+            "conjunction", "opposition", "square", "trine", "sextile",
+            "quincunx", "semi_sextile", "semi_square", "sesquiquadrate",
+        ];
+        const PREFIXES: &[&str] = &["natal", "transit", "sky"];
+
+        let mut seen = std::collections::HashSet::new();
+        let mut count = 0usize;
+        for prefix in PREFIXES {
+            for a in PLANETS {
+                for b in PLANETS {
+                    if a == b { continue; }
+                    for aspect in ASPECTS {
+                        let key = format!("{prefix}:{a}_{aspect}_{b}");
+                        count += 1;
+                        assert!(seen.insert(log_id_for_key(&key)), "collision on {key}");
+                    }
+                }
+            }
+        }
+        assert!(count > 2000, "sanity: expected a large synthetic keyspace, got {count}");
     }
 
     #[test]

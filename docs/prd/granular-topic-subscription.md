@@ -1,7 +1,7 @@
 # PRD: Granular per-key sync topics with lazy subscription (Phase C-2)
 
-**Status:** needs-triage
-**Branch:** TBD (will be `feat/granular-topics`)
+**Status:** partially shipped — log-splitting + always-subscribe done; on-demand page subscribe, grace-period unsubscribe, and mock-backed tests not started
+**Branch:** `main`
 **Foundation already landed:** 0.7.0 (`zodia-ops` + `zodia-pipeline`, single global sync topic) and 0.7.1 (activity feed, collaborative interpretations — both still ride the single global topic).
 **Supersedes:** the "Topic granularity and lazy subscription" sketch in `docs/prd/operations-and-streams-rearchitecture.md` (§ Implementation Decisions). That sketch assumed per-key topics were a routing-layer change; this PRD corrects that assumption against what actually shipped and defines the real migration.
 
@@ -75,6 +75,12 @@ Before this phase, opening any aspect page works identically regardless of wheth
 - Nothing from a peer who hasn't published to that key since upgrading (their relevant history, if any, is buried in their untouched log 0 and isn't addressable by the new topic).
 
 This is a real, user-visible regression during the transition window — a page that used to show community interpretations instantly may show fewer of them right after upgrade, recovering as more of the network's *active* keys get touched again post-migration. This needs a line in the eventual release notes; see Migration story below.
+
+## Progress notes
+
+Shipped: `log_id_for_key` (`ops/src/lib.rs`), `DocOp::interp_key()`, `topic_key_for_interp` (`core/src/topic.rs`), and the `ZodiaSyncNode` multi-topic refactor (`sync/src/lib.rs` — `HashMap<Topic, SyncHandle>`, `subscribe`/`unsubscribe`, `publish_doc` routed through the derived log/topic, legacy `publish` untouched on log 0). `app/src/app.rs` sends `Subscribe` for every natal-chart key right after sync spawns (both cold-start paths).
+
+Not shipped: opening a key's topic when its aspect page is visited outside the always-subscribed set, the grace-period unsubscribe timer (`SyncPublishMsg::Unsubscribe` exists but nothing sends it yet), and the mock-backed `ZodiaSyncNode` tests from Testing Decisions below — this crate has no mock `LogSync`/`SyncHandle` harness yet, unlike `zodia-pipeline`'s fake-stream tests.
 
 ## Testing Decisions
 
