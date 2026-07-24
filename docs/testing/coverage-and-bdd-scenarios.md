@@ -16,7 +16,7 @@ Ground truth from `cargo test --workspace`, plus this pass's additions:
 | `zodia-ops` | 13 | codec round-trips, `log_id_for_key` collision sweep |
 | `zodia-pipeline` | 3 | one processor pair (Decode → Materialize) |
 | `zodia-doc` | 4 | ring eviction, veto authority, CRDT convergence |
-| `zodia-sdk` | 3 | connect, thread-teardown-on-drop, real 2-client networked round trip |
+| `zodia-sdk` | 3 unit + 3 cucumber scenarios | unit: connect, thread-teardown-on-drop, round trip. Cucumber: collaborative editing, granular-subscription silence, affirmation propagation — see BDD section below |
 | `zodia-config` | 0 | |
 | `zodia-av` | 0 | audio hardware — see note below |
 | `app` (bin) | 2 | ~45+ message handlers / view functions, largest crate by far |
@@ -39,7 +39,7 @@ Ground truth from `cargo test --workspace`, plus this pass's additions:
 
 **5. `zodia-av`: 0 tests, accepted gap.** Real audio I/O (`cpal`, `opus`) isn't meaningfully unit-testable without hardware or a lot of mocking infrastructure this repo doesn't have yet. Not flagging this as neglect — flagging it so it's a documented decision rather than an unexamined zero.
 
-**6. `zodia-sdk`: the two tests `docs/prd/zodia-sdk.md`'s Testing Decisions called for and didn't get.** "Unsubscribed keys stay silent" (the direct regression test for Phase C-2's whole premise) and the `Lagged` backpressure test are still open — noted in that PRD, repeating here because they're cheap now that the round-trip test's plumbing already exists to extend.
+**6. `zodia-sdk`: the `Lagged` backpressure test `docs/prd/zodia-sdk.md`'s Testing Decisions called for.** "Unsubscribed keys stay silent" is now covered — see the `granular_subscription.feature` cucumber scenario below. The backpressure test (a slow subscriber falls behind and gets `RecvError::Lagged` rather than stalling the publisher) is still open.
 
 ## What this pass added
 
@@ -52,7 +52,7 @@ This is also the general lesson worth stating explicitly: the `zodia-sdk` real-n
 
 ## BDD scenarios
 
-No BDD test-runner (cucumber-rs or similar) is set up in this workspace — these are written as Gherkin-style scenarios documenting user-facing behavior, not wired to an executable runner. Adopting one is a separate decision (new dependency, new CI step) worth asking about explicitly rather than assuming; these scenarios are useful as acceptance criteria and as a map of what a runner *would* exercise if adopted, independent of that decision.
+`cucumber-rs` is now adopted — see "Status: adopted" below the scenarios for what's wired up and what isn't. The three scenarios below (collaborative editing, granular subscription, affirmation propagation) were picked as the highest-impact, SDK-provable user guarantees: they're the actual data-flow promises `docs/prd/collaborative-interpretations.md` and `docs/prd/granular-topic-subscription.md` make to users, not aspirational ones.
 
 Chosen around the features that actually shipped this cycle — activity feed, collaborative interpretations, and granular sync — because these are the behaviors real users hit, not aspirational ones.
 
@@ -140,6 +140,10 @@ Feature: Granular per-key sync topics
       subscribed, from a peer who has it
 ```
 
-## Open question worth asking, not deciding here
+## Status: adopted
 
-Should this repo adopt an actual BDD runner (`cucumber-rs` is the natural Rust choice) so the scenarios above become executable against `zodia-sdk`? The SDK's existing test harness (real two-client networked tests, no GTK) is already the right shape to back `.feature` files almost directly — `Given` a subscribed client, `When` a `client.edit(...)` call, `Then` an `events()` assertion. That's a real option now that didn't exist before `zodia-sdk` landed. Flagging it rather than deciding it: adopting a new test framework and `.feature` file convention is a team-workflow decision, not a unilateral one.
+`cucumber = "0.23.0"` is now a `zodia-sdk` dev-dependency (`sdk/Cargo.toml`, `[[test]] name = "cucumber", harness = false`). The three scenarios above are executable, live in `sdk/tests/features/*.feature`, and run automatically as part of `cargo test --workspace` via `sdk/tests/cucumber.rs`'s step definitions. Each `Given a peer named "X" connected to the network` step spins up a real `ZodiaClient` — real iroh/p2panda transport, no mocking — matching the existing unit tests' approach rather than introducing a second, fake-network test style.
+
+Chosen scope, deliberately: only guarantees `zodia-sdk` can actually prove end-to-end (op propagation and materialisation into the right `StateEvent`). App-layer behavior — does the bell badge, does the veto actually revert the block, does the feed render the card — is a separate layer with its own gap tracked above (§3), not something a `ZodiaClient`-only scenario can assert without either a GTK test harness or plumbing app.rs's own logic into something scriptable. Extending these scenarios to that layer is future work, not attempted here.
+
+**Known characteristic, not a bug:** running the full workspace test suite (`cargo test --workspace`, all crates' tests executing concurrently) produced one flaky scenario failure in roughly five runs; run in isolation or with less concurrent load, all three scenarios passed consistently across multiple repeated runs. This tracks with real UDP/mDNS discovery timing variance under contention, the same category of behavior the `zodia-sdk` round-trip test already exhibited before the `associate()` fix (see `docs/prd/granular-topic-subscription.md`) — not a design flaw introduced by adopting cucumber. This is the accepted cost of testing the *real* transport rather than a mock: these scenarios found a real, previously-unknown bug that no amount of mocked testing would have caught, and that's worth more than the flakiness costs. If CI flakiness becomes a real problem, the standard mitigation is a single retry on failure for this specific test target — not weakening the scenarios to use a fake network.
