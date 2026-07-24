@@ -149,7 +149,7 @@ A user-facing "Share with..." picker on each contribution decides whether it goe
 - **Phase A — Foundation** (shipped 0.7.0): `zodia-ops` + `zodia-pipeline` scaffolding. Wire inbound LogSync stream through the Pipeline; route Pipeline `StateEvent`s into the existing `AppMsg` flow as a one-for-one substitute. No new behaviour yet, but the spine is in place.
 - **Phase B — First behavioural payoffs** (shipped 0.7.0): network-replicated affirmations; sync metrics in UI.
 - **Phase C-1 — Causal threads** (shipped 0.7.0): `RespondTo` + ordering. See `docs/prd/activity-feed.md` and `docs/prd/collaborative-interpretations.md` for the UI-layer phases (E, F-collab) that cashed this in — both shipped together as 0.7.1.
-- **Phase C-2 — Granular subscription** (not started): per-key topics with lazy subscribe/unsubscribe. Deferred by both Phase E and Phase F-collab PRDs; still open.
+- **Phase C-2 — Granular subscription** (not started): per-key topics with lazy subscribe/unsubscribe. Deferred by both Phase E and Phase F-collab PRDs. Drafted in `docs/prd/granular-topic-subscription.md`, which also corrects this section's original topic-partitioning sketch against what Phase A actually shipped (single global topic, single per-author log).
 - **Phase D — Architectural reach** (not started): stream-negotiated pair channels (`zodia-channels`, dropping ALPN); group encryption (`zodia-circles`); pruning processor. Referenced as a prerequisite for the later real-time-presence and audio phases (H/I) in `collaborative-interpretations.md`.
 
 Each phase is independently shippable; A is a no-user-visible foundation, B-D each ship a 0.x.0 bump with observable user value.
