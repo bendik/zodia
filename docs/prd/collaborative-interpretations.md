@@ -1,8 +1,8 @@
 # PRD: Collaborative interpretations (replaces Phase F)
 
-**Status:** needs-triage
-**Branch:** TBD (will be `feat/collab-interps`)
-**Foundation already landed:** Phases A–C-1 (0.7.0) and Phase E activity feed (shipping next as 0.8.0).
+**Status:** shipped (0.7.1)
+**Branch:** `main`
+**Foundation already landed:** Phases A–C-1 (0.7.0) and Phase E activity feed — both shipped together in 0.7.1.
 **Supersedes:** `docs/prd/circles-mvp.md` — the chat-circles model is replaced by this collaborative-document model.  Circles become a *derived* presence concept on top of editing sessions rather than a primary feature.
 
 ## Problem Statement

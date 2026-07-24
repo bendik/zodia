@@ -1,7 +1,7 @@
 # PRD: Activity feed (Phase E)
 
-**Status:** needs-triage
-**Branch:** TBD (will be `feat/activity-feed`)
+**Status:** shipped (0.7.1)
+**Branch:** `main`
 **Foundation already landed:** 0.7.0 (Phases A + B + C-1 of the operations-and-streams rearchitecture — `zodia-ops`, `zodia-pipeline`, network-replicated affirmations, causal response threads, LogSync session lifecycle in the Network tab)
 
 ## Problem Statement
