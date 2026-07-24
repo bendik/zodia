@@ -7443,6 +7443,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zodia-sdk"
+version = "0.7.1"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "p2panda-core",
+ "rand_core 0.6.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zodia-core",
+ "zodia-net",
+ "zodia-ops",
+ "zodia-pipeline",
+ "zodia-sync",
+]
+
+[[package]]
 name = "zodia-store"
 version = "0.7.1"
 dependencies = [

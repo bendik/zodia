@@ -80,7 +80,9 @@ This is a real, user-visible regression during the transition window — a page 
 
 Shipped: `log_id_for_key` (`ops/src/lib.rs`), `DocOp::interp_key()`, `topic_key_for_interp` (`core/src/topic.rs`), and the `ZodiaSyncNode` multi-topic refactor (`sync/src/lib.rs` — `HashMap<Topic, SyncHandle>`, `subscribe`/`unsubscribe`, `publish_doc` routed through the derived log/topic, legacy `publish` untouched on log 0). `app/src/app.rs` sends `Subscribe` for every natal-chart key right after sync spawns (both cold-start paths).
 
-Not shipped: opening a key's topic when its aspect page is visited outside the always-subscribed set, the grace-period unsubscribe timer (`SyncPublishMsg::Unsubscribe` exists but nothing sends it yet), and the mock-backed `ZodiaSyncNode` tests from Testing Decisions below — this crate has no mock `LogSync`/`SyncHandle` harness yet, unlike `zodia-pipeline`'s fake-stream tests.
+Not shipped: opening a key's topic when its aspect page is visited outside the always-subscribed set, the grace-period unsubscribe timer (`SyncPublishMsg::Unsubscribe` exists but nothing sends it yet), and the mock-backed `ZodiaSyncNode` tests from Testing Decisions below — this crate has no mock `LogSync`/`SyncHandle` harness yet, unlike `zodia-pipeline`'s fake-stream tests. That gap is why the real bug below went unnoticed until `zodia-sdk`'s real-network test caught it.
+
+**Bug found and fixed via `docs/prd/zodia-sdk.md`'s testing:** `TopicStore::associate(topic, author, log_id)` was never called anywhere in `zodia-sync`, for any topic — meaning catch-up for a peer who subscribes to a topic *after* an op already exists on it could never find that op (`topics_v1` stayed empty). Per-key topics made this much more likely to bite in practice than the old always-on global topic did, since short-lived subscriptions have a much smaller window where an already-open live session happens to mask the missing catch-up path. Fixed in `sync/src/lib.rs::publish_bytes`.
 
 ## Testing Decisions
 

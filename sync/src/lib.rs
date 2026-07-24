@@ -31,6 +31,7 @@ use p2panda_net::sync::{LogSync, SyncHandle};
 use p2panda_net::{Endpoint, Gossip};
 use p2panda_store::logs::LogStore;
 use p2panda_store::operations::OperationStore;
+use p2panda_store::topics::TopicStore;
 use p2panda_store::{SqliteStore, SqliteStoreBuilder, Transaction};
 use p2panda_sync::protocols::TopicLogSyncEvent;
 use thiserror::Error;
@@ -325,6 +326,23 @@ impl ZodiaSyncNode {
         {
             // Rollback drops the permit and frees the semaphore so the
             // next publish can begin a new txn.
+            let _ = self.sync_store.rollback(permit).await;
+            return Err(SyncError::PandaStore(e.to_string()));
+        }
+
+        // Register (topic, author, log_id) so peers who subscribe to this
+        // topic *after* this op already exists can discover it during
+        // catch-up (`TopicStore::associate` — without this, LogSync's
+        // "local topic logs retrieved" query has nothing to find, and only
+        // an already-open live session would ever see the op via the
+        // separate live-forward path). `associate`'s internal `self.tx(..)`
+        // requires an already-open transaction (same constraint as
+        // `insert_operation`, see comment above), so this must run before
+        // `commit`, not after.
+        if let Err(e) = self.sync_store
+            .associate(&topic, &self.signing_key.verifying_key(), &log_id)
+            .await
+        {
             let _ = self.sync_store.rollback(permit).await;
             return Err(SyncError::PandaStore(e.to_string()));
         }

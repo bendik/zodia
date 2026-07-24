@@ -1,0 +1,21 @@
+[package]
+name = "zodia-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Relm4-agnostic client facade over zodia-net/sync/pipeline"
+
+[dependencies]
+zodia-core.workspace = true
+zodia-net.workspace = true
+zodia-sync.workspace = true
+zodia-pipeline.workspace = true
+zodia-ops.workspace = true
+ed25519-dalek.workspace = true
+p2panda-core = "0.6"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true

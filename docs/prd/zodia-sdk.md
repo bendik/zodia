@@ -1,7 +1,7 @@
 # PRD: `zodia-sdk` — relm4-agnostic client facade over the p2p data flow
 
-**Status:** needs-triage
-**Branch:** TBD (will be `feat/zodia-sdk`)
+**Status:** core facade shipped and tested — `app.rs` migration (deleting `SyncPublishMsg`/`try_spawn_network`/`try_spawn_sync`) not started
+**Branch:** `main`
 **Foundation already landed:** `zodia-net` (transport/discovery), `zodia-sync` (per-key LogSync, Phase C-2), `zodia-pipeline` (op decode + materialisation → `StateEvent`). All three exist and work; nothing here changes their internals or the wire format.
 
 ## Problem Statement
@@ -161,6 +161,14 @@ This is the biggest testing upgrade available in the near term: `zodia-sdk` test
 - **Unsubscribed keys stay silent**: A never subscribes to a key; B publishes to it; assert A's `events()` does *not* yield anything for that key within a bounded window (regression test for Phase C-2's whole point).
 - **Error surfacing**: calling any verb after the client's thread has died returns `ClientError::Disconnected` rather than hanging or panicking.
 - **Backpressure**: a subscriber that doesn't poll `events()` for N published ops gets `Lagged`, not a stall of the publishing side.
+
+## Progress notes
+
+Shipped: the `zodia-sdk` crate as sketched above — `ZodiaClient::connect`/`events`/`sync_status`/`subscribe`/`unsubscribe`/`author`/`edit`/`veto`/`affirm_rev`/`set_editor_presence`, dedicated-thread + `LocalSet` internally, `oneshot`-backed `call()` helper giving every command a real `Result`. Three tests: connect/`node_id()` stability, thread teardown on drop, and a real two-`ZodiaClient` networked round trip (subscribe on both sides, publish an edit on one, observe `StateEvent::DocEdited` on the other over real iroh/p2panda transport — no mocking).
+
+That round-trip test caught a genuine pre-existing bug while being written: `p2panda_store::topics::TopicStore::associate(topic, author, log_id)` was never being called anywhere in `zodia-sync`, for *any* topic, including the legacy global one — so `topics_v1` stayed empty and a peer's catch-up query ("local topic logs retrieved") could never find anything to serve, regardless of which topic model was in use. Only an already-open live sync session happened to mask this (direct in-memory forwarding, independent of `topics_v1`), which is exactly the kind of narrow, timing-dependent path Phase C-2's shorter-lived per-key topic subscriptions made much more likely to miss. Fixed in `sync/src/lib.rs::publish_bytes` — `associate` now runs inside the same transaction as `insert_operation`, before commit (its own `self.tx(..)` call requires an already-open transaction, same constraint `insert_operation` has). This fix benefits the already-shipped Phase C-2 log-splitting too, not just the SDK.
+
+Not started: migrating `app.rs` off `SyncPublishMsg`/`try_spawn_network`/`try_spawn_sync` onto `ZodiaClient`. The bridge sketch in this doc is unverified against the real relm4 message flow.
 
 ## Out of Scope
 
