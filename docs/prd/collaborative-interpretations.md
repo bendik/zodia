@@ -265,7 +265,9 @@ We continue to skip live-iroh integration tests at the Zodia layer.
 
 ## Further Notes
 
-**Version cut.** Phase F-collab adds wire-format-incompatible ops.  Peers on 0.8.x see `DocOp::*` and drop them at decode (`Skipped::MalformedOp`).  Authoring an edit on the new doc model produces no community read for sub-0.9 peers.  Ships as **0.9.0** with a known-incompat note: the community body diverges across the 0.9 cut and only converges once everyone upgrades.  Acceptable trade for the model shift.
+**Version cut (as planned).** Phase F-collab adds wire-format-incompatible ops.  Peers on 0.8.x see `DocOp::*` and drop them at decode (`Skipped::MalformedOp`).  Authoring an edit on the new doc model produces no community read for sub-0.9 peers.  Was planned to ship as **0.9.0** with a known-incompat note: the community body diverges across the cut and only converges once everyone upgrades.  Acceptable trade for the model shift.
+
+**Version cut (as actually shipped).** Phase E and Phase F-collab landed together as **0.7.1**, a patch bump, not the planned 0.9.0 minor cut — the version number does not flag the wire-format change the way this PRD intended.  Practically this is safe: unrecognised `DocOp::*` decode as `Skipped::MalformedOp` on older peers rather than erroring, so nothing crashes and nothing corrupts.  The cost is silent: peers on 0.7.0 and earlier simply never see collaborative edits, with no version-number signal that a cut occurred.  If a future phase repeats this (e.g. Phase F circles, which is also a wire-format cut per its own PRD), bump minor for wire changes even when shipping alongside other work, so the compat note lands where users can find it.
 
 **Why this replaces the original Phase F.** The original PRD's chat-circles framed circles as parallel rooms about a topic; users get to discuss but the *artifact* (interpretations) stays unchanged.  This PRD makes the artifact itself the collaboration surface — the circle is the *act* of editing together, not a separate room.  Net result: one feature ships instead of two (interpretations + circles), and they're the same feature.
 
