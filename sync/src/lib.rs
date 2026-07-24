@@ -364,3 +364,98 @@ impl ZodiaSyncNode {
         Ok(())
     }
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+//
+// `ZodiaSyncNode` itself needs a live network (endpoint + gossip) to spawn,
+// so it isn't unit-testable in isolation — see `zodia-sdk`'s real two-client
+// networked test for that level. What *is* unit-testable without a network
+// is the store contract `publish_bytes` depends on: these tests pin the
+// transaction-bracketing behaviour whose violation caused the bug described
+// in `docs/prd/granular-topic-subscription.md`'s "Bug found and fixed" note.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signed_op(key: &SigningKey, payload: &[u8]) -> Operation<()> {
+        let body = Body::new(payload);
+        let mut header = Header::<()> {
+            version:       1,
+            verifying_key: key.verifying_key(),
+            signature:     None,
+            payload_size:  body.size(),
+            payload_hash:  Some(body.hash()),
+            timestamp:     Timestamp::now(),
+            seq_num:       0,
+            backlink:      None,
+            extensions:    (),
+        };
+        header.sign(key);
+        Operation { hash: header.hash(), header, body: Some(body) }
+    }
+
+    /// A peer must be able to discover our log for a topic via
+    /// `TopicStore::resolve` immediately after we publish to it — that's
+    /// what a subscriber's catch-up query relies on. `associate` has to
+    /// run inside the same transaction as `insert_operation`, before
+    /// `commit`, exactly as `publish_bytes` does above.
+    #[tokio::test]
+    async fn associate_inside_publish_transaction_is_discoverable_after_commit() {
+        let store   = SqliteStore::temporary().await;
+        let key     = SigningKey::generate();
+        let topic   = Topic::from([7u8; 32]);
+        let log_id: u64 = 42;
+        let op      = signed_op(&key, b"hello");
+
+        let permit = store.begin().await.expect("begin");
+        store.insert_operation(&op.hash, &op, &log_id).await.expect("insert");
+        store.associate(&topic, &key.verifying_key(), &log_id).await.expect("associate");
+        store.commit(permit).await.expect("commit");
+
+        let found: std::collections::BTreeMap<VerifyingKey, Vec<u64>> =
+            store.resolve(&topic).await.expect("resolve");
+        let logs = found.get(&key.verifying_key()).expect("author present in resolved map");
+        assert_eq!(logs, &vec![log_id]);
+    }
+
+    /// `TopicStore::associate`'s own `self.tx(..)` requires an
+    /// already-open transaction — calling it *after* `commit` (the bug's
+    /// original shape) must fail loudly, not silently no-op. Pins that
+    /// contract so a future refactor that reorders `publish_bytes`'s calls
+    /// fails a test instead of quietly reintroducing the bug.
+    #[tokio::test]
+    async fn associate_after_commit_is_rejected_not_silently_dropped() {
+        let store   = SqliteStore::temporary().await;
+        let key     = SigningKey::generate();
+        let topic   = Topic::from([7u8; 32]);
+        let log_id: u64 = 42;
+        let op      = signed_op(&key, b"hello");
+
+        let permit = store.begin().await.expect("begin");
+        store.insert_operation(&op.hash, &op, &log_id).await.expect("insert");
+        store.commit(permit).await.expect("commit");
+
+        let result = store.associate(&topic, &key.verifying_key(), &log_id).await;
+        assert!(result.is_err(), "associate outside a transaction should error, not succeed silently");
+    }
+
+    /// `log_id_for_key` (from `zodia-ops`) plus `topic_key_for_interp`
+    /// (from `zodia-core`) is the whole per-key routing contract
+    /// `publish_doc` relies on — pin that two different keys land in two
+    /// different (log, topic) pairs, and the same key is always the same
+    /// pair (so re-publishing to a key reuses its existing log/topic).
+    #[test]
+    fn per_key_log_and_topic_derivation_is_stable_and_distinct() {
+        let a = "natal:sun_trine_moon";
+        let b = "natal:venus_square_pluto";
+
+        assert_eq!(log_id_for_key(a), log_id_for_key(a));
+        assert_ne!(log_id_for_key(a), log_id_for_key(b));
+
+        let topic_a = topic_key_for_interp(a);
+        let topic_b = topic_key_for_interp(b);
+        assert_eq!(topic_a.as_bytes(), topic_key_for_interp(a).as_bytes());
+        assert_ne!(topic_a.as_bytes(), topic_b.as_bytes());
+    }
+}

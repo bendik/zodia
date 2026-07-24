@@ -92,3 +92,83 @@ impl PublicIdentity {
         vk.verify_strict(msg, &sig).is_ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_roundtrip_preserves_public_key() {
+        let original = IdentityKeypair::generate();
+        let restored = IdentityKeypair::from_seed(original.seed());
+        assert_eq!(original.public_key(), restored.public_key());
+    }
+
+    #[test]
+    fn distinct_identities_have_distinct_public_keys() {
+        let a = IdentityKeypair::generate();
+        let b = IdentityKeypair::generate();
+        assert_ne!(a.public_key(), b.public_key());
+    }
+
+    /// `to_panda_key` claims to be "the same ed25519 scalar" as the
+    /// zodia-level identity — pin that the p2panda key's public bytes
+    /// actually match, since a mismatch here would mean p2panda operations
+    /// authenticate as a different identity than the app believes it is.
+    #[test]
+    fn to_panda_key_derives_the_same_public_key() {
+        let identity = IdentityKeypair::generate();
+        let panda_key = identity.to_panda_key();
+        assert_eq!(
+            panda_key.verifying_key().as_bytes(),
+            &identity.public_key(),
+        );
+    }
+
+    #[test]
+    fn sign_and_verify_round_trip() {
+        let identity = IdentityKeypair::generate();
+        let public   = PublicIdentity::from_keypair(&identity);
+        let msg      = b"zodia consent handshake";
+
+        let sig = identity.sign(msg);
+        assert!(public.verify(msg, &sig));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_message() {
+        let identity = IdentityKeypair::generate();
+        let public   = PublicIdentity::from_keypair(&identity);
+        let sig      = identity.sign(b"original message");
+
+        assert!(!public.verify(b"tampered message", &sig));
+    }
+
+    #[test]
+    fn verify_rejects_signature_from_a_different_identity() {
+        let a      = IdentityKeypair::generate();
+        let b      = IdentityKeypair::generate();
+        let public_b = PublicIdentity::from_keypair(&b);
+        let sig_by_a  = a.sign(b"shared message");
+
+        assert!(!public_b.verify(b"shared message", &sig_by_a));
+    }
+
+    /// `relay_public_key` is derived deterministically from the seed alone
+    /// (no randomness) — pin that, since senders rely on recomputing the
+    /// same key from a peer's announced identity to encrypt relay payloads.
+    #[test]
+    fn relay_public_key_is_deterministic_for_the_same_seed() {
+        let seed = IdentityKeypair::generate().seed();
+        let a = IdentityKeypair::from_seed(seed);
+        let b = IdentityKeypair::from_seed(seed);
+        assert_eq!(a.relay_public_key(), b.relay_public_key());
+    }
+
+    #[test]
+    fn distinct_identities_have_distinct_relay_keys() {
+        let a = IdentityKeypair::generate();
+        let b = IdentityKeypair::generate();
+        assert_ne!(a.relay_public_key(), b.relay_public_key());
+    }
+}

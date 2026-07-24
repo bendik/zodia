@@ -4049,6 +4049,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5ddf71909d86291bad9650b3f47f04e26997aa71e1c4077ba697dd53980095a"
 dependencies = [
  "p2panda-core",
+ "rand 0.10.1",
+ "rand_chacha 0.10.0",
  "serde",
  "sqlx",
  "thiserror 2.0.18",
@@ -7485,6 +7487,7 @@ dependencies = [
  "p2panda-net",
  "p2panda-store",
  "p2panda-sync",
+ "rand_core 0.6.4",
  "serde",
  "thiserror 2.0.18",
  "tokio",
