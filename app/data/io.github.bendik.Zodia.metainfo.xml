@@ -84,6 +84,9 @@
   </supports>
 
   <releases>
+    <release version="0.7.1" date="2026-07-24">
+      <description><p></p></description>
+    </release>
     <release version="0.7.0" date="2026-05-30">
       <description><p>Affirmations (♡) now travel with the rest of the community log — when someone ♡s an interpretation on one device the count converges everywhere within seconds. Replies are first-class too: a 💬 button on every community reading lets you write a response that hangs as a thread under the original. The Network tab now shows a "Sync activity" panel so you can see which peers your device is catching up with. Reconnecting to peers you've already met no longer asks for consent again — the second handshake auto-accepts on both sides.</p></description>
     </release>
