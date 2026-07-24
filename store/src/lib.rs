@@ -117,7 +117,28 @@ impl ZodiaStore {
         let _ = sqlx::query("ALTER TABLE interpretations ADD COLUMN parent_log_id BLOB")
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("ALTER TABLE interpretations ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
+        // Phase F-collab veto rollback: rollback fields on interp_docs.
+        for stmt in &[
+            "ALTER TABLE interp_docs ADD COLUMN prior_snapshot BLOB",
+            "ALTER TABLE interp_docs ADD COLUMN last_edit_op_id BLOB",
+            "ALTER TABLE interp_docs ADD COLUMN last_edit_ts INTEGER",
+            "ALTER TABLE interp_docs ADD COLUMN last_edit_author BLOB",
+            "ALTER TABLE interp_docs ADD COLUMN last_edit_blocks BLOB",
+        ] {
+            let _ = sqlx::query(stmt).execute(&self.pool).await;
+        }
         Ok(())
+    }
+
+    /// Borrow the underlying connection pool.  Exposed so callers in the same
+    /// workspace can run small ad-hoc lookups (e.g. join the interpretations
+    /// row keyed by `log_id`) without us shipping a dedicated method for
+    /// every shape.  Kept terse — adding sql in the caller is the cost.
+    pub fn pool_ref(&self) -> &SqlitePool {
+        &self.pool
     }
 
     // ── signing payload ───────────────────────────────────────────────────────
@@ -290,6 +311,7 @@ impl ZodiaStore {
              FROM interpretations
              WHERE is_baseline = 0
                AND author_sig IS NOT NULL
+               AND revoked = 0
                AND interp_key IN ({placeholders})
              ORDER BY (
                  SELECT COUNT(*) FROM affirmations
@@ -331,7 +353,7 @@ impl ZodiaStore {
         let sig = key.to_sig();
         let row = sqlx::query(
             "SELECT body FROM interpretations
-             WHERE interp_key = ?
+             WHERE interp_key = ? AND revoked = 0
              ORDER BY is_baseline ASC,
                       (SELECT COUNT(*) FROM affirmations
                        WHERE interp_log_id = interpretations.log_id) DESC
@@ -350,7 +372,7 @@ impl ZodiaStore {
             "SELECT log_id, body, author_pk, received_at, is_baseline,
                     (SELECT COUNT(*) FROM affirmations WHERE interp_log_id = i.log_id) AS aff_count
              FROM interpretations i
-             WHERE interp_key = ?
+             WHERE interp_key = ? AND revoked = 0
              ORDER BY is_baseline ASC, aff_count DESC",
         )
         .bind(&sig)
@@ -571,6 +593,673 @@ impl ZodiaStore {
         Ok(rows.into_iter().map(row_to_interp_row).collect())
     }
 
+    // ── feed item synthesis (Phase E) ─────────────────────────────────────────
+
+    /// Synthesize recent feed items from existing op tables.  Returns events
+    /// (authored interps, affirmations, responses) tagged with the local
+    /// identity `me` so the caller can compute `targets_me` against it.
+    ///
+    /// Newest-first, capped at `limit` rows.  Used when Sky / per-aspect pages
+    /// first paint, before live `StateEvent`s start flowing.
+    pub async fn recent_feed_rows(
+        &self,
+        me: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<FeedRow>, StoreError> {
+        // UNION ALL of three event flavours.  Each row carries its event_id
+        // (= log_id), kind discriminator, key/body, author, optional parent
+        // (for responses) / target log_id (for affirms), and timestamp.
+        let lim = limit as i64;
+        let rows = sqlx::query(
+            "SELECT * FROM (
+                SELECT log_id AS event_id, 'authored' AS kind,
+                       interp_key, body, author_pk,
+                       NULL AS parent_log_id, NULL AS target_log_id,
+                       received_at AS ts
+                  FROM interpretations
+                 WHERE is_baseline = 0 AND parent_log_id IS NULL AND revoked = 0
+                 ORDER BY received_at DESC LIMIT ?1
+              ) UNION ALL SELECT * FROM (
+                SELECT log_id AS event_id, 'response' AS kind,
+                       interp_key, body, author_pk,
+                       parent_log_id, NULL AS target_log_id,
+                       received_at AS ts
+                  FROM interpretations
+                 WHERE is_baseline = 0 AND parent_log_id IS NOT NULL AND revoked = 0
+                 ORDER BY received_at DESC LIMIT ?1
+              ) UNION ALL SELECT * FROM (
+                SELECT a.log_id AS event_id, 'affirm' AS kind,
+                       i.interp_key AS interp_key, i.body AS body,
+                       a.author_pk, NULL AS parent_log_id,
+                       a.interp_log_id AS target_log_id,
+                       a.created_at AS ts
+                  FROM affirmations a
+                  JOIN interpretations i ON i.log_id = a.interp_log_id
+                 WHERE i.revoked = 0
+                 ORDER BY a.created_at DESC LIMIT ?1
+              )
+              ORDER BY ts DESC LIMIT ?1",
+        )
+        .bind(lim)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let me_bytes = me.as_slice();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let event_id_bytes: Vec<u8> = row.get(0);
+                if event_id_bytes.len() != 32 { return None; }
+                let mut event_id = [0u8; 32];
+                event_id.copy_from_slice(&event_id_bytes);
+                let kind: String = row.get(1);
+                let interp_key: String = row.get(2);
+                let body: String = row.get(3);
+                let author_bytes: Option<Vec<u8>> = row.get(4);
+                let author_pk = author_bytes.and_then(|b| {
+                    if b.len() == 32 { let mut a = [0u8; 32]; a.copy_from_slice(&b); Some(a) }
+                    else { None }
+                });
+                let parent_bytes: Option<Vec<u8>> = row.get(5);
+                let parent_log_id = parent_bytes.and_then(|b| {
+                    if b.len() == 32 { let mut a = [0u8; 32]; a.copy_from_slice(&b); Some(a) }
+                    else { None }
+                });
+                let target_bytes: Option<Vec<u8>> = row.get(6);
+                let target_log_id = target_bytes.and_then(|b| {
+                    if b.len() == 32 { let mut a = [0u8; 32]; a.copy_from_slice(&b); Some(a) }
+                    else { None }
+                });
+                let ts: i64 = row.get(7);
+                Some(FeedRow {
+                    event_id,
+                    kind: match kind.as_str() {
+                        "authored" => FeedRowKind::Authored,
+                        "response" => FeedRowKind::Response,
+                        "affirm"   => FeedRowKind::Affirm,
+                        _          => return None,
+                    },
+                    interp_key,
+                    body,
+                    author_pk,
+                    parent_log_id,
+                    target_log_id,
+                    ts: ts as u64,
+                    author_is_me: author_pk.as_ref().map(|a| a.as_slice() == me_bytes).unwrap_or(false),
+                })
+            })
+            .collect())
+    }
+
+    // ── feed read-state (Phase E) ─────────────────────────────────────────────
+
+    /// Mark a single feed event as read by id.  Idempotent — repeated calls
+    /// update `read_at` to the latest timestamp.
+    pub async fn mark_event_read(&self, event_id: &[u8; 32]) -> Result<(), StoreError> {
+        let now = unix_secs() as i64;
+        sqlx::query(
+            "INSERT INTO feed_read (event_id, read_at) VALUES (?, ?)
+             ON CONFLICT(event_id) DO UPDATE SET read_at = excluded.read_at",
+        )
+        .bind(event_id.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a read-state row, returning the event to unread state.
+    pub async fn mark_event_unread(&self, event_id: &[u8; 32]) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM feed_read WHERE event_id = ?")
+            .bind(event_id.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// True iff `event_id` is currently marked read.
+    pub async fn is_event_read(&self, event_id: &[u8; 32]) -> Result<bool, StoreError> {
+        let row = sqlx::query("SELECT 1 FROM feed_read WHERE event_id = ?")
+            .bind(event_id.as_slice())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Bulk-mark a set of event ids as read.  Used when the user clicks the
+    /// notification bell to acknowledge all pending targeting events at once.
+    /// Returns how many rows were newly inserted.
+    pub async fn bulk_mark_read(
+        &self,
+        event_ids: &[[u8; 32]],
+    ) -> Result<u64, StoreError> {
+        if event_ids.is_empty() {
+            return Ok(0);
+        }
+        let now = unix_secs() as i64;
+        let mut tx = self.pool.begin().await?;
+        let mut inserted = 0u64;
+        for id in event_ids {
+            let result = sqlx::query(
+                "INSERT OR IGNORE INTO feed_read (event_id, read_at) VALUES (?, ?)",
+            )
+            .bind(id.as_slice())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            inserted += result.rows_affected();
+        }
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
+    /// Persist a small key/value pair in `feed_meta`.  Used by the
+    /// `TransitTicker` to remember the previous tick's in-orb set across
+    /// restarts.
+    pub async fn set_feed_meta(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO feed_meta (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Load a previously-stored `feed_meta` value, or `None` if unset.
+    pub async fn get_feed_meta(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        let row = sqlx::query("SELECT value FROM feed_meta WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<Vec<u8>, _>(0)))
+    }
+
+    /// Count of "events targeting me" that are still unread.  An event targets
+    /// the local identity iff it is an affirmation or a response on an interp
+    /// the local identity authored.  Used to badge the notification bell.
+    ///
+    /// `me` is the local p2panda verifying-key bytes (the `author_pk` columns
+    /// hold these).  Note: rows authored locally are excluded — your own
+    /// affirmations/responses on your own work don't badge.
+    pub async fn feed_targeting_unread_count(&self, me: &[u8; 32]) -> Result<u64, StoreError> {
+        // Affirmations: an affirmation targets me iff its interp_log_id points
+        // to an interpretation whose author_pk == me, and the voter is not me.
+        // Each affirmation row's event_id (for read-state purposes) is its
+        // BLAKE3-derived primary key (`log_id`), the same value the affirm
+        // p2panda op hashes to downstream.
+        //
+        // Responses: a response targets me iff its parent_log_id points to an
+        // interpretation whose author_pk == me, and the response author isn't
+        // me.  The response's row log_id is its event id.
+        let row = sqlx::query(
+            "SELECT
+                (SELECT COUNT(*) FROM affirmations a
+                  JOIN interpretations i ON i.log_id = a.interp_log_id
+                 WHERE i.author_pk = ?1
+                   AND a.author_pk != ?1
+                   AND a.log_id NOT IN (SELECT event_id FROM feed_read))
+              +
+                (SELECT COUNT(*) FROM interpretations r
+                  JOIN interpretations p ON p.log_id = r.parent_log_id
+                 WHERE r.parent_log_id IS NOT NULL
+                   AND p.author_pk = ?1
+                   AND r.author_pk != ?1
+                   AND r.log_id NOT IN (SELECT event_id FROM feed_read))
+             AS total",
+        )
+        .bind(me.as_slice())
+        .fetch_one(&self.pool)
+        .await?;
+        let n: i64 = row.get(0);
+        Ok(n as u64)
+    }
+
+    /// Event ids of all targeting events that are currently unread.  Used by
+    /// the bell click-handler to bulk-mark them as read.
+    pub async fn feed_targeting_unread_ids(&self, me: &[u8; 32]) -> Result<Vec<[u8; 32]>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT a.log_id FROM affirmations a
+              JOIN interpretations i ON i.log_id = a.interp_log_id
+             WHERE i.author_pk = ?1
+               AND a.author_pk != ?1
+               AND a.log_id NOT IN (SELECT event_id FROM feed_read)
+             UNION ALL
+             SELECT r.log_id FROM interpretations r
+              JOIN interpretations p ON p.log_id = r.parent_log_id
+             WHERE r.parent_log_id IS NOT NULL
+               AND p.author_pk = ?1
+               AND r.author_pk != ?1
+               AND r.log_id NOT IN (SELECT event_id FROM feed_read)",
+        )
+        .bind(me.as_slice())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let bytes: Vec<u8> = row.get(0);
+                if bytes.len() == 32 {
+                    let mut id = [0u8; 32];
+                    id.copy_from_slice(&bytes);
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// Mark an interpretation as revoked.  Authorization is the caller's
+    /// responsibility — pass `expected_author` so the row is only tombstoned
+    /// when the requesting actor matches the original author.  Returns true
+    /// if a row was newly revoked, false if no match (wrong author or
+    /// unknown log_id) or already revoked.
+    pub async fn revoke_interp(
+        &self,
+        log_id:          &[u8; 32],
+        expected_author: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE interpretations
+                SET revoked = 1
+              WHERE log_id = ?1
+                AND author_pk = ?2
+                AND revoked = 0",
+        )
+        .bind(log_id.as_slice())
+        .bind(expected_author.as_slice())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Look up the `(interp_key, author_pk)` of one interpretation by its log_id.
+    /// Used by feed-routing code to derive `targets_me` and `interp_key` for
+    /// affirmation / response events.
+    pub async fn interp_key_and_author(
+        &self,
+        log_id: &[u8; 32],
+    ) -> Result<Option<(String, Option<[u8; 32]>)>, StoreError> {
+        let row = sqlx::query(
+            "SELECT interp_key, author_pk FROM interpretations WHERE log_id = ?",
+        )
+        .bind(log_id.as_slice())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| {
+            let key: String = r.get(0);
+            let author_bytes: Option<Vec<u8>> = r.get(1);
+            let author = author_bytes.and_then(|b| {
+                if b.len() == 32 { let mut a = [0u8; 32]; a.copy_from_slice(&b); Some(a) }
+                else { None }
+            });
+            (key, author)
+        }))
+    }
+
+    // ── collaborative docs (Phase F-collab) ───────────────────────────────────
+
+    /// Load the persisted Loro snapshot for `interp_key`, if one exists.
+    /// Returned bytes feed `zodia_doc::InterpDoc::from_snapshot`.
+    pub async fn doc_load(&self, interp_key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        let row = sqlx::query("SELECT loro_snapshot FROM interp_docs WHERE interp_key = ?")
+            .bind(interp_key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<Vec<u8>, _>(0)))
+    }
+
+    /// Replace (or insert) the doc snapshot for `interp_key`.
+    pub async fn doc_save(
+        &self,
+        interp_key:   &str,
+        snapshot:     &[u8],
+        snapshot_rev: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        let now = unix_secs() as i64;
+        sqlx::query(
+            "INSERT INTO interp_docs (interp_key, loro_snapshot, snapshot_rev, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(interp_key) DO UPDATE SET
+                 loro_snapshot = excluded.loro_snapshot,
+                 snapshot_rev  = excluded.snapshot_rev,
+                 updated_at    = excluded.updated_at",
+        )
+        .bind(interp_key)
+        .bind(snapshot)
+        .bind(snapshot_rev.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Save snapshot AND record rollback metadata in one row update.  `prior`
+    /// is the snapshot before this edit was applied (used by veto rollback);
+    /// `last_edit_*` describe the edit just applied so a later `DocOp::Veto`
+    /// can be authority-checked.  `blocks` is CBOR-encoded `Vec<[u8; 16]>`.
+    pub async fn doc_save_with_history(
+        &self,
+        interp_key:        &str,
+        snapshot:          &[u8],
+        snapshot_rev:      &[u8; 32],
+        prior:             Option<&[u8]>,
+        last_edit_op_id:   &[u8; 32],
+        last_edit_ts:      u64,
+        last_edit_author:  &[u8; 32],
+        last_edit_blocks:  &[u8],
+    ) -> Result<(), StoreError> {
+        let now = unix_secs() as i64;
+        sqlx::query(
+            "INSERT INTO interp_docs (
+                interp_key, loro_snapshot, snapshot_rev, updated_at,
+                prior_snapshot, last_edit_op_id, last_edit_ts,
+                last_edit_author, last_edit_blocks
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(interp_key) DO UPDATE SET
+                loro_snapshot    = excluded.loro_snapshot,
+                snapshot_rev     = excluded.snapshot_rev,
+                updated_at       = excluded.updated_at,
+                prior_snapshot   = excluded.prior_snapshot,
+                last_edit_op_id  = excluded.last_edit_op_id,
+                last_edit_ts     = excluded.last_edit_ts,
+                last_edit_author = excluded.last_edit_author,
+                last_edit_blocks = excluded.last_edit_blocks",
+        )
+        .bind(interp_key)
+        .bind(snapshot)
+        .bind(snapshot_rev.as_slice())
+        .bind(now)
+        .bind(prior)
+        .bind(last_edit_op_id.as_slice())
+        .bind(last_edit_ts as i64)
+        .bind(last_edit_author.as_slice())
+        .bind(last_edit_blocks)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Read the rollback metadata for `interp_key` (newest edit + prior
+    /// snapshot).  `None` if no doc row, `Some(meta)` with optional fields
+    /// otherwise.  `last_edit_*` may all be `None` if the doc exists but no
+    /// vetoable edit landed yet (e.g. migration-seeded only).
+    pub async fn doc_load_meta(
+        &self,
+        interp_key: &str,
+    ) -> Result<Option<DocMeta>, StoreError> {
+        let row = sqlx::query(
+            "SELECT prior_snapshot, last_edit_op_id, last_edit_ts,
+                    last_edit_author, last_edit_blocks
+               FROM interp_docs WHERE interp_key = ?",
+        )
+        .bind(interp_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None); };
+        let prior:  Option<Vec<u8>> = r.get(0);
+        let op_id:  Option<Vec<u8>> = r.get(1);
+        let ts:     Option<i64>     = r.get(2);
+        let author: Option<Vec<u8>> = r.get(3);
+        let blocks: Option<Vec<u8>> = r.get(4);
+        let op_id_arr = op_id.and_then(|b|
+            if b.len() == 32 { let mut a = [0u8; 32]; a.copy_from_slice(&b); Some(a) }
+            else { None });
+        let author_arr = author.and_then(|b|
+            if b.len() == 32 { let mut a = [0u8; 32]; a.copy_from_slice(&b); Some(a) }
+            else { None });
+        Ok(Some(DocMeta {
+            prior_snapshot:   prior,
+            last_edit_op_id:  op_id_arr,
+            last_edit_ts:     ts.map(|v| v as u64),
+            last_edit_author: author_arr,
+            last_edit_blocks: blocks,
+        }))
+    }
+
+    /// Apply rollback: restore `prior_snapshot` as current snapshot, clear
+    /// last_edit_* metadata, and pop the newest entry from each provided
+    /// block ring.  Returns `true` if rollback ran, `false` if doc has no
+    /// recorded prior snapshot.
+    pub async fn doc_rollback(
+        &self,
+        interp_key:       &str,
+        snapshot_rev:     &[u8; 32],
+        affected_blocks:  &[[u8; 16]],
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT prior_snapshot FROM interp_docs WHERE interp_key = ?",
+        )
+        .bind(interp_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(r) = row else { return Ok(false); };
+        let prior: Option<Vec<u8>> = r.get(0);
+        let Some(prior_bytes) = prior else { return Ok(false); };
+        let now = unix_secs() as i64;
+        sqlx::query(
+            "UPDATE interp_docs SET
+                loro_snapshot    = ?,
+                snapshot_rev     = ?,
+                updated_at       = ?,
+                prior_snapshot   = NULL,
+                last_edit_op_id  = NULL,
+                last_edit_ts     = NULL,
+                last_edit_author = NULL,
+                last_edit_blocks = NULL
+             WHERE interp_key = ?",
+        )
+        .bind(prior_bytes.as_slice())
+        .bind(snapshot_rev.as_slice())
+        .bind(now)
+        .bind(interp_key)
+        .execute(&mut *tx)
+        .await?;
+        // Pop newest ring entry per affected block.
+        for block_id in affected_blocks {
+            let pos: Option<i64> = sqlx::query_scalar(
+                "SELECT MAX(position) FROM doc_block_authors
+                  WHERE interp_key = ? AND block_id = ?",
+            )
+            .bind(interp_key)
+            .bind(block_id.as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
+            if let Some(p) = pos {
+                sqlx::query(
+                    "DELETE FROM doc_block_authors
+                      WHERE interp_key = ? AND block_id = ? AND position = ?",
+                )
+                .bind(interp_key)
+                .bind(block_id.as_slice())
+                .bind(p)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Read the author ring for one (interp_key, block_id).  Returns the
+    /// entries in FIFO order (oldest first); the caller's `Ring` builder
+    /// re-sorts as needed.
+    pub async fn block_ring_get(
+        &self,
+        interp_key: &str,
+        block_id:   &[u8; 16],
+    ) -> Result<Vec<(/*author*/[u8; 32], /*edit_op_id*/[u8; 32], /*edited_at*/u64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT author_pk, edit_op_id, edited_at
+               FROM doc_block_authors
+              WHERE interp_key = ? AND block_id = ?
+              ORDER BY position ASC",
+        )
+        .bind(interp_key)
+        .bind(block_id.as_slice())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let a: Vec<u8> = row.get(0);
+            let e: Vec<u8> = row.get(1);
+            if a.len() != 32 || e.len() != 32 { continue; }
+            let mut author = [0u8; 32]; author.copy_from_slice(&a);
+            let mut op_id  = [0u8; 32]; op_id .copy_from_slice(&e);
+            out.push((author, op_id, row.get::<i64, _>(2) as u64));
+        }
+        Ok(out)
+    }
+
+    /// Append a new author to the ring for one (interp_key, block_id),
+    /// evicting the oldest entry if capacity (5) is reached.  Reads,
+    /// shifts in memory, writes back in a transaction.  Caller-provided
+    /// `now_unix` keeps the call deterministic in tests.
+    pub async fn block_ring_push(
+        &self,
+        interp_key: &str,
+        block_id:   &[u8; 16],
+        author:     &[u8; 32],
+        edit_op_id: &[u8; 32],
+        now_unix:   u64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        // Load current entries.
+        let rows = sqlx::query(
+            "SELECT author_pk, edit_op_id, edited_at
+               FROM doc_block_authors
+              WHERE interp_key = ? AND block_id = ?
+              ORDER BY position ASC",
+        )
+        .bind(interp_key)
+        .bind(block_id.as_slice())
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut entries: Vec<(Vec<u8>, Vec<u8>, i64)> = rows
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get::<i64, _>(2)))
+            .collect();
+        entries.push((author.to_vec(), edit_op_id.to_vec(), now_unix as i64));
+        while entries.len() > zodia_doc::RING_SIZE {
+            entries.remove(0);
+        }
+        // Delete + reinsert atomically.
+        sqlx::query("DELETE FROM doc_block_authors WHERE interp_key = ? AND block_id = ?")
+            .bind(interp_key)
+            .bind(block_id.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        for (pos, (a, e, t)) in entries.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO doc_block_authors
+                    (interp_key, block_id, position, author_pk, edit_op_id, edited_at)
+                  VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(interp_key)
+            .bind(block_id.as_slice())
+            .bind(pos as i64)
+            .bind(a)
+            .bind(e)
+            .bind(*t)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Record one affirmation against a (interp_key, revision) pair.
+    /// Idempotent on duplicate (voter, rev).
+    pub async fn doc_affirm_rev(
+        &self,
+        interp_key: &str,
+        target_rev: &[u8; 32],
+        voter_pk:   &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let now = unix_secs() as i64;
+        let r = sqlx::query(
+            "INSERT OR IGNORE INTO doc_affirms (interp_key, target_rev, voter_pk, affirmed_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(interp_key)
+        .bind(target_rev.as_slice())
+        .bind(voter_pk.as_slice())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Count of affirmations targeting one (interp_key, revision).
+    pub async fn doc_affirm_count(
+        &self,
+        interp_key: &str,
+        target_rev: &[u8; 32],
+    ) -> Result<u64, StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) FROM doc_affirms WHERE interp_key = ? AND target_rev = ?",
+        )
+        .bind(interp_key)
+        .bind(target_rev.as_slice())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>(0) as u64)
+    }
+
+    /// Has the collab-doc migration already run?  Idempotent guard for the
+    /// one-time `migrate_interpretations_to_docs` pass.  Implemented as a
+    /// `feed_meta` flag so we don't need yet another tiny table.
+    pub async fn collab_doc_migration_done(&self) -> Result<bool, StoreError> {
+        Ok(self.get_feed_meta("collab_doc_migration_v1").await?.is_some())
+    }
+
+    pub async fn mark_collab_doc_migration_done(&self) -> Result<(), StoreError> {
+        self.set_feed_meta("collab_doc_migration_v1", b"1").await
+    }
+
+    /// Distinct `interp_key` values present in the legacy `interpretations`
+    /// table.  Used by migration to fold each key's competing rows into one
+    /// collab doc.
+    pub async fn distinct_interp_keys(&self) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT interp_key FROM interpretations
+              WHERE is_baseline = 0 AND revoked = 0",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>(0)).collect())
+    }
+
+    /// All (body, author_pk, received_at) rows for one key, oldest first.
+    /// Used by migration to seed the per-key collab doc with each authored
+    /// row attributed to its original author.
+    pub async fn authored_rows_for_key(
+        &self,
+        interp_key: &str,
+    ) -> Result<Vec<(String, [u8; 32], u64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT body, author_pk, received_at
+               FROM interpretations
+              WHERE interp_key = ? AND is_baseline = 0
+                AND revoked = 0 AND parent_log_id IS NULL
+              ORDER BY received_at ASC",
+        )
+        .bind(interp_key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().filter_map(|r| {
+            let body: String = r.get(0);
+            let pk: Vec<u8>  = r.get(1);
+            if pk.len() != 32 { return None; }
+            let mut author = [0u8; 32]; author.copy_from_slice(&pk);
+            Some((body, author, r.get::<i64, _>(2) as u64))
+        }).collect())
+    }
+
     // ── migration ─────────────────────────────────────────────────────────────
 
     /// Delete all legacy seeded baseline rows. Idempotent — safe every startup.
@@ -644,6 +1333,158 @@ pub struct InterpRow {
     pub affirmation_count: u64,
 }
 
+// ── feed row (Phase E) ────────────────────────────────────────────────────────
+
+/// Rollback metadata read back from `interp_docs`.  All fields can be `None`
+/// when no edit has landed since the doc was created (e.g. migration-seeded).
+#[derive(Debug, Clone, Default)]
+pub struct DocMeta {
+    pub prior_snapshot:   Option<Vec<u8>>,
+    pub last_edit_op_id:  Option<[u8; 32]>,
+    pub last_edit_ts:     Option<u64>,
+    pub last_edit_author: Option<[u8; 32]>,
+    pub last_edit_blocks: Option<Vec<u8>>,
+}
+
+/// One synthesised feed event sourced from existing op tables.  The app
+/// converts these into `FeedItem`s for rendering and live-event merging.
+#[derive(Debug, Clone)]
+pub struct FeedRow {
+    pub event_id:      [u8; 32],
+    pub kind:          FeedRowKind,
+    pub interp_key:    String,
+    pub body:          String,
+    pub author_pk:     Option<[u8; 32]>,
+    /// Set when `kind == Response`: the log_id of the parent interpretation.
+    pub parent_log_id: Option<[u8; 32]>,
+    /// Set when `kind == Affirm`: the log_id of the affirmed interpretation.
+    pub target_log_id: Option<[u8; 32]>,
+    pub ts:            u64,
+    /// True iff `author_pk == me`.  Allows the app to filter own activity
+    /// out of bell badging without re-querying.
+    pub author_is_me:  bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedRowKind {
+    Authored,
+    Affirm,
+    Response,
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn feed_read_roundtrip() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let id = [7u8; 32];
+        assert!(!store.is_event_read(&id).await.unwrap());
+        store.mark_event_read(&id).await.unwrap();
+        assert!(store.is_event_read(&id).await.unwrap());
+        store.mark_event_unread(&id).await.unwrap();
+        assert!(!store.is_event_read(&id).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_mark_read_inserts_once() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let ids = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let n = store.bulk_mark_read(&ids).await.unwrap();
+        assert_eq!(n, 3);
+        // Idempotent — second call inserts 0.
+        let n2 = store.bulk_mark_read(&ids).await.unwrap();
+        assert_eq!(n2, 0);
+        for id in &ids {
+            assert!(store.is_event_read(id).await.unwrap());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn feed_meta_roundtrip() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        assert_eq!(store.get_feed_meta("x").await.unwrap(), None);
+        store.set_feed_meta("x", b"hello").await.unwrap();
+        assert_eq!(store.get_feed_meta("x").await.unwrap().as_deref(), Some(&b"hello"[..]));
+        store.set_feed_meta("x", b"world").await.unwrap();
+        assert_eq!(store.get_feed_meta("x").await.unwrap().as_deref(), Some(&b"world"[..]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn doc_save_with_history_then_rollback_restores_prior() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let key = "natal:test";
+        let snap_v1 = vec![1u8; 16];
+        let snap_v2 = vec![2u8; 16];
+        let rev_v1 = [0xAAu8; 32];
+        let rev_v2 = [0xBBu8; 32];
+        let edit_op = [9u8; 32];
+        let author = [3u8; 32];
+        let blocks = vec![0u8; 16]; // one BODY_BLOCK_ID
+        // Seed an initial snapshot via doc_save (no history yet).
+        store.doc_save(key, &snap_v1, &rev_v1).await.unwrap();
+        // Apply edit v2 with prior=v1.
+        store.doc_save_with_history(
+            key, &snap_v2, &rev_v2, Some(&snap_v1),
+            &edit_op, 1234, &author, &blocks,
+        ).await.unwrap();
+        // Ring push so rollback's ring pop has something to drop.
+        store.block_ring_push(key, &[0u8; 16], &author, &edit_op, 1234)
+            .await.unwrap();
+        assert_eq!(store.doc_load(key).await.unwrap().unwrap(), snap_v2);
+        let meta = store.doc_load_meta(key).await.unwrap().unwrap();
+        assert_eq!(meta.last_edit_op_id, Some(edit_op));
+        assert_eq!(meta.prior_snapshot.as_deref(), Some(snap_v1.as_slice()));
+        // Roll back.
+        let rolled = store.doc_rollback(key, &rev_v1, &[[0u8; 16]]).await.unwrap();
+        assert!(rolled);
+        assert_eq!(store.doc_load(key).await.unwrap().unwrap(), snap_v1);
+        // Metadata cleared.
+        let meta2 = store.doc_load_meta(key).await.unwrap().unwrap();
+        assert!(meta2.last_edit_op_id.is_none());
+        assert!(meta2.prior_snapshot.is_none());
+        // Ring entry popped.
+        let ring = store.block_ring_get(key, &[0u8; 16]).await.unwrap();
+        assert!(ring.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn doc_rollback_noop_when_no_prior() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let key = "natal:noprior";
+        store.doc_save(key, &[1u8; 8], &[0u8; 32]).await.unwrap();
+        let rolled = store.doc_rollback(key, &[0u8; 32], &[]).await.unwrap();
+        assert!(!rolled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn targeting_unread_count_excludes_self_and_read() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let me = [9u8; 32];
+        let other = [1u8; 32];
+        // Insert an interp authored by me with a stable canonical key string.
+        let key = "natal:sun_trine_moon";
+        let inserted = store.insert_from_op(key, "body", &me).await.unwrap();
+        assert!(inserted);
+        let log_id_bytes = derive_log_id(key, "body");
+        // Affirmation from other → targets me.
+        store.affirm(&log_id_bytes, &other).await.unwrap();
+        // Affirmation from self → does NOT target me.
+        store.affirm(&log_id_bytes, &me).await.unwrap();
+        let n = store.feed_targeting_unread_count(&me).await.unwrap();
+        assert_eq!(n, 1, "only the other-affirmation targets me");
+        // Mark the targeting one read; count drops to 0.
+        let ids = store.feed_targeting_unread_ids(&me).await.unwrap();
+        assert_eq!(ids.len(), 1);
+        store.bulk_mark_read(&ids).await.unwrap();
+        let n2 = store.feed_targeting_unread_count(&me).await.unwrap();
+        assert_eq!(n2, 0);
+    }
+}
+
 // ── schema ────────────────────────────────────────────────────────────────────
 
 const SCHEMA_STMTS: &[&str] = &[
@@ -675,6 +1516,55 @@ const SCHEMA_STMTS: &[&str] = &[
         UNIQUE(interp_log_id, author_pk)
     )",
     "CREATE INDEX IF NOT EXISTS idx_aff_interp ON affirmations(interp_log_id)",
+    // Phase E: per-event read state for the activity feed.  Event ids are 32-byte
+    // hashes — op hashes for pipeline events, deterministic blake3 digests for
+    // synthetic events (transit enter/leave).
+    "CREATE TABLE IF NOT EXISTS feed_read (
+        event_id  BLOB    NOT NULL PRIMARY KEY,
+        read_at   INTEGER NOT NULL
+    )",
+    // Phase E: durable feed-related local state (e.g. previous tick's in-orb
+    // transit set so a restart doesn't re-emit every active transit).
+    "CREATE TABLE IF NOT EXISTS feed_meta (
+        key   TEXT NOT NULL PRIMARY KEY,
+        value BLOB NOT NULL
+    )",
+    // Phase F-collab: per-key collaborative doc, persisted as a Loro
+    // snapshot blob.  One row per interp_key; replaced wholesale on save.
+    "CREATE TABLE IF NOT EXISTS interp_docs (
+        interp_key       TEXT    NOT NULL PRIMARY KEY,
+        loro_snapshot    BLOB    NOT NULL,
+        snapshot_rev     BLOB    NOT NULL,
+        updated_at       INTEGER NOT NULL,
+        prior_snapshot   BLOB,
+        last_edit_op_id  BLOB,
+        last_edit_ts     INTEGER,
+        last_edit_author BLOB,
+        last_edit_blocks BLOB
+    )",
+    // Phase F-collab: author-veto ring per (interp_key, block_id).
+    // Position 0 = oldest, RING_SIZE-1 = newest.  Updated by the
+    // materialiser whenever a DocOp::Edit lands.
+    "CREATE TABLE IF NOT EXISTS doc_block_authors (
+        interp_key   TEXT NOT NULL,
+        block_id     BLOB NOT NULL,
+        position     INTEGER NOT NULL,
+        author_pk    BLOB NOT NULL,
+        edit_op_id   BLOB NOT NULL,
+        edited_at    INTEGER NOT NULL,
+        PRIMARY KEY (interp_key, block_id, position)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_doc_block_authors_by_author
+        ON doc_block_authors(author_pk)",
+    // Phase F-collab: affirmation targets a (interp_key, revision) instead
+    // of a content-hash log_id.
+    "CREATE TABLE IF NOT EXISTS doc_affirms (
+        interp_key  TEXT NOT NULL,
+        target_rev  BLOB NOT NULL,
+        voter_pk    BLOB NOT NULL,
+        affirmed_at INTEGER NOT NULL,
+        PRIMARY KEY (interp_key, target_rev, voter_pk)
+    )",
 ];
 
 // ── internal helpers ──────────────────────────────────────────────────────────
@@ -690,6 +1580,7 @@ fn kind_str(key: &InterpKey) -> &'static str {
     match key {
         InterpKey::Natal { .. }          => "natal",
         InterpKey::Synastry { .. }       => "synastry",
+        InterpKey::SkyAspect { .. }      => "sky",
         InterpKey::Transit { .. }        => "transit",
         InterpKey::HouseTransit { .. }   => "house_transit",
         InterpKey::PlacementSign { .. }  => "placement_sign",

@@ -81,6 +81,87 @@ impl TransitSet {
 
 // ── window ───────────────────────────────────────────────────────────────────
 
+/// Find the JDN range during which `transiting` occupies the same natal
+/// house it occupies at `jdn`.  Scans backward + forward at a per-planet
+/// step (~0.5° of motion per step), capped to ~30 years for the outermost
+/// bodies.  Returns `(start_jdn, end_jdn)`.
+///
+/// Falls back to `(jdn, jdn)` if positions can't be computed or the chart
+/// has a stub house system.
+pub fn house_transit_window(
+    transiting: crate::planet::Planet,
+    houses:     &crate::houses::HouseSystem,
+    jdn:        f64,
+) -> (f64, f64) {
+    let Some(cur_lon) = crate::ephemeris::compute_positions(jdn).ok()
+        .and_then(|p| p.get(transiting)) else { return (jdn, jdn); };
+    let cur_house = houses.house_of(cur_lon);
+    if cur_house == 0 { return (jdn, jdn); }   // stub system
+
+    let step = planet_step_days(transiting);
+    let cap  = planet_cap_days(transiting);
+
+    let in_same_house = |t: f64| -> bool {
+        crate::ephemeris::compute_positions(t).ok()
+            .and_then(|p| p.get(transiting))
+            .map(|lon| houses.house_of(lon) == cur_house)
+            .unwrap_or(false)
+    };
+
+    let start = {
+        let mut t = jdn;
+        loop {
+            let prev = t - step;
+            if jdn - prev > cap { break jdn - cap; }
+            if !in_same_house(prev) { break t; }
+            t = prev;
+        }
+    };
+
+    let end = {
+        let mut t = jdn;
+        loop {
+            let next = t + step;
+            if next - jdn > cap { break jdn + cap; }
+            if !in_same_house(next) { break t; }
+            t = next;
+        }
+    };
+
+    (start, end)
+}
+
+/// Days-per-step for the house-window scan — ~0.5° of mean motion per step.
+fn planet_step_days(p: crate::planet::Planet) -> f64 {
+    use crate::planet::Planet::*;
+    match p {
+        Moon                          => 0.05,
+        Sun | Mercury | Venus         => 0.5,
+        Mars                          => 1.0,
+        Jupiter                       => 5.0,
+        Saturn                        => 15.0,
+        Uranus                        => 30.0,
+        Neptune                       => 60.0,
+        Pluto                         => 90.0,
+    }
+}
+
+/// Upper bound on the half-window scan.  Set generously so even Pluto's
+/// ~15-year-per-house stay is fully captured.
+fn planet_cap_days(p: crate::planet::Planet) -> f64 {
+    use crate::planet::Planet::*;
+    match p {
+        Moon                          => 5.0,
+        Sun | Mercury | Venus         => 60.0,
+        Mars                          => 180.0,
+        Jupiter                       => 730.0,
+        Saturn                        => 1825.0,    // ~5y
+        Uranus                        => 3650.0,    // ~10y
+        Neptune                       => 5475.0,    // ~15y
+        Pluto                         => 10950.0,   // ~30y
+    }
+}
+
 /// Find the JDN range during which `transiting` is within the default orb of
 /// `kind` aspect to `natal_lon`.
 ///

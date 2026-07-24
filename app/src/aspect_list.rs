@@ -4,10 +4,7 @@
 //! of `InterpKey`s a row should expose, not just aspects.  Placements feed it
 //! too (one row per planet with sign + house keys).
 
-use zodia_core::{
-    Aspect, HouseTransit, InterpKey, PlanetPositions, SynastryAspect, TransitAspect,
-    jdn_to_display_date, transit_window,
-};
+use zodia_core::{Aspect, InterpKey, SynastryAspect};
 
 // ── row data ──────────────────────────────────────────────────────────────────
 
@@ -49,48 +46,6 @@ pub fn natal_items(aspects: &[Aspect]) -> Vec<AspectItem> {
             transit_context: None,
         }
     }).collect()
-}
-
-pub fn transit_items(
-    transits: &[TransitAspect],
-    house_transits: &[HouseTransit],
-    natal_positions: &PlanetPositions,
-    transit_jdn: f64,
-) -> Vec<AspectItem> {
-    let mut items: Vec<AspectItem> = transits.iter().map(|ta| {
-        let window_str = natal_positions
-            .get(ta.natal_body)
-            .map(|natal_lon| {
-                let (start, end) = transit_window(ta.transiting, natal_lon, ta.kind, transit_jdn);
-                let s = jdn_to_display_date(start);
-                let e = jdn_to_display_date(end);
-                if s == e { format!("Active: {s}") } else { format!("Active: {s} – {e}") }
-            });
-        let key = ta.interp_key();
-        AspectItem {
-            keys:        vec![KeyEntry { label: "Aspect".to_string(), key: key.clone() }],
-            title:       key.plain_name(),
-            symbol_line: format!(
-                "{} {} natal {}",
-                ta.transiting.symbol(), ta.kind.symbol(), ta.natal_body.symbol(),
-            ),
-            meta_line:       Some(format!("orb {:.1}°", ta.orb)),
-            transit_context: window_str,
-        }
-    }).collect();
-
-    let as_of = jdn_to_display_date(transit_jdn);
-    for ht in house_transits {
-        let key = ht.interp_key();
-        items.push(AspectItem {
-            keys:        vec![KeyEntry { label: "House transit".to_string(), key: key.clone() }],
-            title:       key.plain_name(),
-            symbol_line: format!("{} → ⌂{}", ht.transiting.symbol(), ht.house),
-            meta_line:   None,
-            transit_context: Some(format!("As of {as_of}")),
-        });
-    }
-    items
 }
 
 pub fn synastry_items(aspects: &[SynastryAspect]) -> Vec<AspectItem> {

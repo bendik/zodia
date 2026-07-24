@@ -57,6 +57,130 @@ pub enum InterpOp {
         parent_log_id: Hash,
         body:          String,
     },
+
+    /// Revoke a previously authored interpretation.  Only honoured at the
+    /// materialisation layer when the revoker's verifying key matches the
+    /// original author of `target_log_id`.  Peers tombstone the row in
+    /// their stores; subsequent affirmations/responses against the row
+    /// remain in storage but the parent is filtered from UI surfaces.
+    ///
+    /// Note: revoke is a propagation request, not a guarantee — peers who
+    /// have already exported the content can still retain it.  The op name
+    /// captures the intent ("to the extent of my capability").
+    Revoke {
+        target_log_id: Hash,
+    },
+}
+
+// ── DocOp (Phase F-collab) ────────────────────────────────────────────────────
+
+/// Collaborative-document operations.  One sibling of `InterpOp`: while the
+/// legacy `InterpOp` variants treat the community body as a set of
+/// competing whole interpretations, `DocOp` treats each `interp_key` as a
+/// single converging text doc with author-veto-ring semantics.
+///
+/// New writes from 0.9+ use `DocOp` exclusively; `InterpOp::{Author,
+/// RespondTo, Affirm}` remain in the wire format only for backwards-compat
+/// reads of pre-0.9 ops.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocOp {
+    /// One CRDT update against a key's doc.  `base_rev` is the doc revision
+    /// the editor's local state was at when the edit was authored;
+    /// receivers use it for ordering hints.  `crdt_update` carries the
+    /// CRDT-internal wire format (Loro update bytes).  `affected_blocks`
+    /// is the set of block ids the edit touched — used by the materialiser
+    /// to maintain the author ring.
+    Edit {
+        interp_key:      String,
+        base_rev:        Hash,
+        crdt_update:     Vec<u8>,
+        affected_blocks: Vec<[u8; 16]>,
+    },
+    /// Veto a specific `Edit` op.  Honoured by receivers iff:
+    ///   1. the revoker's pubkey sits in the ring of at least one of the
+    ///      affected blocks at materialisation time,
+    ///   2. the veto's op timestamp is within `VETO_WINDOW_DAYS` of the
+    ///      target edit's op timestamp,
+    ///   3. the target edit is still the *most recent* edit on the
+    ///      affected blocks (a later edit invalidates stale vetoes).
+    Veto {
+        interp_key:        String,
+        target_edit_op_id: Hash,
+    },
+    /// Affirm a specific revision of a key's doc.  Replaces the legacy
+    /// "affirm one of many interpretations" model — the target is a
+    /// doc-revision hash produced by `zodia_doc::InterpDoc::current_rev`.
+    AffirmRev {
+        interp_key: String,
+        target_rev: [u8; 32],
+    },
+    /// Presence heartbeat: this peer is editing `interp_key` right now (or
+    /// has stopped).  Lightweight; not stored in the long-term store —
+    /// downstream renders "active editor" indicators based on recent
+    /// presence ops alone.
+    EditorPresence {
+        interp_key: String,
+        joined:     bool,
+    },
+}
+
+impl DocOp {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(self, &mut buf).expect("ciborium encode infallible for owned data");
+        buf
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, OpCodecError> {
+        ciborium::from_reader(bytes).map_err(|e| OpCodecError::Decode(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod doc_op_tests {
+    use super::*;
+
+    fn sample_hash() -> Hash {
+        Hash::from_bytes([7u8; 32])
+    }
+
+    #[test]
+    fn edit_roundtrip() {
+        let op = DocOp::Edit {
+            interp_key:      "natal:sun_trine_moon".into(),
+            base_rev:        sample_hash(),
+            crdt_update:     vec![1, 2, 3, 4, 5],
+            affected_blocks: vec![[0u8; 16], [1u8; 16]],
+        };
+        let bytes = op.encode();
+        assert_eq!(op, DocOp::decode(&bytes).unwrap());
+    }
+
+    #[test]
+    fn veto_roundtrip() {
+        let op = DocOp::Veto {
+            interp_key: "natal:x".into(),
+            target_edit_op_id: sample_hash(),
+        };
+        assert_eq!(op, DocOp::decode(&op.encode()).unwrap());
+    }
+
+    #[test]
+    fn affirm_rev_roundtrip() {
+        let op = DocOp::AffirmRev {
+            interp_key: "natal:venus_square_pluto".into(),
+            target_rev: [42u8; 32],
+        };
+        assert_eq!(op, DocOp::decode(&op.encode()).unwrap());
+    }
+
+    #[test]
+    fn presence_roundtrip() {
+        let op = DocOp::EditorPresence {
+            interp_key: "transit:mars_conjunction_sun".into(),
+            joined:     true,
+        };
+        assert_eq!(op, DocOp::decode(&op.encode()).unwrap());
+    }
 }
 
 impl InterpOp {
@@ -116,6 +240,13 @@ mod tests {
     #[test]
     fn affirm_roundtrip() {
         let op = InterpOp::Affirm { target_log_id: sample_hash() };
+        let bytes = op.encode();
+        assert_eq!(op, InterpOp::decode(&bytes).unwrap());
+    }
+
+    #[test]
+    fn revoke_roundtrip() {
+        let op = InterpOp::Revoke { target_log_id: sample_hash() };
         let bytes = op.encode();
         assert_eq!(op, InterpOp::decode(&bytes).unwrap());
     }

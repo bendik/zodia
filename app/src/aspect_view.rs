@@ -8,6 +8,7 @@
 //! a synthetic "Combined" page when there are 2+ keys.  Aspects (single key)
 //! get no switcher; placements (sign + house) get [Sign] [House] [Combined].
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use libadwaita as adw;
@@ -23,6 +24,30 @@ use zodia_crypto::IdentityKeypair;
 use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
+
+thread_local! {
+    /// Phase F-collab: handle to the doc editor's visible TextBuffer for
+    /// the currently-open detail page.  Lets app-level handlers (incoming
+    /// remote edits, veto rollbacks) push live body updates into the editor
+    /// without forcing the user to nav away + back.  `gtk::TextBuffer` is
+    /// `!Send` so a thread_local + main-thread access is the simplest
+    /// channel between the relm4 actor + the GTK widget tree.
+    pub static ACTIVE_DOC_BUFFER:
+        RefCell<Option<(String /* interp_key */, gtk::TextBuffer)>>
+        = RefCell::new(None);
+}
+
+/// If the currently-open detail page's key matches `interp_key`, set the
+/// visible TextBuffer to `new_body`.  No-op otherwise (user is elsewhere).
+pub fn refresh_active_doc_body(interp_key: &str, new_body: &str) {
+    ACTIVE_DOC_BUFFER.with(|cell| {
+        if let Some((k, buf)) = cell.borrow().as_ref() {
+            if k == interp_key {
+                buf.set_text(new_body);
+            }
+        }
+    });
+}
 use crate::aspect_list::{AspectItem, KeyEntry};
 use crate::interp_row::{InterpRow, InterpRowInit, InterpRowOut};
 
@@ -31,7 +56,6 @@ use crate::interp_row::{InterpRow, InterpRowInit, InterpRowOut};
 #[derive(Clone, Copy, Debug)]
 pub enum AspectViewKind {
     Natal,
-    Transit,
     Synastry,
 }
 
@@ -152,12 +176,8 @@ impl SimpleAsyncComponent for AspectView {
             for ri in row_inits { g.push_back(ri); }
         }
 
-        let group_title = match init.kind {
-            AspectViewKind::Natal | AspectViewKind::Synastry => "Aspects",
-            AspectViewKind::Transit                          => "Transits",
-        };
         let interp_group = rows.widget().clone();
-        interp_group.set_title(group_title);
+        interp_group.set_title("Aspects");
 
         // Placements factory (Natal only).
         let placements_rows: Option<FactoryVecDeque<InterpRow>> =
@@ -275,287 +295,355 @@ pub async fn detail_page(
         content.append(&timing_group);
     }
 
-    // ── interpretations: one labelled group per key, all visible ──────────────
-    // We need to track each group by key sig so the contribute submit can
-    // append to the right one without rebuilding the page.
-    let mut groups_by_sig: std::collections::HashMap<String, adw::PreferencesGroup> =
-        std::collections::HashMap::new();
+    // ── Phase F-collab: community reading + inline editor + revisions ────────
     for entry in keys {
-        let group = build_interpretations_group(
+        let doc_group = build_doc_reading_group(
             &entry.key,
             store,
             baseline,
-            Some(Rc::clone(&identity)),
-            true, // affirm enabled
+            Rc::clone(&identity),
             sender.clone(),
         ).await;
-        // For 1 key, "Interpretations" is the right title.  For 2+, label per key.
         if keys.len() > 1 {
-            group.set_title(&format!("{} — Interpretations", entry.label));
+            doc_group.set_title(&format!("{} — Community reading", entry.label));
         }
-        groups_by_sig.insert(entry.key.to_sig(), group.clone());
-        content.append(&group);
+        content.append(&doc_group);
     }
-
-    // ── contribute (single, with target-key radio when multi-key) ─────────────
-    let contribute = build_contribute_group(
-        keys,
-        sender,
-        groups_by_sig,
-    );
-    content.append(&contribute);
+    let _ = identity;
 
     clamp.set_child(Some(&content));
     scroll.set_child(Some(&clamp));
     toolbar.set_content(Some(&scroll));
 
-    adw::NavigationPage::new(&toolbar, &page_title)
+    let page = adw::NavigationPage::new(&toolbar, &page_title);
+
+    // Presence-departure: fire a leave heartbeat for every key on this page
+    // when the NavigationPage hides (back-button or push-over).  Pairs with
+    // the join emitted by `build_doc_reading_group` on construction.
+    let leave_keys: Vec<String> = keys.iter().map(|e| e.key.to_sig()).collect();
+    let leave_sender = sender.clone();
+    page.connect_hiding(move |_| {
+        for k in &leave_keys {
+            leave_sender.input(AppMsg::EditorPresence {
+                interp_key: k.clone(),
+                joined:     false,
+            });
+        }
+        // Detach the live-refresh handle so subsequent doc events don't
+        // poke into a no-longer-visible TextBuffer.
+        ACTIVE_DOC_BUFFER.with(|cell| { *cell.borrow_mut() = None; });
+    });
+
+    page
 }
 
-/// Build the Interpretations group for `key`.  When `identity` is provided
-/// and `affirm_enabled` is true, community rows show an active affirm button
-/// and a respond button.  Affirm/Respond clicks route through `AppMsg` so
-/// store writes happen on the parent's async runtime.
-///
-/// Each non-baseline parent row is followed by any responses it has —
-/// rendered as smaller indented action rows.  Responses are pre-fetched
-/// here from the store; new responses added during the current detail-page
-/// session won't appear until the user navigates away and back (a known
-/// limitation until Phase D wires the pipeline directly into UI updates).
-async fn build_interpretations_group(
-    key: &InterpKey,
-    store: &ZodiaStore,
+/// Build the inline community-reading + editor for `key`.  The page is
+/// the editor — no separate "view" + "edit" modes, no modal dialog.
+/// TextView holds the current doc body; Publish button below commits an
+/// edit op; a Revisions section surfaces the current revision hash and
+/// recent-editor attribution.
+async fn build_doc_reading_group(
+    key:      &InterpKey,
+    store:    &ZodiaStore,
     baseline: &BaselineStore,
-    identity: Option<Rc<IdentityKeypair>>,
-    affirm_enabled: bool,
-    sender: AsyncComponentSender<AppModel>,
+    identity: Rc<IdentityKeypair>,
+    sender:   AsyncComponentSender<AppModel>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
-    group.set_title("Interpretations");
+    group.set_title("Community reading");
+    group.set_description(Some(
+        "Local-first document the whole community refines together.  \
+         Recent editors may veto changes within 7 days.",
+    ));
 
-    let mut existing = store.all_for_key(key).await.unwrap_or_default();
-    if !existing.iter().any(|r| r.is_baseline) {
-        if let Some(row) = baseline.row_for_key(key) {
-            existing.push(row);
+    let key_sig = key.to_sig();
+    let me_bytes: [u8; 32] = identity.public_key();
+
+    // Resolve current body + revision from persisted Loro doc, else
+    // bundled baseline, else empty.
+    let me_vk = zodia_doc::VerifyingKey::from_bytes(&me_bytes).ok();
+    let (display_body, current_rev) = match (&me_vk, store.doc_load(&key_sig).await) {
+        (Some(vk), Ok(Some(bytes))) => {
+            match zodia_doc::InterpDoc::from_snapshot(vk, &bytes) {
+                Ok(d) => (d.body_text(), Some(d.current_rev())),
+                Err(_) => (baseline.lookup(key).unwrap_or("").to_string(), None),
+            }
         }
-    }
+        _ => (baseline.lookup(key).unwrap_or("").to_string(), None),
+    };
 
-    if existing.is_empty() {
-        let row = adw::ActionRow::new();
-        row.set_title("No interpretations yet");
-        row.set_subtitle("Be the first to contribute below.");
-        group.add(&row);
-    } else {
-        for row_data in &existing {
-            let r = adw::ActionRow::new();
-            r.set_title(&row_data.body);
-            r.set_subtitle(&if row_data.is_baseline {
-                format!("Baseline  ·  {} ♡", row_data.affirmation_count)
-            } else {
-                format!("{} ♡  ·  community", row_data.affirmation_count)
+    // Announce presence on page open.  Departure heartbeat lives on the
+    // NavigationView's pop callback in a follow-up — for now we only fire
+    // join; remote peers' presence eventually times out client-side.
+    sender.input(AppMsg::EditorPresence {
+        interp_key: key_sig.clone(),
+        joined:     true,
+    });
+
+    // ── editor row: TextView + Publish + presence indicator ──────────────────
+    let edit_row = adw::ActionRow::new();
+    edit_row.set_activatable(false);
+    edit_row.set_title("Reading");
+    edit_row.set_subtitle("");
+
+    let buffer = gtk::TextBuffer::new(None);
+    buffer.set_text(&display_body);
+    // Register this buffer as the active doc target so app-level handlers
+    // (DocEdited/Veto/Rollback) can refresh the visible body without a
+    // re-nav.  Cleared by the NavigationPage's `connect_hiding` below.
+    ACTIVE_DOC_BUFFER.with(|cell| {
+        *cell.borrow_mut() = Some((key_sig.clone(), buffer.clone()));
+    });
+    let text_view = gtk::TextView::with_buffer(&buffer);
+    text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    text_view.set_top_margin(8);
+    text_view.set_bottom_margin(8);
+    text_view.set_left_margin(8);
+    text_view.set_right_margin(8);
+    text_view.set_accepts_tab(false);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_height(180);
+    scroll.set_max_content_height(320);
+    scroll.set_hexpand(true);
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_child(Some(&text_view));
+
+    let editor_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    editor_box.set_margin_top(8);
+    editor_box.set_margin_bottom(8);
+    editor_box.set_margin_start(12);
+    editor_box.set_margin_end(12);
+    editor_box.append(&scroll);
+
+    // Publish button row.
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+
+    let publish_btn = gtk::Button::with_label("Publish edit");
+    publish_btn.add_css_class("suggested-action");
+    let buf_for_btn = buffer.clone();
+    let key_for_btn = key_sig.clone();
+    let sender_for_btn = sender.clone();
+    publish_btn.connect_clicked(move |_| {
+        let (s, e) = buf_for_btn.bounds();
+        let text = buf_for_btn.text(&s, &e, false).to_string();
+        let trimmed = text.trim().to_string();
+        if !trimmed.is_empty() {
+            sender_for_btn.input(AppMsg::PublishDocEdit {
+                interp_key: key_for_btn.clone(),
+                new_body:   trimmed,
             });
+        }
+    });
 
-            if let (true, Some(_ident)) = (affirm_enabled, identity.as_ref()) {
-                let affirm_btn = gtk::Button::from_icon_name("emblem-favorite-symbolic");
-                affirm_btn.add_css_class("flat");
-                affirm_btn.set_valign(gtk::Align::Center);
-                if row_data.is_baseline {
-                    affirm_btn.set_sensitive(false);
-                    affirm_btn.set_tooltip_text(Some("Baseline — not affirmable"));
-                } else {
-                    affirm_btn.set_tooltip_text(Some("Affirm this interpretation"));
-                    let log_id   = row_data.log_id;
-                    let sender_c = sender.clone();
-                    affirm_btn.connect_clicked(move |_| {
-                        sender_c.input(AppMsg::AffirmInterp { log_id });
-                    });
-                }
-                r.add_suffix(&affirm_btn);
+    let audio_btn = gtk::Button::with_label("Start discussion");
+    audio_btn.add_css_class("pill");
+    audio_btn.set_tooltip_text(Some(
+        "Open a live voice circle on this reading.  Anyone editing the doc \
+         can join from their sidebar.  Audio mesh, max 6 participants.",
+    ));
+    let key_for_audio = key_sig.clone();
+    let sender_for_audio = sender.clone();
+    audio_btn.connect_clicked(move |_| {
+        sender_for_audio.input(AppMsg::StartEditorAudio {
+            interp_key: key_for_audio.clone(),
+        });
+    });
 
-                // Respond button — only on community rows, not baseline.
-                if !row_data.is_baseline {
-                    let respond_btn = gtk::Button::from_icon_name(
-                        "mail-reply-sender-symbolic",
-                    );
-                    respond_btn.add_css_class("flat");
-                    respond_btn.set_valign(gtk::Align::Center);
-                    respond_btn.set_tooltip_text(Some("Respond to this interpretation"));
-                    let parent_log_id = row_data.log_id;
-                    let parent_body   = row_data.body.clone();
-                    let sender_c      = sender.clone();
-                    respond_btn.connect_clicked(move |btn| {
-                        let parent_window = btn
-                            .root()
-                            .and_then(|r| r.downcast::<gtk::Window>().ok());
-                        open_respond_dialog(
-                            parent_window.as_ref(),
-                            parent_log_id,
-                            &parent_body,
-                            sender_c.clone(),
-                        );
-                    });
-                    r.add_suffix(&respond_btn);
-                }
-            }
+    actions.append(&audio_btn);
+    actions.append(&publish_btn);
+    editor_box.append(&actions);
 
-            group.add(&r);
+    // Offline-first hint.
+    let hint = gtk::Label::new(Some(
+        "Saved locally first, syncs to peers when you're connected.",
+    ));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("caption");
+    hint.add_css_class("dim-label");
+    editor_box.append(&hint);
 
-            // Pre-fetched response rows beneath the parent, indented.
-            if !row_data.is_baseline {
-                if let Ok(responses) = store.responses_for(&row_data.log_id).await {
-                    for resp in &responses {
-                        let rr = adw::ActionRow::new();
-                        rr.set_title(&resp.body);
-                        let author_tag = resp.author_pk
-                            .as_ref()
-                            .map(|pk| hex::encode_upper(&pk[..4]))
-                            .unwrap_or_else(|| "anon".to_string());
-                        rr.set_subtitle(&format!("response · ···{author_tag}"));
-                        rr.set_margin_start(24);
-                        rr.add_css_class("caption");
-                        group.add(&rr);
-                    }
-                }
+    let body_holder = adw::PreferencesRow::new();
+    body_holder.set_child(Some(&editor_box));
+    group.add(&body_holder);
+    let _ = edit_row;
+
+    // ── revisions section ────────────────────────────────────────────────────
+    let ring = store.block_ring_get(&key_sig, &zodia_doc::BODY_BLOCK_ID).await
+        .unwrap_or_default();
+
+    let rev_group = adw::PreferencesGroup::new();
+    rev_group.set_title("Revisions");
+    rev_group.set_description(Some(
+        "Recent edits.  Expand 'Previous version' to compare; use Veto to roll back.",
+    ));
+
+    if let Some(rev) = current_rev {
+        let current_row = adw::ActionRow::new();
+        current_row.set_title("Current revision");
+        current_row.set_subtitle(&hex::encode(&rev[..8]));
+        // Affirm button — ♡ this revision so the community ranking signal
+        // reflects current-doc taste, not "the row that won years ago."
+        let affirm_btn = gtk::Button::from_icon_name("emblem-favorite-symbolic");
+        affirm_btn.add_css_class("flat");
+        affirm_btn.add_css_class("circular");
+        affirm_btn.set_valign(gtk::Align::Center);
+        affirm_btn.set_tooltip_text(Some(
+            "Affirm this revision — your ♡ attaches to the current text, \
+             not to a frozen interpretation row.",
+        ));
+        let key_for_aff = key_sig.clone();
+        let sender_for_aff = sender.clone();
+        let rev_copy = rev;
+        affirm_btn.connect_clicked(move |b| {
+            sender_for_aff.input(AppMsg::AffirmDocRev {
+                interp_key: key_for_aff.clone(),
+                target_rev: rev_copy,
+            });
+            // Visual feedback: dim the button after click so the user
+            // sees their tap registered (idempotent on the server side).
+            b.set_sensitive(false);
+        });
+        current_row.add_suffix(&affirm_btn);
+        rev_group.add(&current_row);
+    } else {
+        let stub_row = adw::ActionRow::new();
+        stub_row.set_title("No edits yet");
+        stub_row.set_subtitle("Publish the first edit to start a revision history.");
+        rev_group.add(&stub_row);
+    }
+
+    // Previous-version body (the snapshot we'd restore on veto).
+    if let Ok(Some(meta)) = store.doc_load_meta(&key_sig).await {
+        if let (Some(prior_bytes), Some(vk)) = (&meta.prior_snapshot, me_vk.as_ref()) {
+            if let Ok(prior_doc) = zodia_doc::InterpDoc::from_snapshot(vk, prior_bytes) {
+                let prev_body = prior_doc.body_text();
+                let author_tag = meta.last_edit_author
+                    .map(|a| format!("···{}", hex::encode_upper(&a[..4])))
+                    .unwrap_or_else(|| "unknown".into());
+                let when = meta.last_edit_ts
+                    .map(relative_age)
+                    .unwrap_or_else(|| "—".into());
+                let expander = adw::ExpanderRow::new();
+                expander.set_title("Previous version");
+                expander.set_subtitle(&format!("before {} edited · {}", author_tag, when));
+                let buf = gtk::TextBuffer::new(None);
+                buf.set_text(&prev_body);
+                let tv = gtk::TextView::with_buffer(&buf);
+                tv.set_editable(false);
+                tv.set_cursor_visible(false);
+                tv.set_wrap_mode(gtk::WrapMode::WordChar);
+                tv.set_top_margin(8);
+                tv.set_bottom_margin(8);
+                tv.set_left_margin(8);
+                tv.set_right_margin(8);
+                let scroll = gtk::ScrolledWindow::new();
+                scroll.set_min_content_height(120);
+                scroll.set_max_content_height(280);
+                scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+                scroll.set_child(Some(&tv));
+                let holder = adw::PreferencesRow::new();
+                holder.set_child(Some(&scroll));
+                expander.add_row(&holder);
+                rev_group.add(&expander);
             }
         }
     }
+
+    if ring.is_empty() {
+        let r = adw::ActionRow::new();
+        r.set_title("Recent editors");
+        r.set_subtitle("None yet — be the first.");
+        rev_group.add(&r);
+    } else {
+        // Local user is "in the ring" if their pubkey appears as one of the
+        // last RING_SIZE editors.  Veto authority targets only the newest
+        // entry and only within the 7-day window.
+        let me_in_ring = ring.iter().any(|(pk, _, _)| pk == &me_bytes);
+        let newest_idx = ring.len() - 1;  // ring is FIFO oldest→newest
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+        let window_secs = zodia_doc::VETO_WINDOW_DAYS * 86_400;
+        for (i, (pk, op_id, ts)) in ring.iter().enumerate().rev() {
+            let r = adw::ActionRow::new();
+            r.set_title(&format!("···{}", hex::encode_upper(&pk[..4])));
+            let mine_marker = if pk == &me_bytes { "  (you)" } else { "" };
+            r.set_subtitle(&format!(
+                "edit {}  ·  {}{}",
+                hex::encode(&op_id[..4]),
+                relative_age(*ts),
+                mine_marker,
+            ));
+            let is_newest = i == newest_idx;
+            let in_window = now.saturating_sub(*ts) <= window_secs;
+            let not_self = pk != &me_bytes;
+            if is_newest && me_in_ring && in_window && not_self {
+                let veto_btn = gtk::Button::with_label("Veto");
+                veto_btn.add_css_class("destructive-action");
+                veto_btn.set_valign(gtk::Align::Center);
+                veto_btn.set_tooltip_text(Some(
+                    "Roll back this edit.  Only newest edits within 7 days, \
+                     and only if you authored a recent edit on this doc.",
+                ));
+                let key_for_veto = key_sig.clone();
+                let op_for_veto = *op_id;
+                let sender_for_veto = sender.clone();
+                veto_btn.connect_clicked(move |_| {
+                    sender_for_veto.input(AppMsg::ProposeDocVeto {
+                        interp_key:        key_for_veto.clone(),
+                        target_edit_op_id: op_for_veto,
+                    });
+                });
+                r.add_suffix(&veto_btn);
+            }
+            rev_group.add(&r);
+        }
+    }
+
+    // Attach revisions to the same container via a wrapper widget.
+    // PreferencesGroup doesn't allow direct nesting, so we expose `group`
+    // alone and append `rev_group` separately from the caller.  Cleaner
+    // approach below: caller appends two groups; for now we hack by
+    // setting rev_group as a header_suffix.
+    group.set_header_suffix(Some(&rev_group_into_button(rev_group, &key_sig)));
 
     group
 }
 
-/// Open a modal dialog asking the user for a response body, then dispatch
-/// `AppMsg::SubmitResponse` on submit.  Inline-dispatch keeps the dialog
-/// uncoupled from any specific component.
-fn open_respond_dialog(
-    parent: Option<&gtk::Window>,
-    parent_log_id: [u8; 32],
-    parent_body:   &str,
-    sender: AsyncComponentSender<AppModel>,
-) {
-    let dialog = adw::AlertDialog::new(
-        Some("Respond"),
-        Some(&format!(
-            "Your response will hang as a thread under:\n\n“{}”",
-            if parent_body.len() > 200 {
-                format!("{}…", &parent_body[..200])
-            } else {
-                parent_body.to_string()
-            },
-        )),
-    );
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("send", "Send");
-    dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("send"));
-    dialog.set_close_response("cancel");
+/// Wrap the revisions PreferencesGroup in a MenuButton popover so it
+/// surfaces as a discreet "History" affordance in the header without
+/// claiming whole-page real estate.  Clicking the icon reveals the
+/// revisions list in a popover.
+fn rev_group_into_button(
+    rev_group: adw::PreferencesGroup,
+    _key_sig:  &str,
+) -> gtk::MenuButton {
+    let btn = gtk::MenuButton::new();
+    btn.set_icon_name("document-open-recent-symbolic");
+    btn.set_tooltip_text(Some("Revisions"));
+    btn.add_css_class("flat");
 
-    let entry = gtk::Entry::new();
-    entry.set_placeholder_text(Some("Your response…"));
-    entry.set_hexpand(true);
-    entry.set_margin_top(8);
-    dialog.set_extra_child(Some(&entry));
-
-    let entry_c = entry.clone();
-    dialog.connect_response(None, move |dlg, response| {
-        if response == "send" {
-            let body = entry_c.text().trim().to_string();
-            if !body.is_empty() {
-                sender.input(AppMsg::SubmitResponse { parent_log_id, body });
-            }
-        }
-        dlg.close();
-    });
-
-    dialog.present(parent);
+    let popover = gtk::Popover::new();
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_width(320);
+    scroll.set_min_content_height(220);
+    scroll.set_max_content_height(420);
+    scroll.set_child(Some(&rev_group));
+    popover.set_child(Some(&scroll));
+    btn.set_popover(Some(&popover));
+    btn
 }
 
-/// Build the Contribute group.  Single text entry + Share button.  When
-/// `keys.len() > 1`, a radio row picks which key the contribution targets;
-/// otherwise the lone key is implicit.  Submitting appends a new row to the
-/// matching Interpretations group so the user sees their addition immediately.
-fn build_contribute_group(
-    keys: &[KeyEntry],
-    sender: AsyncComponentSender<AppModel>,
-    groups_by_sig: std::collections::HashMap<String, adw::PreferencesGroup>,
-) -> gtk::Box {
-    use std::cell::Cell;
-
-    let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 4);
-
-    let group = adw::PreferencesGroup::new();
-    group.set_title("Contribute");
-    group.set_description(Some("Optional — add your own reading if you have one."));
-
-    // Tracks which key index in `keys` is currently selected.
-    let selected: Rc<Cell<usize>> = Rc::new(Cell::new(0));
-
-    // Target-key radio row (only visible for multi-key rows).
-    if keys.len() > 1 {
-        let target_row = adw::ActionRow::new();
-        target_row.set_title("Reading for");
-        target_row.set_subtitle("Which placement does this contribution describe?");
-
-        let radio_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        radio_box.set_valign(gtk::Align::Center);
-
-        let mut first: Option<gtk::CheckButton> = None;
-        for (i, entry) in keys.iter().enumerate() {
-            let cb = gtk::CheckButton::with_label(&entry.label);
-            if let Some(ref f) = first {
-                cb.set_group(Some(f));
-            } else {
-                first = Some(cb.clone());
-            }
-            if i == 0 { cb.set_active(true); }
-            let sel = Rc::clone(&selected);
-            cb.connect_toggled(move |btn| {
-                if btn.is_active() { sel.set(i); }
-            });
-            radio_box.append(&cb);
-        }
-
-        target_row.add_suffix(&radio_box);
-        group.add(&target_row);
-    }
-
-    let entry = adw::EntryRow::new();
-    entry.set_title("Your interpretation…");
-    group.add(&entry);
-    wrapper.append(&group);
-
-    let submit = gtk::Button::with_label("Share");
-    submit.add_css_class("flat");
-    submit.set_halign(gtk::Align::End);
-    submit.set_margin_top(4);
-
-    let keys_owned: Vec<KeyEntry> = keys.to_vec();
-    let groups     = groups_by_sig;
-    let entry_c    = entry.clone();
-    let sender_c   = sender.clone();
-    let sel        = Rc::clone(&selected);
-    submit.connect_clicked(move |_| {
-        let text    = entry_c.text().to_string();
-        let trimmed = text.trim().to_string();
-        if trimmed.is_empty() { return; }
-
-        let idx = sel.get().min(keys_owned.len().saturating_sub(1));
-        let key = match keys_owned.get(idx) { Some(k) => k.key.clone(), None => return };
-
-        // Optimistic UI: show the new row immediately.  The actual store
-        // write + network share is dispatched to the parent's async update
-        // via `AppMsg::SubmitInterp`.
-        if let Some(group) = groups.get(&key.to_sig()) {
-            let new_row = adw::ActionRow::new();
-            new_row.set_title(&trimmed);
-            new_row.set_subtitle("0 ♡  ·  community (just added)");
-            group.add(&new_row);
-        }
-        entry_c.set_text("");
-        sender_c.input(AppMsg::SubmitInterp { key, body: trimmed });
-    });
-
-    wrapper.append(&submit);
-    wrapper
+fn relative_age(unix: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(unix);
+    let d = now.saturating_sub(unix);
+    if d < 60         { "now".into() }
+    else if d < 3600  { format!("{}m ago", d / 60) }
+    else if d < 86400 { format!("{}h ago", d / 3600) }
+    else              { format!("{}d ago", d / 86400) }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

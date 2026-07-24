@@ -20,10 +20,12 @@ use relm4::Component;
 // ── public entry point ────────────────────────────────────────────────────────
 
 pub struct SidebarInit {
-    pub peers_list:    gtk::ListBox,
-    pub notif_widget:  gtk::MenuButton,
-    pub split_view:    adw::OverlaySplitView,
-    pub content_stack: gtk::Stack,
+    pub peers_list:         gtk::ListBox,
+    pub discussions_list:   gtk::ListBox,
+    pub discussions_header: gtk::Label,
+    pub notif_widget:       gtk::MenuButton,
+    pub split_view:         adw::OverlaySplitView,
+    pub content_stack:      gtk::Stack,
 }
 
 /// Spawn the sidebar, return its `ToolbarView` root + an input sender.
@@ -79,7 +81,10 @@ impl SimpleComponent for Sidebar {
         root: Self::Root,
         _sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let SidebarInit { peers_list, notif_widget, split_view, content_stack } = init;
+        let SidebarInit {
+            peers_list, discussions_list, discussions_header,
+            notif_widget, split_view, content_stack,
+        } = init;
 
         // ── Static nav list (Chart / Sky / Network) ──────────────────────────
         relm4::view! {
@@ -154,6 +159,8 @@ impl SimpleComponent for Sidebar {
                 set_orientation: gtk::Orientation::Vertical,
                 set_spacing: 0,
                 append: &nav_list,
+                append: &discussions_header,
+                append: &discussions_list,
                 append: &others_header,
                 append: &peers_list,
             }

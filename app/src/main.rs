@@ -7,6 +7,8 @@ mod app;
 mod aspect_list;
 mod aspect_view;
 mod baseline;
+mod feed_item;
+mod feed_view;
 mod interp_row;
 mod network_tab;
 mod notif_bell;
@@ -17,6 +19,7 @@ mod sidebar;
 mod stargazer_list;
 mod stargazer_page;
 mod placements;
+mod transit_ticker;
 mod util;
 
 use app::{AppInit, AppModel};
@@ -33,6 +36,8 @@ fn main() {
                     "iroh_quinn_proto=error,\
                      iroh=warn,\
                      p2panda_net=error,\
+                     loro_internal=warn,\
+                     loro=warn,\
                      info"
                 )),
         )
@@ -86,7 +91,7 @@ fn main() {
 
 fn apply_css() {
     let provider = gtk4::CssProvider::new();
-    provider.load_from_data(CSS);
+    provider.load_from_string(CSS);
     gtk4::style_context_add_provider_for_display(
         &gtk4::gdk::Display::default().expect("no display"),
         &provider,

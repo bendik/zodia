@@ -7,6 +7,7 @@ description = "SQLite persistence — aspect interpretation index and affirmatio
 
 [dependencies]
 zodia-core.workspace = true
+zodia-doc.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 blake3.workspace = true

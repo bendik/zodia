@@ -29,7 +29,7 @@ use p2panda_stream::{
 };
 use thiserror::Error;
 use tracing::{debug, trace};
-use zodia_ops::{InterpOp, OpCodecError};
+use zodia_ops::{DocOp, InterpOp, OpCodecError};
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -64,6 +64,53 @@ pub enum StateEvent {
         author:        VerifyingKey,
         parent_log_id: Hash,
         body:          String,
+    },
+    /// An authored interpretation was revoked by its original author.
+    /// `by` is the revoker's verifying key — downstream materialisation
+    /// must confirm `by == author_of(target_log_id)` before applying the
+    /// tombstone (drops impostor revokes).
+    InterpRevoked {
+        op_id:         Hash,
+        by:            VerifyingKey,
+        target_log_id: Hash,
+    },
+    /// Phase F-collab: a CRDT edit landed against `interp_key`.  The
+    /// materialiser persists the update into the local Loro doc and updates
+    /// per-block author rings.
+    DocEdited {
+        op_id:           Hash,
+        by:              VerifyingKey,
+        interp_key:      String,
+        base_rev:        Hash,
+        crdt_update:     Vec<u8>,
+        affected_blocks: Vec<[u8; 16]>,
+        timestamp:       u64,
+    },
+    /// Phase F-collab: a peer proposed a veto.  Downstream authority check
+    /// (ring + window + newest-edit) lives in the app handler since it
+    /// needs store access.
+    DocVetoProposed {
+        op_id:             Hash,
+        by:                VerifyingKey,
+        interp_key:        String,
+        target_edit_op_id: Hash,
+        timestamp:         u64,
+    },
+    /// Phase F-collab: an affirmation against (interp_key, revision).
+    DocAffirmed {
+        op_id:      Hash,
+        by:         VerifyingKey,
+        interp_key: String,
+        target_rev: [u8; 32],
+    },
+    /// Phase F-collab: presence heartbeat for the per-key editor session.
+    /// `joined = false` means "I left."
+    EditorPresenceChanged {
+        op_id:      Hash,
+        by:         VerifyingKey,
+        interp_key: String,
+        joined:     bool,
+        timestamp:  u64,
     },
     /// An op was decoded but skipped — malformed body, unsupported variant,
     /// missing parent, denied access, etc.  Reported for observability so
@@ -107,6 +154,8 @@ pub enum DecodeOutput {
     /// `op` is boxed because `Operation<()>` is ~400 bytes and the `Skipped`
     /// variant is tiny — keeps the common case from inflating the enum.
     Decoded { op: Box<Operation<()>>, interp: InterpOp },
+    /// Phase F-collab: op body decoded as a `DocOp` instead.
+    DecodedDoc { op: Box<Operation<()>>, doc: DocOp },
     Skipped { reason: SkipReason },
 }
 
@@ -123,10 +172,15 @@ impl Processor<Operation<()>> for DecodeProcessor {
             let out = match &op.body {
                 None => DecodeOutput::Skipped { reason: SkipReason::NoBody },
                 Some(body) => {
-                    match InterpOp::decode(&body.to_bytes()) {
+                    let bytes = body.to_bytes();
+                    // Try InterpOp first (legacy wire format), then DocOp.
+                    match InterpOp::decode(&bytes) {
                         Ok(interp) => DecodeOutput::Decoded { op: Box::new(op), interp },
-                        Err(OpCodecError::Decode(msg)) => DecodeOutput::Skipped {
-                            reason: SkipReason::MalformedOp(msg),
+                        Err(_) => match DocOp::decode(&bytes) {
+                            Ok(doc)  => DecodeOutput::DecodedDoc { op: Box::new(op), doc },
+                            Err(OpCodecError::Decode(msg)) => DecodeOutput::Skipped {
+                                reason: SkipReason::MalformedOp(msg),
+                            },
                         },
                     }
                 }
@@ -181,6 +235,31 @@ impl Processor<DecodeOutput> for MaterializationProcessor {
                     InterpOp::RespondTo { parent_log_id, body } => StateEvent::ResponseAdded {
                         op_id, author, parent_log_id, body,
                     },
+                    InterpOp::Revoke { target_log_id } => StateEvent::InterpRevoked {
+                        op_id, by: author, target_log_id,
+                    },
+                }
+            }
+            DecodeOutput::DecodedDoc { op, doc } => {
+                let op_id  = op.header.hash();
+                let by     = op.header.verifying_key;
+                let ts: u64 = u64::from(op.header.timestamp);
+                match doc {
+                    DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks } =>
+                        StateEvent::DocEdited {
+                            op_id, by, interp_key, base_rev, crdt_update,
+                            affected_blocks, timestamp: ts,
+                        },
+                    DocOp::Veto { interp_key, target_edit_op_id } => StateEvent::DocVetoProposed {
+                        op_id, by, interp_key, target_edit_op_id, timestamp: ts,
+                    },
+                    DocOp::AffirmRev { interp_key, target_rev } => StateEvent::DocAffirmed {
+                        op_id, by, interp_key, target_rev,
+                    },
+                    DocOp::EditorPresence { interp_key, joined } =>
+                        StateEvent::EditorPresenceChanged {
+                            op_id, by, interp_key, joined, timestamp: ts,
+                        },
                 }
             }
         };

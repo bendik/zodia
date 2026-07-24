@@ -62,6 +62,7 @@ impl BaselineData {
 /// Keyed by the full canonical sig string that `InterpKey::to_sig()` produces
 /// (e.g. `"natal:jupiter_trine_venus"`), so every lookup is a single
 /// `HashMap::get` with no allocation.
+#[derive(Clone)]
 pub struct BaselineStore {
     map: HashMap<String, String>,
 }

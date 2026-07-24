@@ -19,6 +19,7 @@ zodia-av.workspace = true
 zodia-sync.workspace = true
 zodia-ops.workspace = true
 zodia-pipeline.workspace = true
+zodia-doc.workspace = true
 p2panda-core = "0.6"
 ciborium.workspace = true
 blake3.workspace = true

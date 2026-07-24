@@ -12,13 +12,29 @@ use relm4::Component;
 // ── public entry point ────────────────────────────────────────────────────────
 
 /// Spawn the bell, return its `MenuButton` root + an input sender for updates.
-pub fn launch() -> (gtk::MenuButton, relm4::Sender<NotifBellMsg>) {
+///
+/// `on_click` is called from the GTK main thread when the popover opens —
+/// the parent uses this to fire `AppMsg::BellClicked`, which bulk-marks
+/// targeting events as read.
+pub fn launch<F>(on_click: F) -> (gtk::MenuButton, relm4::Sender<NotifBellMsg>)
+where
+    F: Fn() + 'static,
+{
     use relm4::ComponentController;
     let mut ctl = <NotifBell as Component>::builder()
         .launch(())
         .detach();
     let widget = ctl.widget().clone();
     let sender = ctl.sender().clone();
+    // Wire popover open → on_click.  The popover lives inside the MenuButton
+    // and was constructed in init(); fetch it back here.
+    if let Some(popover) = widget.popover() {
+        popover.connect_visible_notify(move |po| {
+            if po.is_visible() {
+                on_click();
+            }
+        });
+    }
     ctl.detach_runtime();
     (widget, sender)
 }
@@ -30,6 +46,7 @@ pub enum NotifBellMsg {
     /// Set the popover summary text and visibility based on `total_unread`.
     Set { summary: String, total_unread: usize },
 }
+
 
 // ── model ─────────────────────────────────────────────────────────────────────
 

@@ -60,6 +60,23 @@ impl Planet {
             Planet::Pluto   => "pluto",
         }
     }
+
+    /// Reverse of `name()`: parse a lowercase planet name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "sun"     => Planet::Sun,
+            "moon"    => Planet::Moon,
+            "mercury" => Planet::Mercury,
+            "venus"   => Planet::Venus,
+            "mars"    => Planet::Mars,
+            "jupiter" => Planet::Jupiter,
+            "saturn"  => Planet::Saturn,
+            "uranus"  => Planet::Uranus,
+            "neptune" => Planet::Neptune,
+            "pluto"   => Planet::Pluto,
+            _ => return None,
+        })
+    }
 }
 
 /// Geocentric ecliptic longitudes (degrees, 0–360) for each body.

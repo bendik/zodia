@@ -30,13 +30,13 @@ use p2panda_net::sync::LogSync;
 use p2panda_net::{Endpoint, Gossip};
 use p2panda_store::logs::LogStore;
 use p2panda_store::operations::OperationStore;
-use p2panda_store::{SqliteStore, SqliteStoreBuilder};
+use p2panda_store::{SqliteStore, SqliteStoreBuilder, Transaction};
 use p2panda_sync::protocols::TopicLogSyncEvent;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use zodia_ops::InterpOp;
+use zodia_ops::{DocOp, InterpOp};
 
 // ── sync event ────────────────────────────────────────────────────────────────
 
@@ -196,13 +196,29 @@ impl ZodiaSyncNode {
         })
     }
 
-    /// Publish a locally authored `InterpOp` to the p2panda log.
-    ///
-    /// Encodes the op, builds + signs a p2panda header, persists locally
-    /// (so the next publish picks up the right backlink and crash-mid-publish
-    /// recovers), then broadcasts via LogSync.
+    /// Publish a locally authored `InterpOp` to the p2panda log.  See
+    /// [`Self::publish_doc`] for the Phase F-collab `DocOp` equivalent.
     pub async fn publish(&mut self, op: InterpOp) -> Result<(), SyncError> {
-        let payload_bytes = op.encode();
+        self.publish_bytes(op.encode()).await
+    }
+
+    /// Publish a locally authored `DocOp` (Phase F-collab) to the same
+    /// log.  Same backlink/seq/sign mechanics as [`Self::publish`].
+    pub async fn publish_doc(&mut self, op: DocOp) -> Result<(), SyncError> {
+        self.publish_bytes(op.encode()).await
+    }
+
+    async fn publish_bytes(&mut self, payload_bytes: Vec<u8>) -> Result<(), SyncError> {
+        // p2panda-store's `insert_operation` runs inside a transaction
+        // started by `begin()`.  Without it, the store returns
+        // `TransactionMissing` ("tried to interact with inexistant
+        // transaction").  We open a single transaction spanning the
+        // latest-entry read + insert, commit before publishing on the
+        // network so the local log tip is authoritative.
+        let permit = self.sync_store
+            .begin()
+            .await
+            .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
         // Determine the next sequence number + backlink from our log tip.
         let latest: Option<Operation<()>> = self.sync_store
@@ -237,8 +253,18 @@ impl ZodiaSyncNode {
             body:   Some(body_op),
         };
 
-        self.sync_store
+        if let Err(e) = self.sync_store
             .insert_operation(&op_hash, &operation, &INTERP_LOG_ID)
+            .await
+        {
+            // Rollback drops the permit and frees the semaphore so the
+            // next publish can begin a new txn.
+            let _ = self.sync_store.rollback(permit).await;
+            return Err(SyncError::PandaStore(e.to_string()));
+        }
+
+        self.sync_store
+            .commit(permit)
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
