@@ -85,7 +85,7 @@
 
   <releases>
     <release version="0.7.1" date="2026-07-24">
-      <description><p></p></description>
+      <description><p>The Sky tab is now a live activity feed instead of a static transit table — affirmations on your interpretations, replies to your threads, and transit aspects (including house transits) entering or leaving orb all show up as they happen, and the notification bell now badges for real when something targets your own work. Aspect pages move from competing write-ups to a single interpretation everyone edits together, with a "Previous version" toggle to compare revisions; if someone edits a block you wrote, you're notified and can veto the change within 7 days to restore your version.</p></description>
     </release>
     <release version="0.7.0" date="2026-05-30">
       <description><p>Affirmations (♡) now travel with the rest of the community log — when someone ♡s an interpretation on one device the count converges everywhere within seconds. Replies are first-class too: a 💬 button on every community reading lets you write a response that hangs as a thread under the original. The Network tab now shows a "Sync activity" panel so you can see which peers your device is catching up with. Reconnecting to peers you've already met no longer asks for consent again — the second handshake auto-accepts on both sides.</p></description>
