@@ -233,6 +233,18 @@ async fn observes_doc_affirmation(world: &mut ZodiaWorld, name: String, key: Str
     assert!(seen, "{name} did not observe a doc affirmation on {key} within {secs}s");
 }
 
+#[then(expr = "{string} has caught up with at least {int} peer")]
+async fn has_caught_up_with_at_least(world: &mut ZodiaWorld, name: String, min_peers: usize) {
+    let status = world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .sync_status();
+    let caught_up = status.borrow().peers_caught_up;
+    assert!(
+        caught_up >= min_peers,
+        "{name}'s sync_status shows {caught_up} peers caught up, expected at least {min_peers}"
+    );
+}
+
 /// Poll `name`'s event stream up to `secs` for an event matching
 /// `predicate`. Returns `true` if found before the deadline, `false` if
 /// the deadline passed with no match — a bounded, honest way to assert
