@@ -157,8 +157,6 @@ pub enum AppMsg {
     Reconnect(PeerId),
     /// App window is closing — send Away to all connected peers.
     GoingOffline,
-    /// User submitted a new interpretation — broadcast it to all live peers.
-    ShareInterp(InterpEntry),
     /// A typed state event from the inbound `ZodiaPipeline`.  Replaces
     /// the legacy `SyncInterpReceived` path: now everything that arrives
     /// over LogSync flows through the pipeline first.
@@ -166,13 +164,6 @@ pub enum AppMsg {
     /// A LogSync session lifecycle event (started / finished / failed)
     /// for surfacing in the Network tab.
     SyncLifecycle(SyncLifecycle),
-    /// User tapped the affirm button on a community interpretation row.
-    AffirmInterp { log_id: [u8; 32] },
-    /// User submitted a fresh community interpretation from a detail page.
-    SubmitInterp { key: InterpKey, body: String },
-    /// User wrote a response under an existing community interpretation.
-    /// `parent_log_id` is the BLAKE3 content-hash of the parent.
-    SubmitResponse { parent_log_id: [u8; 32], body: String },
     /// User asked to revoke + delete a self-authored interpretation.
     /// Authorisation enforced at the store: only rows whose `author_pk`
     /// matches the local identity are tombstoned.  Network propagation
@@ -1028,26 +1019,6 @@ impl AsyncComponent for AppModel {
                     self.chat_logs.entry(dest).or_default().push((true, text));
                 }
             }
-            AppMsg::ShareInterp(entry) => {
-                // Reload activity feed (insert_signed already ran in aspect_view).
-                self.recent_interps = self.store
-                    .recent_community_interps(12).await.unwrap_or_default();
-                self.network_changed_token += 1;
-                // Fast path: send directly to already-connected peers.
-                let msg = ChannelMsg::InterpShare { entries: vec![entry.clone()] };
-                for (peer_id, channel) in &self.connected_channels {
-                    let peer_hex = hex::encode_upper(&peer_id.0[..4]);
-                    if let Err(e) = channel.send_msg(&msg).await {
-                        warn!(peer = %peer_hex, "interp share failed: {e}");
-                    }
-                }
-                // Slow path: publish to the p2panda log for offline catch-up sync.
-                if let Some(client) = &self.zodia_client {
-                    if let Err(e) = client.author(&entry.interp_key, entry.body).await {
-                        warn!("author publish: {e}");
-                    }
-                }
-            }
             AppMsg::SyncStateEvent(event) => {
                 let me: [u8; 32] = self.identity.public_key();
                 let now_ts: u64 = std::time::SystemTime::now()
@@ -1292,61 +1263,6 @@ impl AsyncComponent for AppModel {
                 );
                 self.sync_peer_status.insert(remote_pk, status);
                 self.network_changed_token += 1;
-            }
-            AppMsg::AffirmInterp { log_id } => {
-                let author_pk = self.identity.public_key();
-                // Local write — the count we display updates immediately.
-                match self.store.affirm(&log_id, &author_pk).await {
-                    Ok(_) => self.network_changed_token += 1,
-                    Err(e) => warn!("affirm failed: {e}"),
-                }
-                // Network propagation — peers' AffirmAdded handlers will
-                // mirror the same (log_id, our pubkey) row into their stores,
-                // so counts converge.
-                if let Some(client) = &self.zodia_client {
-                    if let Err(e) = client.affirm(p2panda_core::Hash::from_bytes(log_id)).await {
-                        warn!("affirm publish: {e}");
-                    }
-                }
-            }
-            AppMsg::SubmitInterp { key, body } => {
-                let payload    = ZodiaStore::signing_payload(&key, &body);
-                let author_sig = self.identity.sign(&payload);
-                let author_pk  = self.identity.public_key();
-                match self.store
-                    .insert_signed(&key, &body, &author_pk, &author_sig)
-                    .await
-                {
-                    Ok(_) => {
-                        sender.input(AppMsg::ShareInterp(InterpEntry {
-                            interp_key: key.to_sig(),
-                            body,
-                            author_pk,
-                            author_sig: author_sig.to_vec(),
-                        }));
-                    }
-                    Err(e) => warn!("insert_signed failed: {e}"),
-                }
-            }
-            AppMsg::SubmitResponse { parent_log_id, body } => {
-                let author_pk = self.identity.public_key();
-                // Local write — response shows up immediately under the parent
-                // in any open detail page.
-                match self.store
-                    .insert_response_from_op(&parent_log_id, &body, &author_pk)
-                    .await
-                {
-                    Ok(_) => self.network_changed_token += 1,
-                    Err(e) => warn!("submit response local insert: {e}"),
-                }
-                // Network propagation — peers' ResponseAdded handlers persist
-                // the same row and join it under the parent on display.
-                if let Some(client) = &self.zodia_client {
-                    let parent = p2panda_core::Hash::from_bytes(parent_log_id);
-                    if let Err(e) = client.respond_to(parent, body).await {
-                        warn!("respond_to publish: {e}");
-                    }
-                }
             }
             AppMsg::PublishDocEdit { interp_key, new_body } => {
                 let me: [u8; 32] = self.identity.public_key();
