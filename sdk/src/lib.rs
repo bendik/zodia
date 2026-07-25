@@ -18,6 +18,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::warn;
 
+use p2panda_net::{Endpoint, Gossip};
 use zodia_core::{BirthData, topic_key_global};
 use zodia_net::{NetworkConfig, PeerId, ZodiaNetwork};
 use zodia_ops::{DocOp, InterpOp};
@@ -25,6 +26,17 @@ use zodia_pipeline::ZodiaPipeline;
 use zodia_sync::{SyncEvent, SyncError, ZodiaSyncNode};
 
 pub use zodia_pipeline::StateEvent;
+
+/// Per-peer catch-up lifecycle, raw (unlike [`SyncStatus`]'s aggregate
+/// counts) — for UIs that want to show per-peer detail (e.g. a "Sync
+/// activity" panel listing which peers are caught up and how many ops
+/// each sent), not just a summary count.
+#[derive(Debug, Clone)]
+pub enum SyncLifecycleEvent {
+    Started { remote: [u8; 32] },
+    Finished { remote: [u8; 32], received_ops: u64 },
+    Failed { remote: [u8; 32], error: String },
+}
 
 // ── public config / errors ──────────────────────────────────────────────────
 
@@ -63,10 +75,11 @@ pub struct SyncStatus {
 /// own receiver); the command methods go through one shared channel to the
 /// background thread.
 pub struct ZodiaClient {
-    cmd_tx:     mpsc::Sender<Command>,
-    events_tx:  broadcast::Sender<StateEvent>,
-    status_rx:  watch::Receiver<SyncStatus>,
-    node_id:    PeerId,
+    cmd_tx:       mpsc::Sender<Command>,
+    events_tx:    broadcast::Sender<StateEvent>,
+    lifecycle_tx: broadcast::Sender<SyncLifecycleEvent>,
+    status_rx:    watch::Receiver<SyncStatus>,
+    node_id:      PeerId,
     #[cfg(test)]
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -74,13 +87,45 @@ pub struct ZodiaClient {
 impl ZodiaClient {
     /// Spawn the dedicated thread, bring up network + sync + pipeline, and
     /// return once the endpoint is live. Callable from any async runtime.
+    /// Owns a fresh `ZodiaNetwork` internally — if the caller also needs
+    /// `ZodiaNetwork` directly (e.g. for Tier-1 consent/chat/AV, which this
+    /// SDK doesn't cover), use [`Self::attach`] instead so both share one
+    /// endpoint rather than running two independent networks under the
+    /// same identity.
     pub async fn connect(config: ZodiaClientConfig) -> Result<Self, ClientError> {
+        Self::spawn_thread(NetworkSource::Owned(config)).await
+    }
+
+    /// Same as [`Self::connect`], but reuses an already-running
+    /// `ZodiaNetwork`'s endpoint and gossip engine instead of spawning a
+    /// new one. For a caller (like the relm4 app) that also needs
+    /// `ZodiaNetwork` directly for Tier-1 consent/chat/AV — those aren't
+    /// part of this SDK's scope, so the caller keeps owning `net` and
+    /// handling its `ZodiaNetEvent`s itself; this just attaches the
+    /// sync/pipeline layer onto the same transport.
+    pub async fn attach(
+        net:         &ZodiaNetwork,
+        signing_key: SigningKey,
+        data_dir:    PathBuf,
+    ) -> Result<Self, ClientError> {
+        Self::spawn_thread(NetworkSource::Attached {
+            endpoint: net.endpoint(),
+            gossip:   net.gossip(),
+            node_id:  net.node_id(),
+            signing_key,
+            data_dir,
+        }).await
+    }
+
+    async fn spawn_thread(source: NetworkSource) -> Result<Self, ClientError> {
         let (ready_tx, ready_rx) = oneshot::channel::<Result<ConnectReady, ClientError>>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(64);
         let (events_tx, _events_rx) = broadcast::channel::<StateEvent>(256);
+        let (lifecycle_tx, _lifecycle_rx) = broadcast::channel::<SyncLifecycleEvent>(256);
         let (status_tx, status_rx) = watch::channel(SyncStatus::default());
 
         let events_tx_bg = events_tx.clone();
+        let lifecycle_tx_bg = lifecycle_tx.clone();
         let handle = thread::Builder::new()
             .name("zodia-sdk".into())
             .spawn(move || {
@@ -89,7 +134,7 @@ impl ZodiaClient {
                     .build()
                     .expect("zodia-sdk: build current-thread runtime");
                 let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, run(config, cmd_rx, events_tx_bg, status_tx, ready_tx));
+                local.block_on(&rt, run(source, cmd_rx, events_tx_bg, lifecycle_tx_bg, status_tx, ready_tx));
             })
             .expect("zodia-sdk: spawn dedicated thread");
 
@@ -104,6 +149,7 @@ impl ZodiaClient {
         Ok(Self {
             cmd_tx,
             events_tx,
+            lifecycle_tx,
             status_rx,
             node_id,
             #[cfg(test)]
@@ -123,6 +169,14 @@ impl ZodiaClient {
     /// state matters for a status panel.
     pub fn sync_status(&self) -> watch::Receiver<SyncStatus> {
         self.status_rx.clone()
+    }
+
+    /// Raw per-peer catch-up lifecycle — for a UI that lists individual
+    /// peers and their status, rather than just [`Self::sync_status`]'s
+    /// aggregate counts. `broadcast`, same multi-listener rationale as
+    /// [`Self::events`].
+    pub fn sync_lifecycle_events(&self) -> broadcast::Receiver<SyncLifecycleEvent> {
+        self.lifecycle_tx.subscribe()
     }
 
     pub fn node_id(&self) -> PeerId {
@@ -229,6 +283,26 @@ struct ConnectReady {
     node_id: PeerId,
 }
 
+/// Where `run()` gets its network transport from — see [`ZodiaClient::connect`]
+/// vs [`ZodiaClient::attach`].
+enum NetworkSource {
+    /// Spawn a fresh `ZodiaNetwork` inside `run()` and keep it alive for
+    /// the connection's lifetime (dropping it tears down discovery/mDNS —
+    /// see `ZodiaNetwork`'s field comments in `net/src/network.rs`).
+    Owned(ZodiaClientConfig),
+    /// Reuse a `ZodiaNetwork` the caller already owns and keeps alive
+    /// independently — `run()` never touches `ZodiaNetwork` itself here,
+    /// only the `Endpoint`/`Gossip` handles extracted from it, which are
+    /// cheap `Send + Clone` references to the same underlying actors.
+    Attached {
+        endpoint:    Endpoint,
+        gossip:      Gossip,
+        node_id:     PeerId,
+        signing_key: SigningKey,
+        data_dir:    PathBuf,
+    },
+}
+
 enum Command {
     Author { interp_key: String, body: String, reply: Reply },
     Revoke { target_log_id: Hash, reply: Reply },
@@ -254,41 +328,59 @@ type Reply = oneshot::Sender<Result<(), ClientError>>;
 /// `ready_tx`, then pumps commands in and `StateEvent`s out until `cmd_rx`
 /// closes (i.e. the `ZodiaClient` was dropped).
 async fn run(
-    config:    ZodiaClientConfig,
-    mut cmd_rx: mpsc::Receiver<Command>,
-    events_tx: broadcast::Sender<StateEvent>,
-    status_tx: watch::Sender<SyncStatus>,
-    ready_tx:  oneshot::Sender<Result<ConnectReady, ClientError>>,
+    source:       NetworkSource,
+    mut cmd_rx:   mpsc::Receiver<Command>,
+    events_tx:    broadcast::Sender<StateEvent>,
+    lifecycle_tx: broadcast::Sender<SyncLifecycleEvent>,
+    status_tx:    watch::Sender<SyncStatus>,
+    ready_tx:     oneshot::Sender<Result<ConnectReady, ClientError>>,
 ) {
-    let net_config = NetworkConfig { signing_key: config.signing_key.clone() };
-    let (net, mut net_events) = match ZodiaNetwork::spawn(net_config, &config.birth).await {
-        Ok(pair) => pair,
-        Err(e) => { let _ = ready_tx.send(Err(ClientError::Network(e.to_string()))); return; }
+    // `_owned_net` keeps an owned `ZodiaNetwork` alive for this whole
+    // function's scope (dropping it early would tear down discovery) —
+    // `None` in `Attached` mode, where the caller keeps their own alive.
+    let (endpoint, gossip, node_id, signing_key, data_dir, _owned_net, net_events) = match source {
+        NetworkSource::Owned(config) => {
+            let net_config = NetworkConfig { signing_key: config.signing_key.clone() };
+            let (net, net_events) = match ZodiaNetwork::spawn(net_config, &config.birth).await {
+                Ok(pair) => pair,
+                Err(e) => { let _ = ready_tx.send(Err(ClientError::Network(e.to_string()))); return; }
+            };
+            let _ = net.publish_announce().await;
+            let endpoint = net.endpoint();
+            let gossip = net.gossip();
+            let node_id = net.node_id();
+            (endpoint, gossip, node_id, config.signing_key, config.data_dir, Some(net), Some(net_events))
+        }
+        NetworkSource::Attached { endpoint, gossip, node_id, signing_key, data_dir } => {
+            (endpoint, gossip, node_id, signing_key, data_dir, None, None)
+        }
     };
-    let _ = net.publish_announce().await;
 
-    let panda_key = PandaSigningKey::from_bytes(config.signing_key.as_bytes());
+    let panda_key = PandaSigningKey::from_bytes(signing_key.as_bytes());
     let sync_topic = Topic::from(topic_key_global().0);
     let mut node = match ZodiaSyncNode::spawn(
-        panda_key, net.endpoint(), net.gossip(), sync_topic, &config.data_dir,
+        panda_key, endpoint, gossip, sync_topic, &data_dir,
     ).await {
         Ok(n) => n,
         Err(e) => { let _ = ready_tx.send(Err(ClientError::Sync(e.to_string()))); return; }
     };
 
-    let node_id = net.node_id();
     if ready_tx.send(Ok(ConnectReady { node_id })).is_err() {
-        // Caller dropped the `connect()` future (or the whole client)
-        // before we finished — nobody left to serve, exit quietly.
+        // Caller dropped the `connect()`/`attach()` future (or the whole
+        // client) before we finished — nobody left to serve, exit quietly.
         return;
     }
 
-    // v1 doesn't act on peer-discovery/consent events, but the sender side
-    // (`spawn_gossip_listener` et al) does `.send().await` into this
-    // channel — an undrained receiver would eventually stall those tasks.
-    tokio::task::spawn_local(async move {
-        while net_events.recv().await.is_some() {}
-    });
+    // Only in `Owned` mode: v1 doesn't act on peer-discovery/consent
+    // events, but the sender side (`spawn_gossip_listener` et al) does
+    // `.send().await` into this channel — an undrained receiver would
+    // eventually stall those tasks. In `Attached` mode the caller already
+    // owns and drains their `ZodiaNetwork`'s events themselves.
+    if let Some(mut net_events) = net_events {
+        tokio::task::spawn_local(async move {
+            while net_events.recv().await.is_some() {}
+        });
+    }
 
     let pipeline = ZodiaPipeline::new();
     let mut peer_caught_up: HashMap<[u8; 32], bool> = HashMap::new();
@@ -331,17 +423,27 @@ async fn run(
                         }
                     }
                     SyncEvent::SyncStarted { remote } => {
-                        peer_caught_up.insert(*remote.as_bytes(), false);
+                        let remote_bytes = *remote.as_bytes();
+                        peer_caught_up.insert(remote_bytes, false);
                         let _ = status_tx.send(status_from(&peer_caught_up));
+                        let _ = lifecycle_tx.send(SyncLifecycleEvent::Started { remote: remote_bytes });
                     }
-                    SyncEvent::SyncFinished { remote, .. } => {
-                        peer_caught_up.insert(*remote.as_bytes(), true);
+                    SyncEvent::SyncFinished { remote, received_ops, .. } => {
+                        let remote_bytes = *remote.as_bytes();
+                        peer_caught_up.insert(remote_bytes, true);
                         let _ = status_tx.send(status_from(&peer_caught_up));
+                        let _ = lifecycle_tx.send(SyncLifecycleEvent::Finished {
+                            remote: remote_bytes, received_ops,
+                        });
                     }
                     SyncEvent::Failed { remote, error } => {
                         warn!("zodia-sdk: sync failed: {error}");
-                        peer_caught_up.insert(*remote.as_bytes(), false);
+                        let remote_bytes = *remote.as_bytes();
+                        peer_caught_up.insert(remote_bytes, false);
                         let _ = status_tx.send(status_from(&peer_caught_up));
+                        let _ = lifecycle_tx.send(SyncLifecycleEvent::Failed {
+                            remote: remote_bytes, error,
+                        });
                     }
                 }
             }
@@ -441,6 +543,71 @@ mod tests {
         let id_a = client.node_id();
         let id_b = client.node_id();
         assert_eq!(id_a, id_b);
+    }
+
+    #[tokio::test]
+    async fn attach_reuses_an_existing_zodia_networks_identity() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let birth = zodia_core::birth_from_coords(2_451_545.0, 59.9, 10.7, 9);
+        let net_config = zodia_net::NetworkConfig { signing_key: signing_key.clone() };
+        let (net, _net_events) = zodia_net::ZodiaNetwork::spawn(net_config, &birth).await
+            .expect("network spawns");
+        let tmp = tempdir_shim::TempDir::new();
+
+        let client = ZodiaClient::attach(&net, signing_key, tmp.path().to_path_buf()).await
+            .expect("attach");
+
+        assert_eq!(client.node_id(), net.node_id());
+    }
+
+    /// Proves `attach()` isn't just constructible but carries real sync
+    /// traffic — two independent "app instances", each owning its own
+    /// `ZodiaNetwork` and attaching a `ZodiaClient` to it, still converge
+    /// on an edit, the same guarantee `subscribe_publish_receive_round_trip`
+    /// proves for `connect()`.
+    #[tokio::test]
+    async fn attach_round_trip_matches_connect_round_trip() {
+        let birth = zodia_core::birth_from_coords(2_451_545.0, 59.9, 10.7, 9);
+
+        let key_a = SigningKey::generate(&mut OsRng);
+        // `net_a`/`net_b` stay bound for this whole test — dropping a
+        // ZodiaNetwork tears down its discovery/mDNS components, which
+        // the attached ZodiaClient depends on for the entire exchange.
+        let (net_a, _events_a) = zodia_net::ZodiaNetwork::spawn(
+            zodia_net::NetworkConfig { signing_key: key_a.clone() }, &birth,
+        ).await.expect("network a spawns");
+        let tmp_a = tempdir_shim::TempDir::new();
+        let a = ZodiaClient::attach(&net_a, key_a, tmp_a.path().to_path_buf()).await
+            .expect("attach a");
+
+        let key_b = SigningKey::generate(&mut OsRng);
+        let (net_b, _events_b) = zodia_net::ZodiaNetwork::spawn(
+            zodia_net::NetworkConfig { signing_key: key_b.clone() }, &birth,
+        ).await.expect("network b spawns");
+        let tmp_b = tempdir_shim::TempDir::new();
+        let b = ZodiaClient::attach(&net_b, key_b, tmp_b.path().to_path_buf()).await
+            .expect("attach b");
+
+        let key = "natal:sdk_attach_test_round_trip";
+        a.subscribe(key).await.expect("a subscribe");
+        b.subscribe(key).await.expect("b subscribe");
+
+        let mut a_events = a.events();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        b.edit(key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]]).await
+            .expect("b edit");
+
+        let event = timeout(Duration::from_secs(15), async {
+            loop {
+                match a_events.recv().await.expect("events channel closed") {
+                    StateEvent::DocEdited { interp_key, .. } if interp_key == key => return true,
+                    _ => continue,
+                }
+            }
+        }).await;
+
+        assert!(event.is_ok(), "a did not observe b's edit within 15s (attach path)");
     }
 
     #[tokio::test]
