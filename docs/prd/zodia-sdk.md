@@ -1,6 +1,6 @@
 # PRD: `zodia-sdk` — relm4-agnostic client facade over the p2p data flow
 
-**Status:** core facade shipped and tested — `app.rs` migration (deleting `SyncPublishMsg`/`try_spawn_network`/`try_spawn_sync`) not started
+**Status:** shipped and migrated — `app.rs` runs entirely on `ZodiaClient` now, `SyncPublishMsg`/`ZodiaSyncNode`/`ZodiaPipeline` no longer referenced anywhere in `app/`
 **Branch:** `main`
 **Foundation already landed:** `zodia-net` (transport/discovery), `zodia-sync` (per-key LogSync, Phase C-2), `zodia-pipeline` (op decode + materialisation → `StateEvent`). All three exist and work; nothing here changes their internals or the wire format.
 
@@ -168,7 +168,19 @@ Shipped: the `zodia-sdk` crate as sketched above — `ZodiaClient::connect`/`eve
 
 That round-trip test caught a genuine pre-existing bug while being written: `p2panda_store::topics::TopicStore::associate(topic, author, log_id)` was never being called anywhere in `zodia-sync`, for *any* topic, including the legacy global one — so `topics_v1` stayed empty and a peer's catch-up query ("local topic logs retrieved") could never find anything to serve, regardless of which topic model was in use. Only an already-open live sync session happened to mask this (direct in-memory forwarding, independent of `topics_v1`), which is exactly the kind of narrow, timing-dependent path Phase C-2's shorter-lived per-key topic subscriptions made much more likely to miss. Fixed in `sync/src/lib.rs::publish_bytes` — `associate` now runs inside the same transaction as `insert_operation`, before commit (its own `self.tx(..)` call requires an already-open transaction, same constraint `insert_operation` has). This fix benefits the already-shipped Phase C-2 log-splitting too, not just the SDK.
 
-Not started: migrating `app.rs` off `SyncPublishMsg`/`try_spawn_network`/`try_spawn_sync` onto `ZodiaClient`. The bridge sketch in this doc is unverified against the real relm4 message flow.
+**`app.rs` migration, done.** The bridge sketch above was verified against the real relm4 message flow, with two real gaps found and fixed before it could work at all:
+
+1. **`ZodiaClient::connect` always spawned its own `ZodiaNetwork`.** `app.rs` also needs `ZodiaNetwork` directly, for Tier-1 consent/chat/AV — capabilities this SDK doesn't cover and was never meant to (see "Out of Scope"). Two independent `ZodiaNetwork`s under the same signing key would have been wasteful and wrong (duplicate iroh endpoints, duplicate discovery/announce traffic, same identity racing itself). Added `ZodiaClient::attach(&net, signing_key, data_dir)`, which reuses an already-running `ZodiaNetwork`'s `Endpoint`/`Gossip` instead of spawning new ones — `app.rs` keeps owning and draining its own `ZodiaNetwork` for Tier-1 exactly as before; only the sync/pipeline layer moved onto the SDK. `run()`'s internals were split around a `NetworkSource::{Owned, Attached}` enum; the `Owned` case has to keep the `ZodiaNetwork` bound for the connection's whole lifetime, not just setup, since dropping it early tears down discovery/mDNS.
+2. **`sync_status()` only exposed aggregate counts.** `app.rs`'s existing "Sync activity" panel needs raw per-peer `SyncStarted`/`SyncFinished`/`Failed` with `remote_pk` and `received_ops`, not just `{peers_known, peers_caught_up}`. Added `SyncLifecycleEvent` + `sync_lifecycle_events()`, broadcast alongside (not instead of) the aggregate.
+3. **Two legacy ops had no `ZodiaClient` method at all**: `InterpOp::Affirm` (the old per-row ♡, still used by `AppMsg::AffirmInterp`) and `InterpOp::RespondTo` (threaded replies under a legacy interpretation, `AppMsg::SubmitResponse`). This SDK's original sketch was scoped around the new collaborative-doc verbs plus author/revoke and missed these two live call sites. Added `affirm()` and `respond_to()`.
+
+Every one of the 9 `SyncPublishMsg::{Publish,PublishDoc}` call sites in `app.rs` now calls the matching `ZodiaClient` method directly and `.await`s a real `Result` (logged on error) instead of `try_send`-and-forget. `subscribe_own_chart_keys` awaits `client.subscribe` per key instead of firing into a channel. `SyncPublishMsg`, `try_spawn_sync`'s old body, and the direct `zodia_sync`/`zodia_pipeline` imports in `app.rs` are gone — `app/Cargo.toml` no longer depends on `zodia-sync` at all.
+
+Verified two ways: `cargo build --workspace` clean (one warning, an unused import, fixed), and the compiled binary actually launched under a real X11/Wayland session (`XDG_DATA_HOME` pointed at a scratch dir to avoid touching real user data) — completed setup, spawned the network via the new `attach()` path twice (cold-start `init()` path and the `ConfirmBirth` path), wrote to `sync_log.db`/`interpretations.db` in the scratch dir, ran stably for several minutes with no panics or errors beyond the pre-existing benign `Endpoint dropped without calling Endpoint::close` warning already seen throughout this project's test suite, then shut down cleanly on `SIGTERM`.
+
+Two new `zodia-sdk` unit tests cover `attach()` specifically: `attach_reuses_an_existing_zodia_networks_identity` (node_id matches the shared network's) and `attach_round_trip_matches_connect_round_trip` (two independently-attached clients still converge on an edit — proves `attach()` carries real traffic, not just constructs).
+
+**Still open:** `affirm()`/`respond_to()` have no cucumber coverage yet (added under time pressure to unblock the migration, not yet given the same outside-in treatment as the rest of the write surface). The `Lagged` backpressure test from Testing Decisions above is also still open.
 
 ## Out of Scope
 

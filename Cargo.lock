@@ -7706,8 +7706,8 @@ dependencies = [
  "zodia-net",
  "zodia-ops",
  "zodia-pipeline",
+ "zodia-sdk",
  "zodia-store",
- "zodia-sync",
 ]
 
 [[package]]

@@ -30,9 +30,8 @@ use zodia_crypto::{ecies_decrypt, ecies_encrypt};
 use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
                 NetworkConfig, PeerId, PeerStatus, RelayPayload, ZodiaNetEvent, ZodiaNetwork};
 use zodia_store::{StoreError, ZodiaStore, BaselineStore};
-use zodia_sync::{SyncEvent, ZodiaSyncNode};
-use zodia_ops::InterpOp;
-use zodia_pipeline::{StateEvent, ZodiaPipeline};
+use zodia_pipeline::StateEvent;
+use zodia_sdk::{SyncLifecycleEvent, ZodiaClient};
 
 use relm4::factory::FactoryVecDeque;
 
@@ -284,7 +283,7 @@ pub struct AppModel {
 
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
-    sync_publish_tx: Option<tokio::sync::mpsc::Sender<SyncPublishMsg>>,
+    zodia_client: Option<ZodiaClient>,
 
     /// Most recent community interpretation contributions, for the network tab.
     recent_interps: Vec<zodia_store::RecentInterp>,
@@ -500,7 +499,7 @@ impl AsyncComponent for AppModel {
             chat_logs,
             stargazer_nicknames,
             unread_messages: HashMap::new(),
-            sync_publish_tx: None,
+            zodia_client: None,
             recent_interps: Vec::new(),
             sync_peer_status: HashMap::new(),
             feed_view_sender: None,
@@ -580,9 +579,9 @@ impl AsyncComponent for AppModel {
                 };
                 info!("network up, node ···{}", model.node_id_text);
                 let _ = net.publish_announce().await;
-                model.sync_publish_tx = try_spawn_sync(&model.config, &net, &sender).await;
-                if let (Some(tx), Some(chart)) = (&model.sync_publish_tx, &model.chart) {
-                    subscribe_own_chart_keys(chart, tx);
+                model.zodia_client = try_spawn_sync(&model.config, &net, &sender).await;
+                if let (Some(client), Some(chart)) = (&model.zodia_client, &model.chart) {
+                    subscribe_own_chart_keys(chart, client).await;
                 }
                 model.network = Some(Arc::new(net));
                 start_network_command(&sender, rx);
@@ -648,9 +647,9 @@ impl AsyncComponent for AppModel {
                         hex::encode_upper(&nid.0[..4])
                     };
                     let _ = net.publish_announce().await;
-                    self.sync_publish_tx = try_spawn_sync(&self.config, &net, &sender).await;
-                    if let (Some(tx), Some(chart)) = (&self.sync_publish_tx, &self.chart) {
-                        subscribe_own_chart_keys(chart, tx);
+                    self.zodia_client = try_spawn_sync(&self.config, &net, &sender).await;
+                    if let (Some(client), Some(chart)) = (&self.zodia_client, &self.chart) {
+                        subscribe_own_chart_keys(chart, client).await;
                     }
                     self.network = Some(Arc::new(net));
                     start_network_command(&sender, rx);
@@ -1043,12 +1042,10 @@ impl AsyncComponent for AppModel {
                     }
                 }
                 // Slow path: publish to the p2panda log for offline catch-up sync.
-                if let Some(tx) = &self.sync_publish_tx {
-                    let op = InterpOp::Author {
-                        interp_key: entry.interp_key,
-                        body:       entry.body,
-                    };
-                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
+                if let Some(client) = &self.zodia_client {
+                    if let Err(e) = client.author(&entry.interp_key, entry.body).await {
+                        warn!("author publish: {e}");
+                    }
                 }
             }
             AppMsg::SyncStateEvent(event) => {
@@ -1306,11 +1303,10 @@ impl AsyncComponent for AppModel {
                 // Network propagation — peers' AffirmAdded handlers will
                 // mirror the same (log_id, our pubkey) row into their stores,
                 // so counts converge.
-                if let Some(tx) = &self.sync_publish_tx {
-                    let op = InterpOp::Affirm {
-                        target_log_id: p2panda_core::Hash::from_bytes(log_id),
-                    };
-                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
+                if let Some(client) = &self.zodia_client {
+                    if let Err(e) = client.affirm(p2panda_core::Hash::from_bytes(log_id)).await {
+                        warn!("affirm publish: {e}");
+                    }
                 }
             }
             AppMsg::SubmitInterp { key, body } => {
@@ -1345,12 +1341,11 @@ impl AsyncComponent for AppModel {
                 }
                 // Network propagation — peers' ResponseAdded handlers persist
                 // the same row and join it under the parent on display.
-                if let Some(tx) = &self.sync_publish_tx {
-                    let op = InterpOp::RespondTo {
-                        parent_log_id: p2panda_core::Hash::from_bytes(parent_log_id),
-                        body,
-                    };
-                    let _ = tx.try_send(SyncPublishMsg::Publish(op));
+                if let Some(client) = &self.zodia_client {
+                    let parent = p2panda_core::Hash::from_bytes(parent_log_id);
+                    if let Err(e) = client.respond_to(parent, body).await {
+                        warn!("respond_to publish: {e}");
+                    }
                 }
             }
             AppMsg::PublishDocEdit { interp_key, new_body } => {
@@ -1403,14 +1398,13 @@ impl AsyncComponent for AppModel {
                     ).await;
                 }
                 // Broadcast via sync.
-                if let Some(tx) = &self.sync_publish_tx {
-                    let op = zodia_ops::DocOp::Edit {
-                        interp_key:      interp_key.clone(),
-                        base_rev:        p2panda_core::Hash::from_bytes(base_rev),
-                        crdt_update:     edit.update_bytes,
-                        affected_blocks: edit.affected_blocks,
-                    };
-                    let _ = tx.try_send(SyncPublishMsg::PublishDoc(op));
+                if let Some(client) = &self.zodia_client {
+                    let base_rev = p2panda_core::Hash::from_bytes(base_rev);
+                    if let Err(e) = client.edit(
+                        &interp_key, base_rev, edit.update_bytes, edit.affected_blocks,
+                    ).await {
+                        warn!("edit publish: {e}");
+                    }
                 }
                 self.network_changed_token += 1;
             }
@@ -1424,12 +1418,11 @@ impl AsyncComponent for AppModel {
                 ).await {
                     self.network_changed_token += 1;
                     push_doc_body_refresh(&self.store, &key, &me).await;
-                    if let Some(tx) = &self.sync_publish_tx {
-                        let op = zodia_ops::DocOp::Veto {
-                            interp_key:        key.clone(),
-                            target_edit_op_id: p2panda_core::Hash::from_bytes(target_edit_op_id),
-                        };
-                        let _ = tx.try_send(SyncPublishMsg::PublishDoc(op));
+                    if let Some(client) = &self.zodia_client {
+                        let target = p2panda_core::Hash::from_bytes(target_edit_op_id);
+                        if let Err(e) = client.veto(&key, target).await {
+                            warn!("veto publish: {e}");
+                        }
                     }
                     if let Some(s) = &self.feed_view_sender {
                         let item = crate::feed_item::FeedItem::doc_rolled_back(
@@ -1444,17 +1437,17 @@ impl AsyncComponent for AppModel {
             AppMsg::AffirmDocRev { interp_key, target_rev } => {
                 let me: [u8; 32] = self.identity.public_key();
                 let _ = self.store.doc_affirm_rev(&interp_key, &target_rev, &me).await;
-                if let Some(tx) = &self.sync_publish_tx {
-                    let _ = tx.try_send(SyncPublishMsg::PublishDoc(
-                        zodia_ops::DocOp::AffirmRev { interp_key, target_rev }
-                    ));
+                if let Some(client) = &self.zodia_client {
+                    if let Err(e) = client.affirm_rev(&interp_key, target_rev).await {
+                        warn!("affirm_rev publish: {e}");
+                    }
                 }
             }
             AppMsg::EditorPresence { interp_key, joined } => {
-                if let Some(tx) = &self.sync_publish_tx {
-                    let _ = tx.try_send(SyncPublishMsg::PublishDoc(
-                        zodia_ops::DocOp::EditorPresence { interp_key, joined }
-                    ));
+                if let Some(client) = &self.zodia_client {
+                    if let Err(e) = client.set_editor_presence(&interp_key, joined).await {
+                        warn!("editor presence publish: {e}");
+                    }
                 }
             }
             AppMsg::StartEditorAudio { interp_key } => {
@@ -1517,11 +1510,11 @@ impl AsyncComponent for AppModel {
                             let _ = s.send(crate::feed_view::FeedViewMsg::Reset(items));
                         }
                         // Propagate to peers.
-                        if let Some(tx) = &self.sync_publish_tx {
-                            let op = InterpOp::Revoke {
-                                target_log_id: p2panda_core::Hash::from_bytes(log_id),
-                            };
-                            let _ = tx.try_send(SyncPublishMsg::Publish(op));
+                        if let Some(client) = &self.zodia_client {
+                            let target = p2panda_core::Hash::from_bytes(log_id);
+                            if let Err(e) = client.revoke(target).await {
+                                warn!("revoke publish: {e}");
+                            }
                         }
                     }
                     Ok(false) => warn!("revoke ignored: not your row, or already revoked"),
@@ -2414,135 +2407,73 @@ async fn try_spawn_network(
 
 /// Always-subscribed set (Phase C-2): the keys in the user's own natal
 /// chart, so the home aspect list and Sky feed stay live without needing a
-/// per-page subscribe on every cold start. Fire-and-forget over `try_send`
-/// like every other publish-channel send in this file — subscribing is not
-/// latency-critical and the channel has slack.
-fn subscribe_own_chart_keys(chart: &Chart, tx: &tokio::sync::mpsc::Sender<SyncPublishMsg>) {
+/// per-page subscribe on every cold start.
+async fn subscribe_own_chart_keys(chart: &Chart, client: &ZodiaClient) {
     for aspect in chart.natal_aspects() {
         let key = zodia_core::InterpKey::from_natal(&aspect).to_sig();
-        let _ = tx.try_send(SyncPublishMsg::Subscribe(key));
+        if let Err(e) = client.subscribe(&key).await {
+            warn!("chart-key subscribe {key}: {e}");
+        }
     }
 }
 
-/// Message type for sending publish requests to the background sync task.
-pub(crate) enum SyncPublishMsg {
-    Publish(InterpOp),
-    PublishDoc(zodia_ops::DocOp),
-    /// Open a key's per-key sync topic (Phase C-2). Idempotent.
-    Subscribe(String),
-    /// Close a key's per-key sync topic. Idempotent. Not yet sent by any
-    /// caller — the grace-period-unsubscribe UI wiring (open on aspect-page
-    /// visit, unsubscribe after N idle minutes) is unimplemented; this
-    /// variant exists so `zodia_sync::ZodiaSyncNode::unsubscribe` is already
-    /// reachable once that lands. See docs/prd/granular-topic-subscription.md.
-    #[allow(dead_code)]
-    Unsubscribe(String),
-}
-
-/// Spawn the LogSync background pump and return a channel for publishing.
-///
-/// Architecture:
-///   - `ZodiaSyncNode` exposes raw `Operation<()>` on `inbound_ops`.
-///   - A `ZodiaPipeline` decodes / materialises each op into `StateEvent`s.
-///   - We dispatch each `StateEvent` back to the model as `AppMsg::SyncStateEvent`.
-///   - Outbound publishes (`SyncPublishMsg::Publish(InterpOp)`) go straight
-///     to `node.publish`.
-///
-/// The pipeline is `!Send` (p2panda-stream is single-threaded by design),
-/// so the pump task runs on glib's main-thread context via
-/// `spawn_future_local`, not on tokio's multi-thread runtime.
+/// Bring up the sync/doc layer via `zodia-sdk`, attached to the already-running
+/// `net` (sharing its endpoint/gossip rather than spawning a second
+/// `ZodiaNetwork` under the same identity — `net` stays owned by the caller
+/// for Tier-1 consent/chat/AV, which this SDK doesn't cover). Bridges the
+/// client's `StateEvent`/`SyncLifecycleEvent` broadcast streams into
+/// `AppMsg::SyncStateEvent`/`AppMsg::SyncLifecycle` so the rest of the app
+/// is unchanged from the pre-SDK wiring — see docs/prd/zodia-sdk.md.
 async fn try_spawn_sync(
     config: &LocalConfig,
     net: &ZodiaNetwork,
     sender: &AsyncComponentSender<AppModel>,
-) -> Option<tokio::sync::mpsc::Sender<SyncPublishMsg>> {
-    use zodia_core::topic_key_global;
-
-    let signing_key = config.identity.to_panda_key();
-    let topic = p2panda_core::Topic::from(topic_key_global().0);
-
-    let node = match ZodiaSyncNode::spawn(
-        signing_key,
-        net.endpoint(),
-        net.gossip(),
-        topic,
-        config.data_dir(),
-    ).await {
-        Ok(n) => n,
-        Err(e) => { warn!("sync node spawn failed: {e}"); return None; }
+) -> Option<ZodiaClient> {
+    let signing_key = config.identity.signing_key().clone();
+    let client = match ZodiaClient::attach(net, signing_key, config.data_dir().to_path_buf()).await {
+        Ok(c) => c,
+        Err(e) => { warn!("zodia-sdk client attach failed: {e}"); return None; }
     };
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<SyncPublishMsg>(32);
-    let sender_bg = sender.clone();
-
-    glib::MainContext::default().spawn_local(async move {
-        let mut node = node;
-        let pipeline = ZodiaPipeline::new();
+    let mut events = client.events();
+    let sender_events = sender.clone();
+    tokio::spawn(async move {
         loop {
-            tokio::select! {
-                Some(msg) = rx.recv() => {
-                    match msg {
-                        SyncPublishMsg::Publish(op) => {
-                            if let Err(e) = node.publish(op).await {
-                                warn!("sync publish: {e}");
-                            }
-                        }
-                        SyncPublishMsg::PublishDoc(op) => {
-                            if let Err(e) = node.publish_doc(op).await {
-                                warn!("sync publish_doc: {e}");
-                            }
-                        }
-                        SyncPublishMsg::Subscribe(key) => {
-                            if let Err(e) = node.subscribe(&key).await {
-                                warn!("sync subscribe {key}: {e}");
-                            }
-                        }
-                        SyncPublishMsg::Unsubscribe(key) => {
-                            node.unsubscribe(&key);
-                        }
-                    }
+            match events.recv().await {
+                Ok(event) => sender_events.input(AppMsg::SyncStateEvent(event)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("state event stream lagged, dropped {n} events");
                 }
-                Some(sync_event) = node.inbound.recv() => {
-                    match sync_event {
-                        SyncEvent::OperationReceived(op) => {
-                            if pipeline.process(*op).await.is_err() {
-                                warn!("pipeline closed unexpectedly");
-                                break;
-                            }
-                            match pipeline.next().await {
-                                Ok(event) => sender_bg.input(AppMsg::SyncStateEvent(event)),
-                                Err(e)    => warn!("pipeline next: {e}"),
-                            }
-                        }
-                        SyncEvent::SyncStarted { remote } => {
-                            sender_bg.input(AppMsg::SyncLifecycle(
-                                SyncLifecycle::Started { remote_pk: *remote.as_bytes() },
-                            ));
-                        }
-                        SyncEvent::SyncFinished { remote, received_ops, .. } => {
-                            sender_bg.input(AppMsg::SyncLifecycle(
-                                SyncLifecycle::Finished {
-                                    remote_pk: *remote.as_bytes(),
-                                    received_ops,
-                                },
-                            ));
-                        }
-                        SyncEvent::Failed { remote, error } => {
-                            sender_bg.input(AppMsg::SyncLifecycle(
-                                SyncLifecycle::Failed {
-                                    remote_pk: *remote.as_bytes(),
-                                    error,
-                                },
-                            ));
-                        }
-                    }
-                }
-                else => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 
-    Some(tx)
+    let mut lifecycle = client.sync_lifecycle_events();
+    let sender_lifecycle = sender.clone();
+    tokio::spawn(async move {
+        loop {
+            let lifecycle_event = match lifecycle.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("sync lifecycle stream lagged, dropped {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            let app_event = match lifecycle_event {
+                SyncLifecycleEvent::Started { remote } =>
+                    SyncLifecycle::Started { remote_pk: remote },
+                SyncLifecycleEvent::Finished { remote, received_ops } =>
+                    SyncLifecycle::Finished { remote_pk: remote, received_ops },
+                SyncLifecycleEvent::Failed { remote, error } =>
+                    SyncLifecycle::Failed { remote_pk: remote, error },
+            };
+            sender_lifecycle.input(AppMsg::SyncLifecycle(app_event));
+        }
+    });
+
+    Some(client)
 }
 
 fn start_network_command(

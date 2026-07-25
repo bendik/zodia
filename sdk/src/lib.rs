@@ -220,6 +220,18 @@ impl ZodiaClient {
         self.call(|reply| Command::Revoke { target_log_id, reply }).await
     }
 
+    /// Affirm (♡) a legacy whole-interpretation, by its content hash.
+    /// Legacy model, log 0, global topic — see [`Self::revoke`]'s note.
+    pub async fn affirm(&self, target_log_id: Hash) -> Result<(), ClientError> {
+        self.call(|reply| Command::Affirm { target_log_id, reply }).await
+    }
+
+    /// Author a response threaded under a legacy whole-interpretation.
+    /// Legacy model, log 0, global topic — see [`Self::revoke`]'s note.
+    pub async fn respond_to(&self, parent_log_id: Hash, body: String) -> Result<(), ClientError> {
+        self.call(|reply| Command::RespondTo { parent_log_id, body, reply }).await
+    }
+
     /// Apply a CRDT edit to a key's collaborative doc.
     pub async fn edit(
         &self,
@@ -306,6 +318,8 @@ enum NetworkSource {
 enum Command {
     Author { interp_key: String, body: String, reply: Reply },
     Revoke { target_log_id: Hash, reply: Reply },
+    Affirm { target_log_id: Hash, reply: Reply },
+    RespondTo { parent_log_id: Hash, body: String, reply: Reply },
     Edit {
         interp_key:      String,
         base_rev:        Hash,
@@ -472,6 +486,14 @@ async fn handle_command(
         }
         Command::Revoke { target_log_id, reply } => {
             let res = node.publish(InterpOp::Revoke { target_log_id }).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::Affirm { target_log_id, reply } => {
+            let res = node.publish(InterpOp::Affirm { target_log_id }).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::RespondTo { parent_log_id, body, reply } => {
+            let res = node.publish(InterpOp::RespondTo { parent_log_id, body }).await.map_err(sync_err);
             let _ = reply.send(res);
         }
         Command::Edit { interp_key, base_rev, crdt_update, affected_blocks, reply } => {
