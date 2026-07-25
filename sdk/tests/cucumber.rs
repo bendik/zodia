@@ -140,6 +140,40 @@ async fn peer_affirms(world: &mut ZodiaWorld, name: String, key: String) {
         .expect("affirm succeeds");
 }
 
+#[when(expr = "{string} starts editing {string}")]
+async fn peer_starts_editing(world: &mut ZodiaWorld, name: String, key: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .set_editor_presence(&key, true)
+        .await
+        .expect("set_editor_presence(true) succeeds");
+}
+
+#[when(expr = "{string} stops editing {string}")]
+async fn peer_stops_editing(world: &mut ZodiaWorld, name: String, key: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .set_editor_presence(&key, false)
+        .await
+        .expect("set_editor_presence(false) succeeds");
+}
+
+#[then(expr = "{string} observes editor presence joined on {string} within {int} seconds")]
+async fn observes_presence_joined(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::EditorPresenceChanged { interp_key, joined: true, .. } if *interp_key == key)
+    }).await;
+    assert!(seen, "{name} did not observe editor-presence-joined on {key} within {secs}s");
+}
+
+#[then(expr = "{string} observes editor presence left on {string} within {int} seconds")]
+async fn observes_presence_left(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::EditorPresenceChanged { interp_key, joined: false, .. } if *interp_key == key)
+    }).await;
+    assert!(seen, "{name} did not observe editor-presence-left on {key} within {secs}s");
+}
+
 #[when(expr = "{string} vetoes an edit on {string}")]
 async fn peer_vetoes(world: &mut ZodiaWorld, name: String, key: String) {
     world.clients.get(&name)
