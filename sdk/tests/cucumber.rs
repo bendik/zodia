@@ -103,6 +103,23 @@ async fn peer_affirms(world: &mut ZodiaWorld, name: String, key: String) {
         .expect("affirm succeeds");
 }
 
+#[when(expr = "{string} revokes a contribution")]
+async fn peer_revokes(world: &mut ZodiaWorld, name: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .revoke(Hash::from_bytes([3u8; 32]))
+        .await
+        .expect("revoke succeeds");
+}
+
+#[then(expr = "{string} observes the revocation within {int} seconds")]
+async fn observes_revocation(world: &mut ZodiaWorld, name: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::InterpRevoked { target_log_id, .. } if *target_log_id == Hash::from_bytes([3u8; 32]))
+    }).await;
+    assert!(seen, "{name} did not observe the revocation within {secs}s");
+}
+
 #[then(expr = "{string} observes a doc edit on {string} within {int} seconds")]
 async fn observes_doc_edit(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
     let seen = wait_for(world, &name, secs, |event| {

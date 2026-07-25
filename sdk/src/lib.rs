@@ -157,6 +157,15 @@ impl ZodiaClient {
         self.call(|reply| Command::Author { interp_key: interp_key.to_string(), body, reply }).await
     }
 
+    /// Revoke a previously authored `InterpOp::Author` (or anything else
+    /// content-addressed the same way — `target_log_id` is
+    /// `BLAKE3(interp_key || body)`, see `zodia_ops::InterpOp::Revoke`).
+    /// Legacy model, log 0: propagates over the always-on global topic,
+    /// not a per-key one — no subscription is needed to observe it.
+    pub async fn revoke(&self, target_log_id: Hash) -> Result<(), ClientError> {
+        self.call(|reply| Command::Revoke { target_log_id, reply }).await
+    }
+
     /// Apply a CRDT edit to a key's collaborative doc.
     pub async fn edit(
         &self,
@@ -222,6 +231,7 @@ struct ConnectReady {
 
 enum Command {
     Author { interp_key: String, body: String, reply: Reply },
+    Revoke { target_log_id: Hash, reply: Reply },
     Edit {
         interp_key:      String,
         base_rev:        Hash,
@@ -356,6 +366,10 @@ async fn handle_command(
     match cmd {
         Command::Author { interp_key, body, reply } => {
             let res = node.publish(InterpOp::Author { interp_key, body }).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::Revoke { target_log_id, reply } => {
+            let res = node.publish(InterpOp::Revoke { target_log_id }).await.map_err(sync_err);
             let _ = reply.send(res);
         }
         Command::Edit { interp_key, base_rev, crdt_update, affected_blocks, reply } => {
