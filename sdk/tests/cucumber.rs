@@ -117,6 +117,7 @@ async fn peer_touches_subscription(world: &mut ZodiaWorld, name: String, key: St
         .expect("touch_subscription succeeds");
 }
 
+#[given(regex = r"^(\d+) seconds? (?:pass|passes)$")]
 #[when(regex = r"^(\d+) seconds? (?:pass|passes)$")]
 async fn time_passes(_world: &mut ZodiaWorld, secs: u64) {
     tokio::time::sleep(Duration::from_secs(secs)).await;
