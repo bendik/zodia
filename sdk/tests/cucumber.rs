@@ -27,9 +27,13 @@ use zodia_sdk::{StateEvent, ZodiaClient, ZodiaClientConfig};
 
 #[derive(cucumber::World, Default)]
 struct ZodiaWorld {
-    clients:   HashMap<String, ZodiaClient>,
-    events:    HashMap<String, broadcast::Receiver<StateEvent>>,
-    tmp_dirs:  Vec<TempDir>,
+    clients:    HashMap<String, ZodiaClient>,
+    events:     HashMap<String, broadcast::Receiver<StateEvent>>,
+    tmp_dirs:   Vec<TempDir>,
+    /// (signing_key, data_dir) per peer name, kept so a "reconnects"
+    /// step can bring the same identity + local storage back up after
+    /// a "disconnects" step drops it.
+    identities: HashMap<String, (SigningKey, std::path::PathBuf)>,
 }
 
 // `cucumber::World::run` requires `Debug` (used to log World state on step
@@ -43,21 +47,54 @@ impl fmt::Debug for ZodiaWorld {
     }
 }
 
+// Registered for both Given and When — see edit_survives_restart.feature,
+// where a second peer connects mid-scenario after a When step.
 #[given(expr = "a peer named {string} connected to the network")]
+#[when(expr = "a peer named {string} connected to the network")]
 async fn peer_connected(world: &mut ZodiaWorld, name: String) {
     let tmp = TempDir::new().expect("create temp data dir");
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let data_dir = tmp.path().to_path_buf();
     let config = ZodiaClientConfig {
-        signing_key: SigningKey::generate(&mut OsRng),
+        signing_key: signing_key.clone(),
         birth:       zodia_core::birth_from_coords(2_451_545.0, 59.9, 10.7, 9),
-        data_dir:    tmp.path().to_path_buf(),
+        data_dir:    data_dir.clone(),
     };
     let client = ZodiaClient::connect(config).await.expect("client connects");
     world.events.insert(name.clone(), client.events());
+    world.identities.insert(name.clone(), (signing_key, data_dir));
     world.clients.insert(name, client);
     world.tmp_dirs.push(tmp);
 }
 
+#[when(expr = "{string} disconnects")]
+async fn peer_disconnects(world: &mut ZodiaWorld, name: String) {
+    world.clients.remove(&name).unwrap_or_else(|| panic!("no peer named {name}"));
+    world.events.remove(&name);
+    // Identity + data_dir stay in world.identities — "reconnects" needs them.
+}
+
+#[when(expr = "{string} reconnects using the same identity and data directory")]
+async fn peer_reconnects(world: &mut ZodiaWorld, name: String) {
+    let (signing_key, data_dir) = world.identities.get(&name)
+        .unwrap_or_else(|| panic!("no prior identity for peer {name}"))
+        .clone();
+    let config = ZodiaClientConfig {
+        signing_key,
+        birth: zodia_core::birth_from_coords(2_451_545.0, 59.9, 10.7, 9),
+        data_dir,
+    };
+    let client = ZodiaClient::connect(config).await.expect("client reconnects");
+    world.events.insert(name.clone(), client.events());
+    world.clients.insert(name, client);
+}
+
+// Registered for both Given and When: an "And" step's effective type is
+// whatever the nearest preceding explicit Given/When/Then was, and this
+// step is used both up front (Given) and after a reconnect (When) — see
+// edit_survives_restart.feature.
 #[given(expr = "{string} is subscribed to {string}")]
+#[when(expr = "{string} is subscribed to {string}")]
 async fn peer_subscribes(world: &mut ZodiaWorld, name: String, key: String) {
     world.clients.get(&name)
         .unwrap_or_else(|| panic!("no peer named {name}"))
