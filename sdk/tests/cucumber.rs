@@ -192,6 +192,23 @@ async fn observes_veto_proposal(world: &mut ZodiaWorld, name: String, key: Strin
     assert!(seen, "{name} did not observe a veto proposal on {key} within {secs}s");
 }
 
+#[when(expr = "{string} authors an interpretation on {string}")]
+async fn peer_authors(world: &mut ZodiaWorld, name: String, key: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .author(&key, "a test interpretation body".to_string())
+        .await
+        .expect("author succeeds");
+}
+
+#[then(expr = "{string} observes the authored interpretation on {string} within {int} seconds")]
+async fn observes_authored(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::InterpAuthored { interp_key, .. } if *interp_key == key)
+    }).await;
+    assert!(seen, "{name} did not observe the authored interpretation on {key} within {secs}s");
+}
+
 #[when(expr = "{string} revokes a contribution")]
 async fn peer_revokes(world: &mut ZodiaWorld, name: String) {
     world.clients.get(&name)
