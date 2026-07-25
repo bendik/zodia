@@ -1,8 +1,11 @@
 Feature: Granular per-key sync topics protect bandwidth and privacy
-  Guarantees the core promise of docs/prd/granular-topic-subscription.md:
-  a device that hasn't subscribed to a key does not receive live updates
-  for it. This is the regression test that PRD's own progress notes
-  flagged as missing ("Unsubscribed keys stay silent").
+  Each interp_key has its own sync topic and its own p2panda log, derived
+  deterministically from the key. A device only receives live updates
+  for a key once it has explicitly subscribed to that key's topic —
+  being connected to the network at all is not enough. This is the
+  regression test for that exact promise: a peer subscribed to one key
+  must not receive live edits published to a different key it never
+  subscribed to.
 
   Scenario: An unsubscribed peer does not receive another key's edit
     Given a peer named "Alice" connected to the network

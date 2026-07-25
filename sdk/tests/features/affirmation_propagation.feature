@@ -1,9 +1,12 @@
 Feature: Affirmations propagate to peers watching the same key
-  Guarantees AffirmRev ops — the signal collaborative-interpretations.md
-  uses in place of the old per-row affirm model — reach subscribed peers.
-  This is the data-layer half of "the community ranking converges across
-  peers"; whether the UI's affirmation count updates correctly is a
-  separate, app-layer concern.
+  DocOp::AffirmRev affirms a specific revision of a key's collaborative
+  doc (interp_key + a 32-byte revision hash), not a whole competing
+  interpretation the way the old InterpOp::Affirm model did. The
+  community ranking for a key is "how many distinct peers have affirmed
+  its current revision" — that only converges if the affirmation
+  actually reaches every peer watching that key. This proves the
+  data-layer half of that: whether the UI's displayed count updates
+  correctly afterward is a separate, app-layer concern.
 
   Scenario: A subscribed peer sees another peer's affirmation
     Given a peer named "Alice" connected to the network

@@ -1,9 +1,14 @@
 Feature: Grace-period unsubscribe for non-chart aspect pages
-  Completes docs/prd/granular-topic-subscription.md's remaining scope: a
-  key browsed outside the user's own chart subscribes on demand and
-  unsubscribes again after being idle, instead of accumulating
-  subscriptions forever. Short grace periods below are for test speed;
-  production wiring uses a longer real-world default.
+  Subscribing to a key costs an open sync topic for as long as the
+  subscription lives. A key outside the user's own natal chart should
+  subscribe on demand (e.g. while its page is open) and unsubscribe
+  again once nothing is actively using it, rather than accumulating
+  permanent subscriptions for every key ever browsed.
+  `ZodiaClient::touch_subscription(key, grace)` implements this:
+  subscribing (idempotently) and starting a countdown that
+  auto-unsubscribes unless touched again before it elapses. Grace
+  periods below are seconds, for test speed; production wiring uses a
+  longer real-world default.
 
   Scenario: An idle subscription unsubscribes after its grace period
     Given a peer named "Alice" connected to the network
