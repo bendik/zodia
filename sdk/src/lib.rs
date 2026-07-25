@@ -139,6 +139,19 @@ impl ZodiaClient {
         self.call(|reply| Command::Unsubscribe { interp_key: interp_key.to_string(), reply }).await
     }
 
+    /// Subscribe to `interp_key` (idempotent, same as [`Self::subscribe`])
+    /// and (re)start a `grace` countdown: if nothing touches this key
+    /// again before `grace` elapses, it auto-unsubscribes. Call again
+    /// whenever the key is still in active use (e.g. its page is still
+    /// open) to keep the subscription alive — completes the lazy-subscribe
+    /// half of Phase C-2 (docs/prd/granular-topic-subscription.md) for
+    /// keys outside the user's always-subscribed own-chart set.
+    pub async fn touch_subscription(&self, interp_key: &str, grace: std::time::Duration) -> Result<(), ClientError> {
+        self.call(|reply| Command::TouchSubscription {
+            interp_key: interp_key.to_string(), grace, reply,
+        }).await
+    }
+
     /// Legacy whole-interpretation authoring (`InterpOp::Author`, log 0).
     pub async fn author(&self, interp_key: &str, body: String) -> Result<(), ClientError> {
         self.call(|reply| Command::Author { interp_key: interp_key.to_string(), body, reply }).await
@@ -221,6 +234,7 @@ enum Command {
     SetEditorPresence { interp_key: String, joined: bool, reply: Reply },
     Subscribe { interp_key: String, reply: Reply },
     Unsubscribe { interp_key: String, reply: Reply },
+    TouchSubscription { interp_key: String, grace: std::time::Duration, reply: Reply },
 }
 
 type Reply = oneshot::Sender<Result<(), ClientError>>;
@@ -269,12 +283,29 @@ async fn run(
     let pipeline = ZodiaPipeline::new();
     let mut peer_caught_up: HashMap<[u8; 32], bool> = HashMap::new();
 
+    // Grace-period unsubscribe (docs/prd/granular-topic-subscription.md's
+    // remaining scope): `TouchSubscription` records when a key was last
+    // touched and spawns a timer on this same LocalSet; `expiry_rx` below
+    // re-checks elapsed time when a timer fires rather than cancelling
+    // stale timers outright — a later touch just makes an earlier timer's
+    // check come up short, so no task-cancellation bookkeeping is needed.
+    let mut last_touch: HashMap<String, (std::time::Instant, std::time::Duration)> = HashMap::new();
+    let (expiry_tx, mut expiry_rx) = mpsc::channel::<String>(64);
+
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 match cmd {
-                    Some(cmd) => handle_command(&mut node, cmd).await,
+                    Some(cmd) => handle_command(&mut node, cmd, &mut last_touch, &expiry_tx).await,
                     None      => break, // ZodiaClient dropped — tear down.
+                }
+            }
+            Some(expired_key) = expiry_rx.recv() => {
+                let still_idle = last_touch.get(&expired_key)
+                    .is_some_and(|(touched_at, grace)| touched_at.elapsed() >= *grace);
+                if still_idle {
+                    node.unsubscribe(&expired_key);
+                    last_touch.remove(&expired_key);
                 }
             }
             Some(sync_event) = node.inbound.recv() => {
@@ -316,7 +347,12 @@ fn status_from(peer_caught_up: &HashMap<[u8; 32], bool>) -> SyncStatus {
     }
 }
 
-async fn handle_command(node: &mut ZodiaSyncNode, cmd: Command) {
+async fn handle_command(
+    node:       &mut ZodiaSyncNode,
+    cmd:        Command,
+    last_touch: &mut HashMap<String, (std::time::Instant, std::time::Duration)>,
+    expiry_tx:  &mpsc::Sender<String>,
+) {
     match cmd {
         Command::Author { interp_key, body, reply } => {
             let res = node.publish(InterpOp::Author { interp_key, body }).await.map_err(sync_err);
@@ -344,6 +380,18 @@ async fn handle_command(node: &mut ZodiaSyncNode, cmd: Command) {
         Command::Unsubscribe { interp_key, reply } => {
             node.unsubscribe(&interp_key);
             let _ = reply.send(Ok(()));
+        }
+        Command::TouchSubscription { interp_key, grace, reply } => {
+            let res = node.subscribe(&interp_key).await.map_err(sync_err);
+            if res.is_ok() {
+                last_touch.insert(interp_key.clone(), (std::time::Instant::now(), grace));
+                let expiry_tx = expiry_tx.clone();
+                tokio::task::spawn_local(async move {
+                    tokio::time::sleep(grace).await;
+                    let _ = expiry_tx.send(interp_key).await;
+                });
+            }
+            let _ = reply.send(res);
         }
     }
 }

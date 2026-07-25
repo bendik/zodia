@@ -1,6 +1,6 @@
 # PRD: Granular per-key sync topics with lazy subscription (Phase C-2)
 
-**Status:** partially shipped — log-splitting + always-subscribe done; on-demand page subscribe, grace-period unsubscribe, and mock-backed tests not started
+**Status:** partially shipped — log-splitting, always-subscribe, and the grace-period unsubscribe primitive (`ZodiaClient::touch_subscription`) done; app.rs wiring it to actual page visibility, and mock-backed `zodia-sync` tests, not started
 **Branch:** `main`
 **Foundation already landed:** 0.7.0 (`zodia-ops` + `zodia-pipeline`, single global sync topic) and 0.7.1 (activity feed, collaborative interpretations — both still ride the single global topic).
 **Supersedes:** the "Topic granularity and lazy subscription" sketch in `docs/prd/operations-and-streams-rearchitecture.md` (§ Implementation Decisions). That sketch assumed per-key topics were a routing-layer change; this PRD corrects that assumption against what actually shipped and defines the real migration.
@@ -80,7 +80,9 @@ This is a real, user-visible regression during the transition window — a page 
 
 Shipped: `log_id_for_key` (`ops/src/lib.rs`), `DocOp::interp_key()`, `topic_key_for_interp` (`core/src/topic.rs`), and the `ZodiaSyncNode` multi-topic refactor (`sync/src/lib.rs` — `HashMap<Topic, SyncHandle>`, `subscribe`/`unsubscribe`, `publish_doc` routed through the derived log/topic, legacy `publish` untouched on log 0). `app/src/app.rs` sends `Subscribe` for every natal-chart key right after sync spawns (both cold-start paths).
 
-Not shipped: opening a key's topic when its aspect page is visited outside the always-subscribed set, the grace-period unsubscribe timer (`SyncPublishMsg::Unsubscribe` exists but nothing sends it yet), and the mock-backed `ZodiaSyncNode` tests from Testing Decisions below — this crate has no mock `LogSync`/`SyncHandle` harness yet, unlike `zodia-pipeline`'s fake-stream tests. That gap is why the real bug below went unnoticed until `zodia-sdk`'s real-network test caught it.
+Shipped since: the grace-period unsubscribe mechanism, as `ZodiaClient::touch_subscription(interp_key, grace)` in `zodia-sdk` (`sdk/src/lib.rs`) rather than in `zodia-sync` directly — touching a key subscribes it (idempotent) and (re)starts a `grace` countdown on the SDK's background `LocalSet`; if nothing touches it again before `grace` elapses, it auto-unsubscribes. Driven outside-in via two cucumber scenarios in `sdk/tests/features/grace_period_unsubscribe.feature` (idle-unsubscribe, and re-touch-cancels-pending-expiry), both passing against real network transport.
+
+Not shipped: `app.rs` actually calling `touch_subscription` when an aspect page outside the always-subscribed set opens (the SDK primitive exists; wiring it to page-open/page-visible events in the relm4 layer doesn't), and the mock-backed `ZodiaSyncNode` tests from Testing Decisions below — this crate has no mock `LogSync`/`SyncHandle` harness yet, unlike `zodia-pipeline`'s fake-stream tests. That gap is why the `associate()` bug went unnoticed until `zodia-sdk`'s real-network test caught it.
 
 **Bug found and fixed via `docs/prd/zodia-sdk.md`'s testing:** `TopicStore::associate(topic, author, log_id)` was never called anywhere in `zodia-sync`, for any topic — meaning catch-up for a peer who subscribes to a topic *after* an op already exists on it could never find that op (`topics_v1` stayed empty). Per-key topics made this much more likely to bite in practice than the old always-on global topic did, since short-lived subscriptions have a much smaller window where an already-open live session happens to mask the missing catch-up path. Fixed in `sync/src/lib.rs::publish_bytes`.
 

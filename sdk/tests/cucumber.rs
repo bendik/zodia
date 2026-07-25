@@ -66,6 +66,25 @@ async fn peer_subscribes(world: &mut ZodiaWorld, name: String, key: String) {
         .expect("subscribe succeeds");
 }
 
+// Registered for both Given and When: an "And" step's effective type is
+// whatever the nearest preceding explicit Given/When/Then was, and this
+// step appears after a When in "re-touching" scenarios (see
+// grace_period_unsubscribe.feature's second scenario).
+#[given(regex = r#"^"([^"]+)" touches subscription to "([^"]+)" with a grace period of (\d+) seconds?$"#)]
+#[when(regex = r#"^"([^"]+)" touches subscription to "([^"]+)" with a grace period of (\d+) seconds?$"#)]
+async fn peer_touches_subscription(world: &mut ZodiaWorld, name: String, key: String, grace_secs: u64) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .touch_subscription(&key, Duration::from_secs(grace_secs))
+        .await
+        .expect("touch_subscription succeeds");
+}
+
+#[when(regex = r"^(\d+) seconds? (?:pass|passes)$")]
+async fn time_passes(_world: &mut ZodiaWorld, secs: u64) {
+    tokio::time::sleep(Duration::from_secs(secs)).await;
+}
+
 #[when(expr = "{string} edits {string}")]
 async fn peer_edits(world: &mut ZodiaWorld, name: String, key: String) {
     world.clients.get(&name)
@@ -132,5 +151,13 @@ async fn wait_for(
 
 #[tokio::main]
 async fn main() {
-    ZodiaWorld::run("tests/features").await;
+    // Each scenario spins up real network nodes (iroh endpoints, mDNS,
+    // gossip) — running scenarios concurrently (cucumber's default)
+    // contends for those real resources within one test process and
+    // produces timing flakiness unrelated to the behavior under test.
+    // These are integration tests, not unit tests; run them serially.
+    ZodiaWorld::cucumber()
+        .max_concurrent_scenarios(1)
+        .run_and_exit("tests/features")
+        .await;
 }

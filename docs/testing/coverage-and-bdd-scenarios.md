@@ -140,10 +140,36 @@ Feature: Granular per-key sync topics
       subscribed, from a peer who has it
 ```
 
+### Feature: Grace-period unsubscribe (driven outside-in)
+
+Written and made to fail before the feature existed, then implemented against it — see "Driven outside-in" below.
+
+```gherkin
+Feature: Grace-period unsubscribe for non-chart aspect pages
+  A key browsed outside the user's own chart subscribes on demand and
+  unsubscribes again after being idle, instead of accumulating
+  subscriptions forever (docs/prd/granular-topic-subscription.md).
+
+  Scenario: An idle subscription unsubscribes after its grace period
+    Given Alice touches a subscription to a key outside her chart, with
+      a short grace period
+    When the grace period elapses with no further activity on that key
+    And a peer publishes an edit to that key
+    Then Alice does not receive that edit
+
+  Scenario: Re-touching a subscription keeps it alive past the grace period
+    Given Alice touches a subscription to a key outside her chart
+    When she touches it again before the grace period elapses
+    And a peer publishes an edit to that key
+    Then Alice does receive that edit
+```
+
 ## Status: adopted
 
-`cucumber = "0.23.0"` is now a `zodia-sdk` dev-dependency (`sdk/Cargo.toml`, `[[test]] name = "cucumber", harness = false`). The three scenarios above are executable, live in `sdk/tests/features/*.feature`, and run automatically as part of `cargo test --workspace` via `sdk/tests/cucumber.rs`'s step definitions. Each `Given a peer named "X" connected to the network` step spins up a real `ZodiaClient` — real iroh/p2panda transport, no mocking — matching the existing unit tests' approach rather than introducing a second, fake-network test style.
+`cucumber = "0.23.0"` is now a `zodia-sdk` dev-dependency (`sdk/Cargo.toml`, `[[test]] name = "cucumber", harness = false`). All four scenarios above are executable, live in `sdk/tests/features/*.feature`, and run automatically as part of `cargo test --workspace` via `sdk/tests/cucumber.rs`'s step definitions. Each `Given a peer named "X" connected to the network` step spins up a real `ZodiaClient` — real iroh/p2panda transport, no mocking — matching the existing unit tests' approach rather than introducing a second, fake-network test style.
 
 Chosen scope, deliberately: only guarantees `zodia-sdk` can actually prove end-to-end (op propagation and materialisation into the right `StateEvent`). App-layer behavior — does the bell badge, does the veto actually revert the block, does the feed render the card — is a separate layer with its own gap tracked above (§3), not something a `ZodiaClient`-only scenario can assert without either a GTK test harness or plumbing app.rs's own logic into something scriptable. Extending these scenarios to that layer is future work, not attempted here.
 
-**Known characteristic, not a bug:** running the full workspace test suite (`cargo test --workspace`, all crates' tests executing concurrently) produced one flaky scenario failure in roughly five runs; run in isolation or with less concurrent load, all three scenarios passed consistently across multiple repeated runs. This tracks with real UDP/mDNS discovery timing variance under contention, the same category of behavior the `zodia-sdk` round-trip test already exhibited before the `associate()` fix (see `docs/prd/granular-topic-subscription.md`) — not a design flaw introduced by adopting cucumber. This is the accepted cost of testing the *real* transport rather than a mock: these scenarios found a real, previously-unknown bug that no amount of mocked testing would have caught, and that's worth more than the flakiness costs. If CI flakiness becomes a real problem, the standard mitigation is a single retry on failure for this specific test target — not weakening the scenarios to use a fake network.
+**Driven outside-in:** `grace_period_unsubscribe.feature` and its step definitions were written first, calling a `ZodiaClient::touch_subscription` method that didn't exist yet — a compile failure standing in for "red" in a compiled language, same idea as a failing assertion in a dynamic one. `touch_subscription(interp_key, grace)` was then implemented in `sdk/src/lib.rs` (subscribes idempotently, restarts a grace-period countdown on the SDK's background `LocalSet`, auto-unsubscribes if untouched) until both scenarios passed. This is now also `docs/prd/granular-topic-subscription.md`'s primary mechanism for its previously-unshipped grace-period unsubscribe requirement — the app-layer wiring (calling it when a page actually opens/stays open) is still open, tracked in that PRD.
+
+**Scenario-concurrency contention, found and fixed:** running these scenarios initially produced an intermittent unrelated-scenario failure (the affirmation-propagation scenario) as soon as a fourth `.feature` file was added. Root cause: cucumber's default `World::run` executes scenarios *concurrently*, and each scenario here spins up 1-2 real network nodes — with 5 scenarios across 4 features, that's up to ~10 real iroh endpoints starting at once inside one test process, contending for CPU and mDNS multicast traffic. Fixed by switching to `ZodiaWorld::cucumber().max_concurrent_scenarios(1).run_and_exit(...)` in `sdk/tests/cucumber.rs` — these are integration tests exercising real system resources, not isolated unit tests, and should run serially for the same reason `net/tests/channel.rs` and the SDK's own round-trip test do. Multiple repeated runs, both in isolation and as part of the full `cargo test --workspace` suite, have been clean since. If flakiness reappears, look for real resource contention (another concurrent test binary, system load) before assuming it's the scenarios themselves — that's what actually happened here, and the fix was concurrency control, not a longer timeout.
