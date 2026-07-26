@@ -380,6 +380,11 @@ async fn build_doc_reading_group(
         joined:     true,
     });
 
+    // Lazy subscription (Phase C-2): no-ops for keys already permanently
+    // subscribed via the user's own chart; opens/extends a grace-period
+    // subscription otherwise. See docs/prd/granular-topic-subscription.md.
+    sender.input(AppMsg::TouchKeySubscription { interp_key: key_sig.clone() });
+
     // ── editor row: TextView + Publish + presence indicator ──────────────────
     let edit_row = adw::ActionRow::new();
     edit_row.set_activatable(false);

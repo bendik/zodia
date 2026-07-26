@@ -181,6 +181,14 @@ pub enum AppMsg {
     ProposeDocVeto { interp_key: String, target_edit_op_id: [u8; 32] },
     /// Phase F-collab: user joined / left an editor session.  Heartbeat.
     EditorPresence { interp_key: String, joined: bool },
+    /// An aspect page for `interp_key` opened. If the key isn't in the
+    /// user's own chart (already permanently subscribed at startup — see
+    /// `subscribe_own_chart_keys`), opens/extends its lazy, grace-period
+    /// subscription (docs/prd/granular-topic-subscription.md). No-op for
+    /// chart keys and re-opens both — `touch_subscription` is idempotent
+    /// and resetting the grace clock on every visit is the intended
+    /// behavior, not a bug.
+    TouchKeySubscription { interp_key: String },
     /// Phase F-collab: start voice mesh with every peer currently present
     /// in `interp_key`'s editor session that we have a `DirectChannel` to.
     /// Reuses the legacy `CallStargazer` machinery per pair — small mesh,
@@ -1366,6 +1374,19 @@ impl AsyncComponent for AppModel {
                     }
                 }
             }
+            AppMsg::TouchKeySubscription { interp_key } => {
+                if let (Some(client), Some(chart)) = (&self.zodia_client, &self.chart) {
+                    if needs_lazy_subscription(&interp_key, chart) {
+                        // Matches transit_ticker.rs's TICK_INTERVAL — the
+                        // app's existing background-refresh cadence, reused
+                        // here rather than inventing a second constant.
+                        const GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+                        if let Err(e) = client.touch_subscription(&interp_key, GRACE).await {
+                            warn!("touch_subscription {interp_key}: {e}");
+                        }
+                    }
+                }
+            }
             AppMsg::StartEditorAudio { interp_key } => {
                 // Prune stale presence first, then collect fresh peers.
                 prune_stale_presence(&mut self.editor_presence);
@@ -2330,6 +2351,51 @@ async fn subscribe_own_chart_keys(chart: &Chart, client: &ZodiaClient) {
         if let Err(e) = client.subscribe(&key).await {
             warn!("chart-key subscribe {key}: {e}");
         }
+    }
+}
+
+/// `true` if `interp_key` needs its own lazy, grace-period-limited
+/// subscription when its aspect page opens (Phase C-2's non-chart case) —
+/// `false` if it's already covered by [`subscribe_own_chart_keys`]'s
+/// permanent, startup-time subscription to every key in the user's own
+/// natal chart.
+fn needs_lazy_subscription(interp_key: &str, chart: &Chart) -> bool {
+    !chart.natal_aspects().iter()
+        .any(|a| zodia_core::InterpKey::from_natal(a).to_sig() == interp_key)
+}
+
+#[cfg(test)]
+mod subscription_lifecycle_tests {
+    use super::*;
+
+    fn sample_chart() -> Chart {
+        let birth = zodia_core::birth_from_coords(2_451_545.0, 59.9, 10.7, 9);
+        Chart::compute(birth).expect("chart computes for a fixed test birth")
+    }
+
+    #[test]
+    fn a_key_in_the_users_own_chart_does_not_need_lazy_subscription() {
+        // Given a chart with at least one natal aspect
+        let chart = sample_chart();
+        let aspects = chart.natal_aspects();
+        assert!(!aspects.is_empty(), "test fixture should have at least one natal aspect");
+        let existing_key = zodia_core::InterpKey::from_natal(&aspects[0]).to_sig();
+
+        // When checking a key that IS one of that chart's own aspects
+        // Then it does not need a lazy, grace-limited subscription — it's
+        // already permanently subscribed at startup.
+        assert!(!needs_lazy_subscription(&existing_key, &chart));
+    }
+
+    #[test]
+    fn a_key_outside_the_users_own_chart_needs_lazy_subscription() {
+        // Given a chart
+        let chart = sample_chart();
+
+        // When checking a key that is not one of the chart's own natal
+        // aspects
+        // Then it needs a lazy, grace-limited subscription.
+        assert!(needs_lazy_subscription("natal:definitely_not_in_this_chart", &chart));
     }
 }
 
