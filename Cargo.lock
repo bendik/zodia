@@ -7870,6 +7870,7 @@ dependencies = [
  "p2panda-sync",
  "rand_core 0.6.4",
  "serde",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

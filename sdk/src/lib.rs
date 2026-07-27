@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::thread;
 
 use ed25519_dalek::SigningKey;
-use p2panda_core::{Hash, SigningKey as PandaSigningKey, Topic};
+use p2panda_core::{Hash, SigningKey as PandaSigningKey, Timestamp, Topic};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::warn;
@@ -206,6 +206,30 @@ impl ZodiaClient {
         }).await
     }
 
+    /// Permanently delete locally-stored operations older than `retention`,
+    /// except anything authored by this device's own identity (own
+    /// contributions are never pruned — see `zodia_sync`'s `prune_older_than`).
+    /// Local-storage-only: peers who still have the pruned history are
+    /// unaffected, and this device can re-receive it later via normal
+    /// catch-up sync if it re-subscribes to the relevant topic. Returns the
+    /// number of operations removed.
+    ///
+    /// This is a first slice of Phase D's pruning scope
+    /// (docs/prd/operations-and-streams-rearchitecture.md) — it does not
+    /// yet exempt content this device has merely *affirmed* (as opposed to
+    /// authored), since correlating an affirmed doc revision back to the
+    /// specific operations that produced it needs app/store-level state
+    /// this SDK doesn't have. Deliberately deferred, not silently dropped —
+    /// see docs/prd/pruning.md.
+    pub async fn prune(&self, retention: std::time::Duration) -> Result<u64, ClientError> {
+        let now_micros: u64 = Timestamp::now().into();
+        let cutoff = Timestamp::new(now_micros.saturating_sub(retention.as_micros() as u64));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx.send(Command::Prune { cutoff, reply: reply_tx }).await
+            .map_err(|_| ClientError::Disconnected)?;
+        reply_rx.await.map_err(|_| ClientError::Disconnected)?
+    }
+
     /// Legacy whole-interpretation authoring (`InterpOp::Author`, log 0).
     pub async fn author(&self, interp_key: &str, body: String) -> Result<(), ClientError> {
         self.call(|reply| Command::Author { interp_key: interp_key.to_string(), body, reply }).await
@@ -319,6 +343,7 @@ enum Command {
     Subscribe { interp_key: String, reply: Reply },
     Unsubscribe { interp_key: String, reply: Reply },
     TouchSubscription { interp_key: String, grace: std::time::Duration, reply: Reply },
+    Prune { cutoff: Timestamp, reply: oneshot::Sender<Result<u64, ClientError>> },
 }
 
 type Reply = oneshot::Sender<Result<(), ClientError>>;
@@ -507,6 +532,10 @@ async fn handle_command(
                     let _ = expiry_tx.send(interp_key).await;
                 });
             }
+            let _ = reply.send(res);
+        }
+        Command::Prune { cutoff, reply } => {
+            let res = node.prune_older_than(cutoff).await.map_err(sync_err);
             let _ = reply.send(res);
         }
     }

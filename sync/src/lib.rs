@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use futures_util::StreamExt;
-use p2panda_core::{Body, Header, Operation, SigningKey, Timestamp, Topic, VerifyingKey};
+use p2panda_core::{Body, Hash, Header, Operation, SigningKey, Timestamp, Topic, VerifyingKey};
 use p2panda_net::sync::{LogSync, SyncHandle};
 use p2panda_net::{Endpoint, Gossip};
 use p2panda_store::logs::LogStore;
@@ -162,7 +162,7 @@ impl ZodiaSyncNode {
             handles: HashMap::new(),
             inbound: ev_rx,
         };
-        node.open_topic(sync_topic).await?;
+        node.open_topic(sync_topic, INTERP_LOG_ID).await?;
 
         Ok(node)
     }
@@ -171,7 +171,8 @@ impl ZodiaSyncNode {
     /// key already subscribed is a no-op.  `DocOp` traffic for `interp_key`
     /// only reaches this device while subscribed.
     pub async fn subscribe(&mut self, interp_key: &str) -> Result<(), SyncError> {
-        self.open_topic(Topic::from(topic_key_for_interp(interp_key).0)).await
+        let topic = Topic::from(topic_key_for_interp(interp_key).0);
+        self.open_topic(topic, log_id_for_key(interp_key)).await
     }
 
     /// Unsubscribe from a key's per-key topic.  No-op if not subscribed.
@@ -181,10 +182,25 @@ impl ZodiaSyncNode {
         self.handles.remove(&topic);
     }
 
+    /// Permanently delete locally-stored operations older than `cutoff`,
+    /// except any authored by this device's own identity (own contributions
+    /// are never pruned, regardless of age — see [`prune_older_than`]).
+    /// Local-storage-only: peers who still have the pruned history are
+    /// unaffected, and this device can re-receive it later via normal
+    /// catch-up sync if it re-subscribes to the relevant topic. Returns the
+    /// number of operations removed.
+    pub async fn prune_older_than(&self, cutoff: Timestamp) -> Result<u64, SyncError> {
+        prune_older_than(&self.sync_store, &self.signing_key.verifying_key(), cutoff).await
+    }
+
     /// Open (if not already) a LogSync stream for `topic` and start its
     /// forwarder task.  Shared by `spawn`'s global-topic bootstrap and
-    /// `subscribe`'s per-key topics.
-    async fn open_topic(&mut self, topic: Topic) -> Result<(), SyncError> {
+    /// `subscribe`'s per-key topics. `log_id` is uniform across *every*
+    /// author on this topic (log 0 for the legacy global topic, the key's
+    /// derived log for a per-key topic — never derived from a specific
+    /// author), so the forwarder below can use it to persist any received
+    /// operation regardless of who published it.
+    async fn open_topic(&mut self, topic: Topic, log_id: u64) -> Result<(), SyncError> {
         if self.handles.contains_key(&topic) {
             return Ok(());
         }
@@ -202,6 +218,7 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
         let ev_tx = self.ev_tx.clone();
+        let sync_store = self.sync_store.clone();
 
         tokio::spawn(async move {
             while let Some(result) = subscription.next().await {
@@ -217,6 +234,18 @@ impl ZodiaSyncNode {
                 let remote_tag = hex::encode(&remote.as_bytes()[..4]);
                 let event = match from_sync.event {
                     TopicLogSyncEvent::OperationReceived { operation, .. } => {
+                        // Persist what we received, not just what we
+                        // authored — otherwise this device can never
+                        // re-serve it to a third peer, and it vanishes the
+                        // moment the process exits (see this fix's doc
+                        // comment on `store_and_associate` for the bug this
+                        // closes).
+                        let author = operation.header.verifying_key;
+                        if let Err(e) = store_and_associate(
+                            &sync_store, topic, &author, log_id, &operation.hash, &operation,
+                        ).await {
+                            warn!(remote = %remote_tag, "failed to persist received operation: {e}");
+                        }
                         SyncEvent::OperationReceived(operation)
                     }
                     TopicLogSyncEvent::SyncStarted { .. } => {
@@ -266,7 +295,7 @@ impl ZodiaSyncNode {
         let interp_key = op.interp_key().to_string();
         let log_id = log_id_for_key(&interp_key);
         let topic = Topic::from(topic_key_for_interp(&interp_key).0);
-        self.open_topic(topic).await?;
+        self.open_topic(topic, log_id).await?;
         self.publish_bytes(op.encode(), log_id, topic).await
     }
 
@@ -276,18 +305,10 @@ impl ZodiaSyncNode {
         log_id:        u64,
         topic:         Topic,
     ) -> Result<(), SyncError> {
-        // p2panda-store's `insert_operation` runs inside a transaction
-        // started by `begin()`.  Without it, the store returns
-        // `TransactionMissing` ("tried to interact with inexistant
-        // transaction").  We open a single transaction spanning the
-        // latest-entry read + insert, commit before publishing on the
-        // network so the local log tip is authoritative.
-        let permit = self.sync_store
-            .begin()
-            .await
-            .map_err(|e| SyncError::PandaStore(e.to_string()))?;
-
         // Determine the next sequence number + backlink from our log tip.
+        // `get_latest_entry` (unlike `_tx`-suffixed store methods) doesn't
+        // need an open transaction — `store_and_associate` below opens its
+        // own for the insert+associate+commit that does.
         let latest: Option<Operation<()>> = self.sync_store
             .get_latest_entry(&self.signing_key.verifying_key(), &log_id)
             .await
@@ -320,37 +341,9 @@ impl ZodiaSyncNode {
             body:   Some(body_op),
         };
 
-        if let Err(e) = self.sync_store
-            .insert_operation(&op_hash, &operation, &log_id)
-            .await
-        {
-            // Rollback drops the permit and frees the semaphore so the
-            // next publish can begin a new txn.
-            let _ = self.sync_store.rollback(permit).await;
-            return Err(SyncError::PandaStore(e.to_string()));
-        }
-
-        // Register (topic, author, log_id) so peers who subscribe to this
-        // topic *after* this op already exists can discover it during
-        // catch-up (`TopicStore::associate` — without this, LogSync's
-        // "local topic logs retrieved" query has nothing to find, and only
-        // an already-open live session would ever see the op via the
-        // separate live-forward path). `associate`'s internal `self.tx(..)`
-        // requires an already-open transaction (same constraint as
-        // `insert_operation`, see comment above), so this must run before
-        // `commit`, not after.
-        if let Err(e) = self.sync_store
-            .associate(&topic, &self.signing_key.verifying_key(), &log_id)
-            .await
-        {
-            let _ = self.sync_store.rollback(permit).await;
-            return Err(SyncError::PandaStore(e.to_string()));
-        }
-
-        self.sync_store
-            .commit(permit)
-            .await
-            .map_err(|e| SyncError::PandaStore(e.to_string()))?;
+        store_and_associate(
+            &self.sync_store, topic, &self.signing_key.verifying_key(), log_id, &op_hash, &operation,
+        ).await?;
 
         // `open_topic` (called by every publish path above) guarantees an
         // entry exists for `topic` by the time we get here.
@@ -363,6 +356,67 @@ impl ZodiaSyncNode {
 
         Ok(())
     }
+}
+
+/// Insert `operation` under `log_id` and associate `(topic, author, log_id)`
+/// in one transaction — the store-write half both `publish_bytes` (for our
+/// own authored ops) and the receive-path forwarder (for ops received from
+/// someone else, see `open_topic`) need. `associate` is what lets a later
+/// catch-up request — from a peer syncing with us, publisher or not — find
+/// this `(author, log_id)` pair advertised on `topic`; without it the op
+/// sits in `operations_v1` but is otherwise invisible to `TopicStore::resolve`
+/// (see `docs/prd/granular-topic-subscription.md`'s "Bug found and fixed"
+/// note — this is that same fix, generalised to non-self-authored ops).
+///
+/// Free function, not a method, so it's testable against a bare
+/// `SqliteStore` without a live network, same reasoning as this crate's
+/// other `associate`/transaction tests below.
+async fn store_and_associate(
+    store:     &SqliteStore,
+    topic:     Topic,
+    author:    &VerifyingKey,
+    log_id:    u64,
+    id:        &Hash,
+    operation: &Operation<()>,
+) -> Result<(), SyncError> {
+    let permit = store.begin().await.map_err(|e| SyncError::PandaStore(e.to_string()))?;
+
+    if let Err(e) = store.insert_operation(id, operation, &log_id).await {
+        let _ = store.rollback(permit).await;
+        return Err(SyncError::PandaStore(e.to_string()));
+    }
+    if let Err(e) = store.associate(&topic, author, &log_id).await {
+        let _ = store.rollback(permit).await;
+        return Err(SyncError::PandaStore(e.to_string()));
+    }
+
+    store.commit(permit).await.map_err(|e| SyncError::PandaStore(e.to_string()))
+}
+
+/// Free function so it's testable against a bare `SqliteStore` without a
+/// live network — same reasoning as this crate's `associate`/transaction
+/// tests: `ZodiaSyncNode` itself needs a real `Endpoint`/`Gossip` to spawn.
+///
+/// Timestamps are stored as plain decimal text (`operations_v1.timestamp`,
+/// matching `p2panda_store`'s own `Timestamp::to_string()` convention), so
+/// `<` here is a lexicographic string comparison — correct as long as both
+/// values have the same digit count. Microsecond-since-epoch timestamps
+/// are a stable 16 digits from year ~2001 to ~2287, comfortably covering
+/// any realistic op.
+async fn prune_older_than(
+    store:  &SqliteStore,
+    keep:   &VerifyingKey,
+    cutoff: Timestamp,
+) -> Result<u64, SyncError> {
+    let result = sqlx::query(
+        "DELETE FROM operations_v1 WHERE timestamp < ? AND verifying_key != ?",
+    )
+    .bind(cutoff.to_string())
+    .bind(keep.to_hex())
+    .execute(store.pool())
+    .await
+    .map_err(|e| SyncError::PandaStore(e.to_string()))?;
+    Ok(result.rows_affected())
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -379,6 +433,10 @@ mod tests {
     use super::*;
 
     fn signed_op(key: &SigningKey, payload: &[u8]) -> Operation<()> {
+        signed_op_at(key, payload, Timestamp::now())
+    }
+
+    fn signed_op_at(key: &SigningKey, payload: &[u8], timestamp: Timestamp) -> Operation<()> {
         let body = Body::new(payload);
         let mut header = Header::<()> {
             version:       1,
@@ -386,7 +444,7 @@ mod tests {
             signature:     None,
             payload_size:  body.size(),
             payload_hash:  Some(body.hash()),
-            timestamp:     Timestamp::now(),
+            timestamp,
             seq_num:       0,
             backlink:      None,
             extensions:    (),
@@ -457,5 +515,103 @@ mod tests {
         let topic_b = topic_key_for_interp(b);
         assert_eq!(topic_a.as_bytes(), topic_key_for_interp(a).as_bytes());
         assert_ne!(topic_a.as_bytes(), topic_b.as_bytes());
+    }
+
+    /// Regression test for a real gap found while building Phase D pruning:
+    /// operations *received* from a peer were never persisted locally at
+    /// all (only self-published ones were) — meaning this device could
+    /// never re-serve them to a third peer, and pruning had nothing real
+    /// to act on. `store_and_associate` is the fix: the same
+    /// insert+associate+commit sequence `publish_bytes` already used for
+    /// our own ops, generalised to store *anyone's* operation (the author
+    /// here is deliberately not `self`'s identity, proving this isn't
+    /// accidentally scoped to self-authored content).
+    #[tokio::test]
+    async fn store_and_associate_makes_a_received_operation_discoverable_by_a_third_peer() {
+        // Given an operation authored by someone else entirely (not "me",
+        // simulating what this device received from a peer during sync)
+        let store  = SqliteStore::temporary().await;
+        let author = SigningKey::generate();
+        let topic  = Topic::from([9u8; 32]);
+        let log_id: u64 = 77;
+        let op = signed_op(&author, b"relayed content");
+
+        // When storing and associating it as the receive path should
+        store_and_associate(&store, topic, &author.verifying_key(), log_id, &op.hash, &op)
+            .await.expect("store_and_associate");
+
+        // Then a third peer's catch-up query against this device — which
+        // is exactly what TopicStore::resolve backs — finds the original
+        // author's log advertised on that topic, and the operation itself
+        // is readable.
+        let found: std::collections::BTreeMap<VerifyingKey, Vec<u64>> =
+            store.resolve(&topic).await.expect("resolve");
+        assert_eq!(found.get(&author.verifying_key()), Some(&vec![log_id]));
+
+        let stored = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &op.hash)
+            .await.expect("get");
+        assert!(stored.is_some());
+    }
+
+    /// Old timestamp, well within the safe lexicographic-string-comparison
+    /// range `prune_older_than` relies on (timestamps stay 16 decimal
+    /// digits from year ~2001 to ~2287 — see that function's doc comment).
+    fn old_timestamp() -> Timestamp {
+        Timestamp::new(1_000_000_000_000_000)
+    }
+
+    /// `insert_operation` requires an already-open transaction (same
+    /// constraint as `publish_bytes` — see `associate_after_commit_is_
+    /// rejected...` above), so tests that just need an op sitting in the
+    /// store wrap it here rather than repeating begin/commit each time.
+    async fn insert_op(store: &SqliteStore, op: &Operation<()>, log_id: u64) {
+        let permit = store.begin().await.expect("begin");
+        store.insert_operation(&op.hash, op, &log_id).await.expect("insert");
+        store.commit(permit).await.expect("commit");
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_own_authored_ops_regardless_of_age() {
+        // Given an old op authored by "me"
+        let store = SqliteStore::temporary().await;
+        let me    = SigningKey::generate();
+        let op    = signed_op_at(&me, b"my old contribution", old_timestamp());
+        insert_op(&store, &op, 1).await;
+
+        // When pruning everything older than "now"
+        let removed = prune_older_than(&store, &me.verifying_key(), Timestamp::now())
+            .await.expect("prune");
+
+        // Then it's kept — 0 removed, and it's still readable.
+        assert_eq!(removed, 0);
+        let still_there = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &op.hash)
+            .await.expect("get");
+        assert!(still_there.is_some());
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_old_ops_from_other_authors_but_keeps_recent_ones() {
+        // Given an old op and a recent op, both from someone else
+        let store = SqliteStore::temporary().await;
+        let me    = SigningKey::generate();
+        let other = SigningKey::generate();
+        let old_op    = signed_op_at(&other, b"their old contribution", old_timestamp());
+        let recent_op = signed_op_at(&other, b"their recent contribution", Timestamp::now());
+        insert_op(&store, &old_op, 1).await;
+        insert_op(&store, &recent_op, 2).await;
+
+        // When pruning everything older than just-after the old timestamp
+        let cutoff = Timestamp::new(u64::from(old_timestamp()) + 1);
+        let removed = prune_older_than(&store, &me.verifying_key(), cutoff)
+            .await.expect("prune");
+
+        // Then only the old op is gone; the recent one remains.
+        assert_eq!(removed, 1);
+        let old_still_there = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &old_op.hash)
+            .await.expect("get old");
+        let recent_still_there = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &recent_op.hash)
+            .await.expect("get recent");
+        assert!(old_still_there.is_none());
+        assert!(recent_still_there.is_some());
     }
 }

@@ -33,7 +33,8 @@ struct ZodiaWorld {
     /// (signing_key, data_dir) per peer name, kept so a "reconnects"
     /// step can bring the same identity + local storage back up after
     /// a "disconnects" step drops it.
-    identities: HashMap<String, (SigningKey, std::path::PathBuf)>,
+    identities:       HashMap<String, (SigningKey, std::path::PathBuf)>,
+    last_prune_count: Option<u64>,
 }
 
 // `cucumber::World::run` requires `Debug` (used to log World state on step
@@ -209,6 +210,28 @@ async fn observes_authored(world: &mut ZodiaWorld, name: String, key: String, se
     assert!(seen, "{name} did not observe the authored interpretation on {key} within {secs}s");
 }
 
+#[when(regex = r#"^"([^"]+)" prunes local storage with a retention of (\d+) seconds?$"#)]
+async fn peer_prunes(world: &mut ZodiaWorld, name: String, retention_secs: u64) {
+    let removed = world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .prune(Duration::from_secs(retention_secs))
+        .await
+        .expect("prune succeeds");
+    world.last_prune_count = Some(removed);
+}
+
+#[then(expr = "pruning removed at least {int} operation")]
+async fn pruning_removed_at_least(world: &mut ZodiaWorld, min: u64) {
+    let removed = world.last_prune_count.expect("prune was called before this assertion");
+    assert!(removed >= min, "expected at least {min} operations pruned, got {removed}");
+}
+
+#[then(expr = "pruning removed {int} operations")]
+async fn pruning_removed_exactly(world: &mut ZodiaWorld, expected: u64) {
+    let removed = world.last_prune_count.expect("prune was called before this assertion");
+    assert_eq!(removed, expected);
+}
+
 #[when(expr = "{string} revokes a contribution")]
 async fn peer_revokes(world: &mut ZodiaWorld, name: String) {
     world.clients.get(&name)
@@ -226,7 +249,10 @@ async fn observes_revocation(world: &mut ZodiaWorld, name: String, secs: u64) {
     assert!(seen, "{name} did not observe the revocation within {secs}s");
 }
 
+// Registered for both Then and When: pruning.feature uses this mid-scenario
+// as an "And" following a "When", not as the scenario's own "Then".
 #[then(expr = "{string} observes a doc edit on {string} within {int} seconds")]
+#[when(expr = "{string} observes a doc edit on {string} within {int} seconds")]
 async fn observes_doc_edit(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
     let seen = wait_for(world, &name, secs, |event| {
         matches!(event, StateEvent::DocEdited { interp_key, .. } if *interp_key == key)
