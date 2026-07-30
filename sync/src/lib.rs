@@ -3,7 +3,7 @@
 //! `ZodiaSyncNode` owns the `p2panda-net::LogSync` machinery and exposes
 //! two simple channels to the app layer:
 //!
-//! * `inbound_ops` — every received `Operation<OpExtensions>`, raw.  The app feeds
+//! * `inbound_ops` — every received `Operation<ZodiaExtensions>`, raw.  The app feeds
 //!   these into a `zodia-pipeline::ZodiaPipeline` for decoding, ordering,
 //!   access-control, materialisation.
 //! * `publish(op: InterpOp)` — encode the canonical Zodia op into a body,
@@ -39,12 +39,12 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use zodia_circles::{
-    Access, CircleError, CircleExtensions, CircleManager, CircleOperation,
+    Access, CIRCLE_LOG_ID, CircleError, CircleManager, CircleOperation,
     circle_directory_topic, persist_received_and_associate, topic_for_circle,
 };
 pub use zodia_circles::{Event as CircleEvent, SpaceId};
 use zodia_core::topic_key_for_interp;
-use zodia_ops::{DocOp, InterpOp, OpExtensions, log_id_for_key};
+use zodia_ops::{DocOp, InterpOp, OpExtensions, ZodiaExtensions, log_id_for_key};
 
 // ── sync event ────────────────────────────────────────────────────────────────
 
@@ -55,7 +55,7 @@ use zodia_ops::{DocOp, InterpOp, OpExtensions, log_id_for_key};
 pub enum SyncEvent {
     /// A peer's operation came down the wire.  Will get decoded + materialised
     /// by `zodia-pipeline` downstream.
-    OperationReceived(Box<Operation<OpExtensions>>),
+    OperationReceived(Box<Operation<ZodiaExtensions>>),
     /// A catch-up sync session opened with `remote`.
     SyncStarted {
         remote: VerifyingKey,
@@ -119,7 +119,7 @@ impl From<CircleError> for SyncError {
 // ── sync node ─────────────────────────────────────────────────────────────────
 
 /// The live sync handle.  Keeps the p2panda LogSync machinery alive and
-/// exposes a raw `Operation<OpExtensions>` channel for the app's pipeline to consume.
+/// exposes a raw `Operation<ZodiaExtensions>` channel for the app's pipeline to consume.
 ///
 /// Phase C-2: holds one `SyncHandle` per subscribed topic rather than a
 /// single fixed one.  `global_topic` (legacy `InterpOp` traffic, log 0)
@@ -131,15 +131,25 @@ pub struct ZodiaSyncNode {
     /// File-backed p2panda operation store.
     sync_store:   SqliteStore,
     /// Shared LogSync engine — `.stream()` opens a new topic subscription
-    /// without needing a fresh endpoint/gossip pair.
-    log_sync:     LogSync<SqliteStore, u64, OpExtensions>,
+    /// without needing a fresh endpoint/gossip pair. One engine, one
+    /// extensions type (`ZodiaExtensions`), for *everything* — interp/doc
+    /// traffic and circle traffic alike. `p2panda-net::LogSync` registers a
+    /// single fixed protocol id on the shared iroh `Endpoint` regardless of
+    /// its generic extensions type; a second engine with a different
+    /// extensions type on the same `Endpoint` silently overwrites the
+    /// first's protocol registration rather than coexisting (found the hard
+    /// way — see `docs/prd/circles.md`). `ZodiaExtensions` (`zodia-ops`)
+    /// exists specifically so there only ever needs to be one engine.
+    log_sync:     LogSync<SqliteStore, u64, ZodiaExtensions>,
     /// The always-on legacy topic; `publish` (InterpOp) targets this one.
     global_topic: Topic,
     /// Forwarder-task sender, cloned into each newly opened topic's pump.
     ev_tx:        mpsc::Sender<SyncEvent>,
     /// Live handles keyed by topic. Dropping an entry ends that topic's
     /// sync session (`SyncHandle::drop` sends `ToSyncManager::Close`).
-    handles:      HashMap<Topic, SyncHandle<Operation<OpExtensions>, TopicLogSyncEvent<OpExtensions>>>,
+    /// Shared by every topic kind — global, per-key, the circle directory,
+    /// and per-circle topics all live in this one map.
+    handles:      HashMap<Topic, SyncHandle<Operation<ZodiaExtensions>, TopicLogSyncEvent<ZodiaExtensions>>>,
     /// Mixed-purpose channel: operation arrivals plus lifecycle events
     /// (session start / finish / failure).  Operations feed the pipeline;
     /// lifecycle events drive UI sync-status indicators.
@@ -148,15 +158,6 @@ pub struct ZodiaSyncNode {
     /// wrapped by `zodia-circles`). Shares `sync_store` — see
     /// `docs/prd/circles.md`'s "Storage needs nothing new".
     circle_manager: CircleManager,
-    /// A *second* LogSync engine, distinct from `log_sync` above —
-    /// `LogSync<S, L, E>` is monomorphic in `E`, and circle operations
-    /// (`Operation<CircleExtensions>`) are a different `E` than
-    /// `OpExtensions`, so they can't share the same engine. Shares the same
-    /// `Endpoint`/`Gossip`/`SqliteStore` as `log_sync` regardless — see
-    /// `docs/prd/circles.md`'s "a second LogSync engine, not a new topic".
-    circle_log_sync: LogSync<SqliteStore, u64, CircleExtensions>,
-    /// Circle-topic equivalent of `handles`.
-    circle_handles: HashMap<Topic, SyncHandle<Operation<CircleExtensions>, TopicLogSyncEvent<CircleExtensions>>>,
 }
 
 impl ZodiaSyncNode {
@@ -184,17 +185,8 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
-        // ── LogSync (InterpOp/DocOp) ───────────────────────────────────────────
-        let log_sync = LogSync::<_, u64, OpExtensions>::builder(
-            sync_store.clone(), endpoint.clone(), gossip.clone(),
-        )
-            .spawn()
-            .await
-            .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
-
-        // ── LogSync (circles) — a second engine, see the struct field docs
-        // on `circle_log_sync` for why one engine can't serve both ─────────
-        let circle_log_sync = LogSync::<_, u64, CircleExtensions>::builder(
+        // ── LogSync — one engine, every topic kind ────────────────────────────
+        let log_sync = LogSync::<_, u64, ZodiaExtensions>::builder(
             sync_store.clone(), endpoint, gossip,
         )
             .spawn()
@@ -217,11 +209,9 @@ impl ZodiaSyncNode {
             handles: HashMap::new(),
             inbound: ev_rx,
             circle_manager,
-            circle_log_sync,
-            circle_handles: HashMap::new(),
         };
         node.open_topic(sync_topic, INTERP_LOG_ID).await?;
-        node.open_circle_topic(circle_directory_topic()).await?;
+        node.open_topic(circle_directory_topic(), CIRCLE_LOG_ID).await?;
 
         // Announce our own key bundle on the directory topic so any peer we
         // meet can discover it — the prerequisite for being added to a
@@ -260,103 +250,27 @@ impl ZodiaSyncNode {
     }
 
     /// Open (if not already) a LogSync stream for `topic` and start its
-    /// forwarder task.  Shared by `spawn`'s global-topic bootstrap and
-    /// `subscribe`'s per-key topics. `log_id` is uniform across *every*
-    /// author on this topic (log 0 for the legacy global topic, the key's
-    /// derived log for a per-key topic — never derived from a specific
-    /// author), so the forwarder below can use it to persist any received
-    /// operation regardless of who published it.
+    /// forwarder task.  Shared by every topic kind: `spawn`'s global-topic
+    /// and circle-directory-topic bootstrap, `subscribe`'s per-key topics,
+    /// and the various circle methods' per-circle topics. `log_id` is
+    /// uniform across *every* author on this topic (log 0 for the legacy
+    /// global topic, the key's derived log for a per-key topic,
+    /// `zodia_circles::CIRCLE_LOG_ID` for any circle-related topic — never
+    /// derived from a specific author), so the forwarder below can use it
+    /// to persist any received operation regardless of who published it.
+    ///
+    /// One engine (`log_sync`) serves every topic kind because
+    /// `p2panda-net::LogSync` registers a single fixed protocol id on the
+    /// shared iroh `Endpoint` regardless of its generic extensions type —
+    /// see `log_sync`'s own field docs. The forwarder below branches on
+    /// each received operation's own `ZodiaExtensions` variant to decide
+    /// which path (interp/doc vs. circle) it actually belongs to.
     async fn open_topic(&mut self, topic: Topic, log_id: u64) -> Result<(), SyncError> {
         if self.handles.contains_key(&topic) {
             return Ok(());
         }
 
         let handle = self.log_sync
-            .stream(topic, true)
-            .await
-            .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
-
-        // Thin forwarder: every `OperationReceived` becomes a SyncEvent::
-        // OperationReceived; lifecycle events become SyncEvent variants so
-        // the app can drive sync-status UI off them.
-        let mut subscription = handle
-            .subscribe()
-            .await
-            .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
-        let ev_tx = self.ev_tx.clone();
-        let sync_store = self.sync_store.clone();
-
-        tokio::spawn(async move {
-            while let Some(result) = subscription.next().await {
-                let from_sync = match result {
-                    Ok(fs) => fs,
-                    Err(e) => {
-                        warn!("sync subscription error: {e}");
-                        continue;
-                    }
-                };
-
-                let remote = from_sync.remote;
-                let remote_tag = hex::encode(&remote.as_bytes()[..4]);
-                let event = match from_sync.event {
-                    TopicLogSyncEvent::OperationReceived { operation, .. } => {
-                        // Persist what we received, not just what we
-                        // authored — otherwise this device can never
-                        // re-serve it to a third peer, and it vanishes the
-                        // moment the process exits (see this fix's doc
-                        // comment on `store_and_associate` for the bug this
-                        // closes).
-                        let author = operation.header.verifying_key;
-                        if let Err(e) = store_and_associate(
-                            &sync_store, topic, &author, log_id, &operation.hash, &operation,
-                        ).await {
-                            warn!(remote = %remote_tag, "failed to persist received operation: {e}");
-                        }
-                        SyncEvent::OperationReceived(operation)
-                    }
-                    TopicLogSyncEvent::SyncStarted { .. } => {
-                        debug!(remote = %remote_tag, "sync: catch-up started");
-                        SyncEvent::SyncStarted { remote }
-                    }
-                    TopicLogSyncEvent::SyncFinished { metrics } => {
-                        debug!(remote = %remote_tag, "sync: catch-up finished");
-                        SyncEvent::SyncFinished {
-                            remote,
-                            received_ops:   metrics.received_operations() as u64,
-                            received_bytes: metrics.received_bytes() as u64,
-                        }
-                    }
-                    TopicLogSyncEvent::Failed { error } => {
-                        warn!(remote = %remote_tag, "sync session failed: {error}");
-                        SyncEvent::Failed { remote, error }
-                    }
-                    _ => continue,
-                };
-
-                if ev_tx.send(event).await.is_err() {
-                    debug!("inbound sync channel closed, stopping subscription pump");
-                    break;
-                }
-            }
-        });
-
-        self.handles.insert(topic, handle);
-        Ok(())
-    }
-
-    /// Circle-topic equivalent of `open_topic` — a separate method (not a
-    /// generic-over-extensions-type shared one) because it drives the
-    /// *other* LogSync engine (`circle_log_sync`, not `log_sync`) and hands
-    /// received operations to `circle_manager.process_persisted` rather
-    /// than just forwarding raw bytes for the pipeline to decode later —
-    /// circle content is already fully handled (persisted, decrypted if
-    /// applicable) by the time it becomes a `SyncEvent`.
-    async fn open_circle_topic(&mut self, topic: Topic) -> Result<(), SyncError> {
-        if self.circle_handles.contains_key(&topic) {
-            return Ok(());
-        }
-
-        let handle = self.circle_log_sync
             .stream(topic, true)
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
@@ -374,58 +288,112 @@ impl ZodiaSyncNode {
                 let from_sync = match result {
                     Ok(fs) => fs,
                     Err(e) => {
-                        warn!("circle sync subscription error: {e}");
+                        warn!("sync subscription error: {e}");
                         continue;
                     }
                 };
 
-                let TopicLogSyncEvent::OperationReceived { operation, .. } = from_sync.event
-                else {
-                    continue;
-                };
+                let remote = from_sync.remote;
+                let remote_tag = hex::encode(&remote.as_bytes()[..4]);
+                match from_sync.event {
+                    TopicLogSyncEvent::OperationReceived { operation, .. } => {
+                        // Circle ops and interp/doc ops share this one
+                        // wire type (`ZodiaExtensions`) but need entirely
+                        // different receive-side handling — branch on
+                        // which variant this particular operation is.
+                        match &operation.header.extensions {
+                            ZodiaExtensions::Interp(_) => {
+                                // Persist what we received, not just what
+                                // we authored — otherwise this device can
+                                // never re-serve it to a third peer, and it
+                                // vanishes the moment the process exits
+                                // (see `store_and_associate`'s doc comment
+                                // for the bug this closes).
+                                let author = operation.header.verifying_key;
+                                if let Err(e) = store_and_associate(
+                                    &sync_store, topic, &author, log_id, &operation.hash, &operation,
+                                ).await {
+                                    warn!(remote = %remote_tag, "failed to persist received operation: {e}");
+                                }
+                                if ev_tx.send(SyncEvent::OperationReceived(operation)).await.is_err() {
+                                    debug!("inbound sync channel closed, stopping subscription pump");
+                                    return;
+                                }
+                            }
+                            ZodiaExtensions::Circle(_) => {
+                                let author = operation.header.verifying_key;
+                                let circle_op = CircleOperation(*operation);
 
-                let author = operation.header.verifying_key;
-                let circle_op = CircleOperation(*operation);
+                                if let Err(e) = persist_received_and_associate(
+                                    &sync_store, topic, &author, &circle_op,
+                                ).await {
+                                    warn!("failed to persist received circle operation: {e}");
+                                    continue;
+                                }
 
-                if let Err(e) = persist_received_and_associate(
-                    &sync_store, topic, &author, &circle_op,
-                ).await {
-                    warn!("failed to persist received circle operation: {e}");
-                    continue;
-                }
+                                let events = match zodia_circles::process_and_persist(
+                                    &circle_manager, &sync_store, &circle_op,
+                                ).await {
+                                    Ok(events) => events,
+                                    Err(e) => {
+                                        warn!("failed to process received circle operation: {e}");
+                                        continue;
+                                    }
+                                };
 
-                let events = match zodia_circles::process_and_persist(&circle_manager, &sync_store, &circle_op).await {
-                    Ok(events) => events,
-                    Err(e) => {
-                        warn!("failed to process received circle operation: {e}");
-                        continue;
-                    }
-                };
-
-                for event in events {
-                    let sync_event = match event {
-                        CircleEvent::Application { space_id, data } => {
-                            SyncEvent::CircleContentReceived {
-                                space_id,
-                                op_id:  circle_op.0.hash,
-                                author,
-                                plaintext: data,
+                                for event in events {
+                                    let sync_event = match event {
+                                        CircleEvent::Application { space_id, data } => {
+                                            SyncEvent::CircleContentReceived {
+                                                space_id, op_id: circle_op.0.hash, author,
+                                                plaintext: data,
+                                            }
+                                        }
+                                        other => {
+                                            debug!(?other, "circle event (membership/key-bundle), no content to surface yet");
+                                            continue;
+                                        }
+                                    };
+                                    if ev_tx.send(sync_event).await.is_err() {
+                                        debug!("inbound sync channel closed, stopping subscription pump");
+                                        return;
+                                    }
+                                }
                             }
                         }
-                        other => {
-                            debug!(?other, "circle event (membership/key-bundle), no content to surface yet");
-                            continue;
-                        }
-                    };
-                    if ev_tx.send(sync_event).await.is_err() {
-                        debug!("inbound sync channel closed, stopping circle subscription pump");
-                        return;
                     }
-                }
+                    TopicLogSyncEvent::SyncStarted { .. } => {
+                        debug!(remote = %remote_tag, "sync: catch-up started");
+                        if ev_tx.send(SyncEvent::SyncStarted { remote }).await.is_err() {
+                            debug!("inbound sync channel closed, stopping subscription pump");
+                            break;
+                        }
+                    }
+                    TopicLogSyncEvent::SyncFinished { metrics } => {
+                        debug!(remote = %remote_tag, "sync: catch-up finished");
+                        let event = SyncEvent::SyncFinished {
+                            remote,
+                            received_ops:   metrics.received_operations() as u64,
+                            received_bytes: metrics.received_bytes() as u64,
+                        };
+                        if ev_tx.send(event).await.is_err() {
+                            debug!("inbound sync channel closed, stopping subscription pump");
+                            break;
+                        }
+                    }
+                    TopicLogSyncEvent::Failed { error } => {
+                        warn!(remote = %remote_tag, "sync session failed: {error}");
+                        if ev_tx.send(SyncEvent::Failed { remote, error }).await.is_err() {
+                            debug!("inbound sync channel closed, stopping subscription pump");
+                            break;
+                        }
+                    }
+                    _ => continue,
+                };
             }
         });
 
-        self.circle_handles.insert(topic, handle);
+        self.handles.insert(topic, handle);
         Ok(())
     }
 
@@ -434,9 +402,9 @@ impl ZodiaSyncNode {
     /// persisted it via `ZodiaForge` — this is just the missing broadcast
     /// step, same division of labour `publish_bytes` has for regular ops).
     fn broadcast_circle_op(&mut self, topic: Topic, op: CircleOperation) -> Result<(), SyncError> {
-        self.circle_handles
+        self.handles
             .get(&topic)
-            .expect("broadcast_circle_op called after open_circle_topic")
+            .expect("broadcast_circle_op called after open_topic")
             .publish(op.0)
             .map_err(|e| SyncError::Sync(format!("{e:?}")))
     }
@@ -459,7 +427,7 @@ impl ZodiaSyncNode {
         );
 
         let topic = topic_for_circle(circle_id);
-        self.open_circle_topic(topic).await?;
+        self.open_topic(topic, CIRCLE_LOG_ID).await?;
 
         let messages = zodia_circles::create_circle(
             &self.circle_manager, &self.sync_store, circle_id, initial_members,
@@ -483,6 +451,7 @@ impl ZodiaSyncNode {
         access:    Access<()>,
     ) -> Result<(), SyncError> {
         let topic = topic_for_circle(circle_id);
+        self.open_topic(topic, CIRCLE_LOG_ID).await?;
         let (auth_message, space_message) = zodia_circles::invite_to_circle(
             &self.circle_manager, &self.sync_store, circle_id, member, access,
         ).await?;
@@ -500,6 +469,7 @@ impl ZodiaSyncNode {
         member:    VerifyingKey,
     ) -> Result<(), SyncError> {
         let topic = topic_for_circle(circle_id);
+        self.open_topic(topic, CIRCLE_LOG_ID).await?;
         let (auth_message, space_message) = zodia_circles::revoke_from_circle(
             &self.circle_manager, &self.sync_store, circle_id, member,
         ).await?;
@@ -518,6 +488,7 @@ impl ZodiaSyncNode {
     /// to every current member of `circle_id`.
     pub async fn share_to_circle(&mut self, circle_id: SpaceId, plaintext: Vec<u8>) -> Result<(), SyncError> {
         let topic = topic_for_circle(circle_id);
+        self.open_topic(topic, CIRCLE_LOG_ID).await?;
         let message = zodia_circles::share_to_circle(
             &self.circle_manager, &self.sync_store, circle_id, &plaintext,
         ).await?;
@@ -556,7 +527,7 @@ impl ZodiaSyncNode {
         // `get_latest_entry` (unlike `_tx`-suffixed store methods) doesn't
         // need an open transaction — `store_and_associate` below opens its
         // own for the insert+associate+commit that does.
-        let latest: Option<Operation<OpExtensions>> = self.sync_store
+        let latest: Option<Operation<ZodiaExtensions>> = self.sync_store
             .get_latest_entry(&self.signing_key.verifying_key(), &log_id)
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
@@ -568,7 +539,7 @@ impl ZodiaSyncNode {
 
         let body_op = Body::new(&payload_bytes);
 
-        let mut header = Header::<OpExtensions> {
+        let mut header = Header::<ZodiaExtensions> {
             version:       1,
             verifying_key: self.signing_key.verifying_key(),
             signature:     None,
@@ -576,7 +547,7 @@ impl ZodiaSyncNode {
             payload_hash:  Some(body_op.hash()),
             seq_num,
             backlink,
-            extensions:    OpExtensions { timestamp: Timestamp::now() },
+            extensions:    ZodiaExtensions::Interp(OpExtensions { timestamp: Timestamp::now() }),
         };
         header.sign(&self.signing_key);
         let op_hash = header.hash();
@@ -622,7 +593,7 @@ async fn store_and_associate(
     author:    &VerifyingKey,
     log_id:    u64,
     id:        &Hash,
-    operation: &Operation<OpExtensions>,
+    operation: &Operation<ZodiaExtensions>,
 ) -> Result<(), SyncError> {
     let permit = store.begin().await.map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
@@ -665,11 +636,15 @@ async fn prune_older_than(
 
     let mut stale_hashes = Vec::new();
     for (hash_hex, header_bytes) in candidates {
-        let header: Header<OpExtensions> = p2panda_core::cbor::decode_cbor(&header_bytes[..])
+        let header: Header<ZodiaExtensions> = p2panda_core::cbor::decode_cbor(&header_bytes[..])
             .map_err(|e| SyncError::PandaStore(format!("failed to decode stored header: {e}")))?;
-        let timestamp = header
-            .extension::<Timestamp>()
-            .expect("every zodia op carries a timestamp extension");
+        // Circle ops carry no Timestamp extension (see ZodiaExtensions's
+        // own Extension impl) — pruning is scoped to interp/doc content
+        // only for this slice (docs/prd/circles.md), so they're simply
+        // never eligible rather than treated as an error.
+        let Some(timestamp) = header.extension::<Timestamp>() else {
+            continue;
+        };
         if timestamp < cutoff {
             stale_hashes.push(hash_hex);
         }
@@ -705,13 +680,13 @@ async fn prune_older_than(
 mod tests {
     use super::*;
 
-    fn signed_op(key: &SigningKey, payload: &[u8]) -> Operation<OpExtensions> {
+    fn signed_op(key: &SigningKey, payload: &[u8]) -> Operation<ZodiaExtensions> {
         signed_op_at(key, payload, Timestamp::now())
     }
 
-    fn signed_op_at(key: &SigningKey, payload: &[u8], timestamp: Timestamp) -> Operation<OpExtensions> {
+    fn signed_op_at(key: &SigningKey, payload: &[u8], timestamp: Timestamp) -> Operation<ZodiaExtensions> {
         let body = Body::new(payload);
-        let mut header = Header::<OpExtensions> {
+        let mut header = Header::<ZodiaExtensions> {
             version:       1,
             verifying_key: key.verifying_key(),
             signature:     None,
@@ -719,7 +694,7 @@ mod tests {
             payload_hash:  Some(body.hash()),
             seq_num:       0,
             backlink:      None,
-            extensions:    OpExtensions { timestamp },
+            extensions:    ZodiaExtensions::Interp(OpExtensions { timestamp }),
         };
         header.sign(key);
         Operation { hash: header.hash(), header, body: Some(body) }
@@ -820,7 +795,7 @@ mod tests {
             store.resolve(&topic).await.expect("resolve");
         assert_eq!(found.get(&author.verifying_key()), Some(&vec![log_id]));
 
-        let stored = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &op.hash)
+        let stored = OperationStore::<Operation<ZodiaExtensions>, p2panda_core::Hash>::get_operation(&store, &op.hash)
             .await.expect("get");
         assert!(stored.is_some());
     }
@@ -836,7 +811,7 @@ mod tests {
     /// constraint as `publish_bytes` — see `associate_after_commit_is_
     /// rejected...` above), so tests that just need an op sitting in the
     /// store wrap it here rather than repeating begin/commit each time.
-    async fn insert_op(store: &SqliteStore, op: &Operation<OpExtensions>, log_id: u64) {
+    async fn insert_op(store: &SqliteStore, op: &Operation<ZodiaExtensions>, log_id: u64) {
         let permit = store.begin().await.expect("begin");
         store.insert_operation(&op.hash, op, &log_id).await.expect("insert");
         store.commit(permit).await.expect("commit");
@@ -856,7 +831,7 @@ mod tests {
 
         // Then it's kept — 0 removed, and it's still readable.
         assert_eq!(removed, 0);
-        let still_there = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &op.hash)
+        let still_there = OperationStore::<Operation<ZodiaExtensions>, p2panda_core::Hash>::get_operation(&store, &op.hash)
             .await.expect("get");
         assert!(still_there.is_some());
     }
@@ -879,9 +854,9 @@ mod tests {
 
         // Then only the old op is gone; the recent one remains.
         assert_eq!(removed, 1);
-        let old_still_there = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &old_op.hash)
+        let old_still_there = OperationStore::<Operation<ZodiaExtensions>, p2panda_core::Hash>::get_operation(&store, &old_op.hash)
             .await.expect("get old");
-        let recent_still_there = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &recent_op.hash)
+        let recent_still_there = OperationStore::<Operation<ZodiaExtensions>, p2panda_core::Hash>::get_operation(&store, &recent_op.hash)
             .await.expect("get recent");
         assert!(old_still_there.is_none());
         assert!(recent_still_there.is_some());

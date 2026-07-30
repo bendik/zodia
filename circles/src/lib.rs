@@ -37,27 +37,39 @@ pub use p2panda_spaces::{
 /// Access conditions. Trivial for this first slice — see module docs.
 pub type CircleConditions = ();
 
-/// The extensions type circle/space operations carry in their `Header` —
-/// distinct from `zodia_ops::OpExtensions`, and deliberately so: a circle
-/// operation is never a regular `InterpOp`/`DocOp`, it lives on its own
-/// per-circle log/topic (`Topic::from(blake3("circle:" || circle_id))` per
-/// the parent architecture PRD).
-pub type CircleExtensions = SpacesArgs<CircleConditions>;
+/// The extensions type circle/space operations carry in their `Header`.
+///
+/// This is `zodia_ops::ZodiaExtensions`, *not* a bare `SpacesArgs<C>` —
+/// `p2panda-net::LogSync` registers one fixed protocol id on the shared
+/// iroh `Endpoint` regardless of its generic extensions type, so running a
+/// second engine for a different extensions type on the same `Endpoint`
+/// silently breaks the first one (found the hard way — see
+/// `docs/prd/circles.md`). Circle traffic has to ride the *same* wire type
+/// as `InterpOp`/`DocOp` traffic, wrapped in `ZodiaExtensions::Circle`, so
+/// there's only one `LogSync` engine, one protocol registration, total.
+pub type CircleExtensions = zodia_ops::ZodiaExtensions;
 
 /// A circle/space operation, ready to sign, persist, and broadcast exactly
-/// like any other Zodia operation — just with a different extensions type.
+/// like any other Zodia operation.
 ///
 /// Wraps `Operation<CircleExtensions>` rather than being a bare type alias
-/// because `p2panda_spaces::Forge::Message` requires `Borrow<CircleExtensions>`,
+/// because `p2panda_spaces::Forge::Message` requires `Borrow<SpacesArgs<C>>`,
 /// which `p2panda_core::Operation<E>` doesn't implement (it only implements
 /// `Borrow<Header<E>>`) — the orphan rule means only a local type can carry
-/// the extra impl.
+/// the extra impl. Since `CircleExtensions` is now the *combined* wire
+/// type rather than bare `SpacesArgs<C>`, this also has to project out the
+/// `Circle` variant rather than just deref through.
 #[derive(Debug, Clone)]
 pub struct CircleOperation(pub Operation<CircleExtensions>);
 
-impl Borrow<CircleExtensions> for CircleOperation {
-    fn borrow(&self) -> &CircleExtensions {
-        &self.0.header.extensions
+impl Borrow<SpacesArgs<CircleConditions>> for CircleOperation {
+    fn borrow(&self) -> &SpacesArgs<CircleConditions> {
+        match &self.0.header.extensions {
+            CircleExtensions::Circle(args) => args,
+            CircleExtensions::Interp(_) => {
+                unreachable!("a CircleOperation always wraps a Circle extensions variant")
+            }
+        }
     }
 }
 
@@ -401,7 +413,7 @@ impl p2panda_spaces::Forge<CircleConditions> for ZodiaForge {
         self.signing_key.verifying_key()
     }
 
-    async fn forge(&self, args: CircleExtensions) -> Result<Self::Message, Self::Error> {
+    async fn forge(&self, args: SpacesArgs<CircleConditions>) -> Result<Self::Message, Self::Error> {
         let latest: Option<Operation<CircleExtensions>> = self
             .store
             .get_latest_entry(&self.signing_key.verifying_key(), &CIRCLE_LOG_ID)
@@ -420,7 +432,7 @@ impl p2panda_spaces::Forge<CircleConditions> for ZodiaForge {
             payload_hash:  None,
             seq_num,
             backlink,
-            extensions:    args,
+            extensions:    CircleExtensions::Circle(args),
         };
         header.sign(&self.signing_key);
         let hash: Hash = header.hash();

@@ -1,7 +1,7 @@
 //! Inbound-operation pipeline.
 //!
 //! Sits between the raw `p2panda-net::sync::LogSync` event stream and the
-//! relm4 app layer.  Operations arrive at one end as `Operation<OpExtensions>`; they
+//! relm4 app layer.  Operations arrive at one end as `Operation<ZodiaExtensions>`; they
 //! flow through a stack of [`p2panda_stream::Processor`]s and emerge at
 //! the other end as typed [`StateEvent`]s the app consumes.
 //!
@@ -29,7 +29,7 @@ use p2panda_stream::{
 };
 use thiserror::Error;
 use tracing::{debug, trace};
-use zodia_ops::{DocOp, InterpOp, OpCodecError, OpExtensions};
+use zodia_ops::{DocOp, InterpOp, OpCodecError, ZodiaExtensions};
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -138,32 +138,32 @@ pub enum PipelineError {
 
 // ── decode processor ──────────────────────────────────────────────────────────
 
-/// Pipeline stage: `Operation<OpExtensions>` → either a decoded `(Operation, InterpOp)`
+/// Pipeline stage: `Operation<ZodiaExtensions>` → either a decoded `(Operation, InterpOp)`
 /// pair or a `StateEvent::Skipped` if the body is missing/malformed.
 ///
 /// Pass-through behaviour for downstream layers: `Decoded` flows on,
 /// `Skipped` short-circuits straight to the app as a `StateEvent`.
 #[derive(Debug, Clone, Default)]
 pub struct DecodeProcessor {
-    inbox:  RefCell<Vec<Operation<OpExtensions>>>,
+    inbox:  RefCell<Vec<Operation<ZodiaExtensions>>>,
     outbox: RefCell<Vec<DecodeOutput>>,
 }
 
 #[derive(Debug, Clone)]
 pub enum DecodeOutput {
-    /// `op` is boxed because `Operation<OpExtensions>` is ~400 bytes and the `Skipped`
+    /// `op` is boxed because `Operation<ZodiaExtensions>` is ~400 bytes and the `Skipped`
     /// variant is tiny — keeps the common case from inflating the enum.
-    Decoded { op: Box<Operation<OpExtensions>>, interp: InterpOp },
+    Decoded { op: Box<Operation<ZodiaExtensions>>, interp: InterpOp },
     /// Phase F-collab: op body decoded as a `DocOp` instead.
-    DecodedDoc { op: Box<Operation<OpExtensions>>, doc: DocOp },
+    DecodedDoc { op: Box<Operation<ZodiaExtensions>>, doc: DocOp },
     Skipped { reason: SkipReason },
 }
 
-impl Processor<Operation<OpExtensions>> for DecodeProcessor {
+impl Processor<Operation<ZodiaExtensions>> for DecodeProcessor {
     type Output = DecodeOutput;
     type Error  = PipelineError;
 
-    async fn process(&self, input: Operation<OpExtensions>) -> Result<(), Self::Error> {
+    async fn process(&self, input: Operation<ZodiaExtensions>) -> Result<(), Self::Error> {
         self.inbox.borrow_mut().push(input);
         // Decode synchronously into outbox; in a more elaborate stage this
         // could batch, dedupe, or apply back-pressure.
@@ -216,11 +216,11 @@ pub struct MaterializationProcessor {
 
 /// `InterpOp` → `StateEvent`, given the identity of whatever op carried it.
 ///
-/// Free function so it's shared between the normal `Operation<OpExtensions>`
+/// Free function so it's shared between the normal `Operation<ZodiaExtensions>`
 /// path (below) and the circle-content path (`materialize_circle_content`) —
 /// a circle-shared interpretation is decoded from a decrypted
 /// `p2panda_spaces::Event::Application`'s plaintext bytes, not from an
-/// `Operation<OpExtensions>.body`, so it has no `Operation<OpExtensions>` to
+/// `Operation<ZodiaExtensions>.body`, so it has no `Operation<ZodiaExtensions>` to
 /// pull `op_id`/`author` from; the caller supplies whatever *did* carry it
 /// (for circle content: the wrapping `CircleOperation`'s own hash/author).
 fn materialize_interp(op_id: Hash, author: VerifyingKey, interp: InterpOp) -> StateEvent {
@@ -243,7 +243,7 @@ fn materialize_interp(op_id: Hash, author: VerifyingKey, interp: InterpOp) -> St
 
 /// `DocOp` → `StateEvent`, same sharing rationale as [`materialize_interp`].
 /// `timestamp` likewise comes from whatever the caller has: the normal path
-/// reads it off `Operation<OpExtensions>`'s `Timestamp` extension; circle
+/// reads it off `Operation<ZodiaExtensions>`'s `Timestamp` extension; circle
 /// content has no such extension (its header carries `SpacesArgs<C>`
 /// instead) and passes local receipt time.
 fn materialize_doc(op_id: Hash, by: VerifyingKey, timestamp: Timestamp, doc: DocOp) -> StateEvent {
@@ -270,7 +270,7 @@ fn materialize_doc(op_id: Hash, by: VerifyingKey, timestamp: Timestamp, doc: Doc
 /// Decode + materialize plaintext bytes from a circle's decrypted
 /// `p2panda_spaces::Event::Application` — the circle-sharing equivalent of
 /// what `DecodeProcessor` + `MaterializationProcessor` do for the normal
-/// `Operation<OpExtensions>` path, minus the `Processor` machinery (there's
+/// `Operation<ZodiaExtensions>` path, minus the `Processor` machinery (there's
 /// no further pipeline stage after a circle message is already plaintext).
 ///
 /// `op_id`/`author` identify the *circle* operation that carried the
@@ -340,15 +340,15 @@ impl ZodiaPipeline {
     /// Today: `Decode → Materialize`.  Future phases insert
     /// `CausalOrdering`, `AccessControl`, `Pruning` between the two.
     pub fn new() -> Self {
-        let layered: LayeredBuilder<DecodeProcessor, Operation<OpExtensions>> =
-            PipelineBuilder::<Operation<OpExtensions>>::new().layer(DecodeProcessor::default());
+        let layered: LayeredBuilder<DecodeProcessor, Operation<ZodiaExtensions>> =
+            PipelineBuilder::<Operation<ZodiaExtensions>>::new().layer(DecodeProcessor::default());
         let layered = layered.layer(MaterializationProcessor::default());
         Self { inner: layered.build() }
     }
 
     /// Feed one raw operation into the pipeline.  Back-pressure-aware:
     /// returns once the operation is queued (not necessarily processed).
-    pub async fn process(&self, op: Operation<OpExtensions>) -> Result<(), PipelineError> {
+    pub async fn process(&self, op: Operation<ZodiaExtensions>) -> Result<(), PipelineError> {
         self.inner.process(op).await.map_err(flatten_composed_err)
     }
 
@@ -379,10 +379,11 @@ impl Default for ZodiaPipeline {
 mod tests {
     use super::*;
     use p2panda_core::{Body, Header, SigningKey, Timestamp};
+    use zodia_ops::OpExtensions;
 
-    fn make_op(signing_key: &SigningKey, body_bytes: Vec<u8>, seq_num: u32) -> Operation<OpExtensions> {
+    fn make_op(signing_key: &SigningKey, body_bytes: Vec<u8>, seq_num: u32) -> Operation<ZodiaExtensions> {
         let body = Body::new(&body_bytes);
-        let mut header = Header::<OpExtensions> {
+        let mut header = Header::<ZodiaExtensions> {
             version:       1,
             verifying_key: signing_key.verifying_key(),
             signature:     None,
@@ -390,7 +391,7 @@ mod tests {
             payload_hash:  Some(body.hash()),
             seq_num,
             backlink:      None,
-            extensions:    OpExtensions { timestamp: Timestamp::now() },
+            extensions:    ZodiaExtensions::Interp(OpExtensions { timestamp: Timestamp::now() }),
         };
         header.sign(signing_key);
         let hash = header.hash();
@@ -479,7 +480,7 @@ mod tests {
         }
     }
 
-    /// A circle-shared interpretation has no `Operation<OpExtensions>` to
+    /// A circle-shared interpretation has no `Operation<ZodiaExtensions>` to
     /// pull identity from (it arrives as plaintext bytes from a decrypted
     /// `p2panda_spaces::Event::Application`) — the caller must supply the
     /// carrying circle operation's own hash/author instead, and this must

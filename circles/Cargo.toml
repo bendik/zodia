@@ -6,6 +6,7 @@ license.workspace = true
 description = "Private-circle sharing — a thin wrapper over p2panda-spaces group encryption"
 
 [dependencies]
+zodia-ops.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

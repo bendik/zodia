@@ -8201,6 +8201,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "tokio",
+ "zodia-ops",
 ]
 
 [[package]]
@@ -8282,6 +8283,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "p2panda-core",
+ "p2panda-spaces",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -8311,6 +8313,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zodia-circles",
  "zodia-core",
  "zodia-net",
  "zodia-ops",

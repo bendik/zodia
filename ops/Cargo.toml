@@ -10,4 +10,5 @@ ciborium.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 p2panda-core = "0.7"
+p2panda-spaces = "0.7"
 blake3.workspace = true

@@ -13,18 +13,20 @@ use std::path::PathBuf;
 use std::thread;
 
 use ed25519_dalek::SigningKey;
-use p2panda_core::{Hash, SigningKey as PandaSigningKey, Timestamp, Topic};
+use p2panda_core::{Hash, SigningKey as PandaSigningKey, Timestamp, Topic, VerifyingKey};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::warn;
 
 use p2panda_net::{Endpoint, Gossip};
+use zodia_circles::{Access, SpaceId};
 use zodia_core::{BirthData, topic_key_global};
 use zodia_net::{NetworkConfig, PeerId, ZodiaNetwork};
 use zodia_ops::{DocOp, InterpOp};
 use zodia_pipeline::ZodiaPipeline;
 use zodia_sync::{SyncEvent, SyncError, ZodiaSyncNode};
 
+pub use zodia_circles::{Access as CircleAccess, SpaceId as CircleId};
 pub use zodia_pipeline::StateEvent;
 
 /// Per-peer catch-up lifecycle, raw (unlike [`SyncStatus`]'s aggregate
@@ -230,6 +232,64 @@ impl ZodiaClient {
         reply_rx.await.map_err(|_| ClientError::Disconnected)?
     }
 
+    /// Create a private circle. This device is always added with
+    /// `Access::manage()` automatically (see `Manager::create_space`'s own
+    /// doc comment) — `initial_members` is anyone *besides* yourself to
+    /// add up front; `invite_to_circle` can add more later. Returns the
+    /// new circle's id.
+    pub async fn create_circle(
+        &self,
+        initial_members: Vec<(VerifyingKey, CircleAccess<()>)>,
+    ) -> Result<CircleId, ClientError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx.send(Command::CreateCircle { initial_members, reply: reply_tx }).await
+            .map_err(|_| ClientError::Disconnected)?;
+        reply_rx.await.map_err(|_| ClientError::Disconnected)?
+    }
+
+    /// Grant `member` `access` in `circle_id`. `member` must be a peer
+    /// whose key-bundle this device has already seen — true for any peer
+    /// this device has ever been online alongside (see `zodia_sync`'s
+    /// circle directory topic).
+    pub async fn invite_to_circle(
+        &self,
+        circle_id: CircleId,
+        member:    VerifyingKey,
+        access:    CircleAccess<()>,
+    ) -> Result<(), ClientError> {
+        self.call(|reply| Command::InviteToCircle { circle_id, member, access, reply }).await
+    }
+
+    /// Revoke `member`'s access to `circle_id`. Key rotation for the
+    /// remaining members happens automatically (see
+    /// `docs/prd/circles.md`'s "Key rotation on revocation is automatic").
+    pub async fn revoke_from_circle(&self, circle_id: CircleId, member: VerifyingKey) -> Result<(), ClientError> {
+        self.call(|reply| Command::RevokeFromCircle { circle_id, member, reply }).await
+    }
+
+    /// Share an interpretation privately with `circle_id`'s current
+    /// members instead of the public network — encodes the same
+    /// `InterpOp::Author` the public path (`Self::author`) uses, so once
+    /// decrypted it materialises into the identical `StateEvent::InterpAuthored`
+    /// (see `zodia_pipeline::materialize_circle_content`).
+    pub async fn share_interp_to_circle(
+        &self,
+        circle_id:  CircleId,
+        interp_key: &str,
+        body:       String,
+    ) -> Result<(), ClientError> {
+        let plaintext = InterpOp::Author { interp_key: interp_key.to_string(), body }.encode();
+        self.call(|reply| Command::ShareToCircle { circle_id, plaintext, reply }).await
+    }
+
+    /// Current members of `circle_id` and their access levels.
+    pub async fn circle_members(&self, circle_id: CircleId) -> Result<Vec<(VerifyingKey, CircleAccess<()>)>, ClientError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx.send(Command::CircleMembers { circle_id, reply: reply_tx }).await
+            .map_err(|_| ClientError::Disconnected)?;
+        reply_rx.await.map_err(|_| ClientError::Disconnected)?
+    }
+
     /// Legacy whole-interpretation authoring (`InterpOp::Author`, log 0).
     pub async fn author(&self, interp_key: &str, body: String) -> Result<(), ClientError> {
         self.call(|reply| Command::Author { interp_key: interp_key.to_string(), body, reply }).await
@@ -328,6 +388,17 @@ enum NetworkSource {
 }
 
 enum Command {
+    CreateCircle {
+        initial_members: Vec<(VerifyingKey, Access<()>)>,
+        reply:           oneshot::Sender<Result<SpaceId, ClientError>>,
+    },
+    InviteToCircle { circle_id: SpaceId, member: VerifyingKey, access: Access<()>, reply: Reply },
+    RevokeFromCircle { circle_id: SpaceId, member: VerifyingKey, reply: Reply },
+    ShareToCircle { circle_id: SpaceId, plaintext: Vec<u8>, reply: Reply },
+    CircleMembers {
+        circle_id: SpaceId,
+        reply:     oneshot::Sender<Result<Vec<(VerifyingKey, Access<()>)>, ClientError>>,
+    },
     Author { interp_key: String, body: String, reply: Reply },
     Revoke { target_log_id: Hash, reply: Reply },
     Edit {
@@ -470,6 +541,18 @@ async fn run(
                             remote: remote_bytes, error,
                         });
                     }
+                    SyncEvent::CircleContentReceived { op_id, author, plaintext, .. } => {
+                        // `space_id` isn't threaded into `StateEvent` — by
+                        // design (docs/prd/circles.md), a decrypted circle
+                        // share materialises into the exact same StateEvent
+                        // shape a public InterpOp/DocOp would, so the rest
+                        // of the app (affirm/thread/revoke handling) needs
+                        // no separate code path for circle content.
+                        let event = zodia_pipeline::materialize_circle_content(
+                            op_id, author, Timestamp::now(), &plaintext,
+                        );
+                        let _ = events_tx.send(event);
+                    }
                 }
             }
             else => break,
@@ -491,6 +574,26 @@ async fn handle_command(
     expiry_tx:  &mpsc::Sender<String>,
 ) {
     match cmd {
+        Command::CreateCircle { initial_members, reply } => {
+            let res = node.create_circle(&initial_members).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::InviteToCircle { circle_id, member, access, reply } => {
+            let res = node.invite_to_circle(circle_id, member, access).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::RevokeFromCircle { circle_id, member, reply } => {
+            let res = node.revoke_from_circle(circle_id, member).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::ShareToCircle { circle_id, plaintext, reply } => {
+            let res = node.share_to_circle(circle_id, plaintext).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::CircleMembers { circle_id, reply } => {
+            let res = node.circle_members(circle_id).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
         Command::Author { interp_key, body, reply } => {
             let res = node.publish(InterpOp::Author { interp_key, body }).await.map_err(sync_err);
             let _ = reply.send(res);

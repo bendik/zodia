@@ -44,6 +44,56 @@ impl Extension<Timestamp> for OpExtensions {
     }
 }
 
+/// The one extensions type every operation on Zodia's network actually
+/// carries — `Operation<E>`'s `E` has to be a single, fixed type for a
+/// given `p2panda-net::LogSync` engine (it registers one fixed protocol id
+/// on the shared iroh `Endpoint` regardless of `E`; running two engines
+/// with different `E` on the same `Endpoint` silently breaks one of them —
+/// found the hard way, see `docs/prd/circles.md`). Interpretation/doc
+/// traffic and circle traffic therefore have to share one wire type, not
+/// two, even though they mean very different things.
+///
+/// `Circle`'s payload is `p2panda_spaces::SpacesArgs<()>` directly — the
+/// exact type `zodia-circles`'s `Forge` impl has to produce (dictated by
+/// `p2panda-spaces` itself, not something Zodia chose) — so this crate
+/// depends on `p2panda-spaces` for that one type, not on `zodia-circles`
+/// (which instead depends on this crate, avoiding a cycle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ZodiaExtensions {
+    Interp(OpExtensions),
+    Circle(p2panda_spaces::SpacesArgs<()>),
+}
+
+impl Extension<Timestamp> for ZodiaExtensions {
+    fn extract(header: &Header<Self>) -> Option<Timestamp> {
+        match &header.extensions {
+            ZodiaExtensions::Interp(ext) => Some(ext.timestamp),
+            // Circle ops carry no Timestamp extension — they're never
+            // decoded through zodia-pipeline's normal path (see
+            // docs/prd/circles.md's pipeline-wiring section), so nothing
+            // ever calls `.extension::<Timestamp>()` expecting `Some` here.
+            ZodiaExtensions::Circle(_) => None,
+        }
+    }
+}
+
+/// Lets `p2panda_store::SqliteSpacesStore<ZodiaExtensions>` satisfy its own
+/// `SpacesMessageStore<SpacesArgs<()>>` bound (`E: Extensions + Borrow<ARG>`)
+/// — `zodia-circles` needs this to construct a `CircleManager` at all.
+/// Only ever called on operations already known to carry `Circle` (every
+/// operation `SqliteSpacesStore` fetches this way came from a circle topic
+/// in the first place), matching `CircleOperation`'s own equivalent impl.
+impl std::borrow::Borrow<p2panda_spaces::SpacesArgs<()>> for ZodiaExtensions {
+    fn borrow(&self) -> &p2panda_spaces::SpacesArgs<()> {
+        match self {
+            ZodiaExtensions::Circle(args) => args,
+            ZodiaExtensions::Interp(_) => {
+                unreachable!("SqliteSpacesStore only ever fetches Circle-extensions operations")
+            }
+        }
+    }
+}
+
 // ── operation ─────────────────────────────────────────────────────────────────
 
 /// A single Zodia operation, ready to be CBOR-encoded into a

@@ -11,6 +11,7 @@ zodia-net.workspace = true
 zodia-sync.workspace = true
 zodia-pipeline.workspace = true
 zodia-ops.workspace = true
+zodia-circles.workspace = true
 ed25519-dalek.workspace = true
 p2panda-core = "0.7"
 p2panda-net = { version = "0.7", features = [
