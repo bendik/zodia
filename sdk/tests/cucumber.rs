@@ -121,6 +121,15 @@ async fn peer_subscribes(world: &mut ZodiaWorld, name: String, key: String) {
 // whatever the nearest preceding explicit Given/When/Then was, and this
 // step appears after a When in "re-touching" scenarios (see
 // grace_period_unsubscribe.feature's second scenario).
+#[when(expr = "{string} unsubscribes from {string}")]
+async fn peer_unsubscribes(world: &mut ZodiaWorld, name: String, key: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .unsubscribe(&key)
+        .await
+        .expect("unsubscribe succeeds");
+}
+
 #[given(regex = r#"^"([^"]+)" touches subscription to "([^"]+)" with a grace period of (\d+) seconds?$"#)]
 #[when(regex = r#"^"([^"]+)" touches subscription to "([^"]+)" with a grace period of (\d+) seconds?$"#)]
 async fn peer_touches_subscription(world: &mut ZodiaWorld, name: String, key: String, grace_secs: u64) {
@@ -488,7 +497,7 @@ async fn observes_lagged(world: &mut ZodiaWorld, name: String, secs: u64) {
     );
 }
 
-#[then(expr = "{string} has caught up with at least {int} peer")]
+#[then(regex = r#"^"([^"]+)" has caught up with at least (\d+) peers?$"#)]
 async fn has_caught_up_with_at_least(world: &mut ZodiaWorld, name: String, min_peers: usize) {
     let status = world.clients.get(&name)
         .unwrap_or_else(|| panic!("no peer named {name}"))
