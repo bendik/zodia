@@ -1373,6 +1373,13 @@ impl AsyncComponent for AppModel {
                         warn!("edit publish: {e}");
                     }
                 }
+                // Pushed locally — the pipeline only echoes `DocEdited` back
+                // from peers, never to the editor themself (see
+                // `FeedItem::doc_edited`'s doc comment).
+                if let Some(s) = &self.feed_view_sender {
+                    let item = crate::feed_item::FeedItem::doc_edited(&interp_key, &me, &edit_op_id, ts);
+                    let _ = s.send(crate::feed_view::FeedViewMsg::Push(item));
+                }
                 self.network_changed_token += 1;
             }
             AppMsg::ProposeDocVeto { interp_key, target_edit_op_id } => {
@@ -1607,6 +1614,26 @@ impl AsyncComponent for AppModel {
 
             // ── circles (docs/prd/circles.md) ────────────────────────────────
             AppMsg::OpenShareToCirclePicker { interp_key, body } => {
+                // A `DocEdited` card carries no body of its own (see
+                // `feed_view::can_share`'s doc comment) — it sends an empty
+                // body here as a signal to load the doc's current text.
+                let body = if body.is_empty() {
+                    match self.store.doc_load(&interp_key).await {
+                        Ok(Some(bytes)) => {
+                            let me: [u8; 32] = self.identity.public_key();
+                            match zodia_doc::VerifyingKey::from_bytes(&me)
+                                .ok()
+                                .and_then(|vk| zodia_doc::InterpDoc::from_snapshot(&vk, &bytes).ok())
+                            {
+                                Some(doc) => doc.body_text(),
+                                None => return,
+                            }
+                        }
+                        _ => return,
+                    }
+                } else {
+                    body
+                };
                 // Dialog needs a window to present on, which `update()`
                 // doesn't have — `update_view` does. Stash the request and
                 // let it build + show the picker, same pattern as every

@@ -164,6 +164,25 @@ impl FeedItem {
         }
     }
 
+    /// Own doc edit, pushed locally right after publish so it shows up in
+    /// the author's own feed too (mirrors `doc_rolled_back` — the pipeline
+    /// only echoes `DocEdited` back from peers, never to the editor
+    /// themself, so without this a self-edit was invisible in one's own
+    /// feed and thus unreachable from the circle-share button).
+    pub fn doc_edited(interp_key: &str, editor: &[u8; 32], edit_op_id: &[u8; 32], timestamp: u64) -> FeedItem {
+        let editor_vk = VerifyingKey::try_from(editor.as_slice())
+            .unwrap_or_else(|_| zero_key());
+        FeedItem {
+            event_id:   *edit_op_id,
+            timestamp,
+            targets_me: false,
+            payload: FeedPayload::DocEdited {
+                editor:     editor_vk,
+                interp_key: interp_key.to_string(),
+            },
+        }
+    }
+
     /// `interp_key` predicate used by per-aspect-page filtering.  Returns the
     /// interp_key the event is about, where applicable.
     pub fn interp_key(&self) -> Option<&str> {

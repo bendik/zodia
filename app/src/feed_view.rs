@@ -571,6 +571,16 @@ fn is_own_authored(payload: &FeedPayload, me: &[u8; 32]) -> bool {
     matches!(payload, FeedPayload::InterpAuthored { author, .. } if author.as_bytes() == me)
 }
 
+/// True iff `payload` is content of ours that can be shared to a circle —
+/// either a legacy authored interpretation or a collaborative doc edit we
+/// made ourselves. `DocEdited` carries no body text (unlike
+/// `InterpAuthored`), so the share handler sends an empty body for it and
+/// `AppMsg::OpenShareToCirclePicker` loads the doc's current text instead.
+fn can_share(payload: &FeedPayload, me: &[u8; 32]) -> bool {
+    is_own_authored(payload, me)
+        || matches!(payload, FeedPayload::DocEdited { editor, .. } if editor.as_bytes() == me)
+}
+
 pub struct FeedCardWidgets {
     glyph:      gtk::Label,
     title:      gtk::Label,
@@ -676,7 +686,7 @@ impl FactoryComponent for FeedCard {
         share_btn.add_css_class("flat");
         share_btn.add_css_class("circular");
         share_btn.set_valign(gtk::Align::Center);
-        share_btn.set_visible(is_own_authored(&self.item.payload, &self.me));
+        share_btn.set_visible(can_share(&self.item.payload, &self.me));
         outer.append(&share_btn);
 
         // Right: revoke button.
@@ -777,13 +787,24 @@ impl FactoryComponent for FeedCard {
         });
 
         // Share button → emit ShareToCircle with the interp_key/body.
+        // `DocEdited` has no body of its own — sent empty, and
+        // `AppMsg::OpenShareToCirclePicker` loads the doc's current text
+        // instead (see `can_share`'s doc comment).
         let share_payload = self.item.payload.clone();
         let s3 = sender.clone();
         share_btn.connect_clicked(move |_| {
-            if let FeedPayload::InterpAuthored { interp_key, body, .. } = &share_payload {
-                let _ = s3.output(FeedCardOut::ShareToCircle {
-                    interp_key: interp_key.clone(), body: body.clone(),
-                });
+            match &share_payload {
+                FeedPayload::InterpAuthored { interp_key, body, .. } => {
+                    let _ = s3.output(FeedCardOut::ShareToCircle {
+                        interp_key: interp_key.clone(), body: body.clone(),
+                    });
+                }
+                FeedPayload::DocEdited { interp_key, .. } => {
+                    let _ = s3.output(FeedCardOut::ShareToCircle {
+                        interp_key: interp_key.clone(), body: String::new(),
+                    });
+                }
+                _ => {}
             }
         });
 
@@ -800,7 +821,7 @@ impl FactoryComponent for FeedCard {
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: FactorySender<Self>) {
         widgets.unread.set_visible(false);
         widgets.revoke_btn.set_visible(is_own_authored(&self.item.payload, &self.me));
-        widgets.share_btn.set_visible(is_own_authored(&self.item.payload, &self.me));
+        widgets.share_btn.set_visible(can_share(&self.item.payload, &self.me));
         render_into(
             &self.item,
             &widgets.glyph, &widgets.title, &widgets.subtitle,
