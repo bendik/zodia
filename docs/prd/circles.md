@@ -1,6 +1,6 @@
 # PRD: zodia-circles — private-circle sharing
 
-**Status:** wired end-to-end and BDD-proven over the real network — `zodia-sync` (one unified `LogSync` engine, `ZodiaExtensions`), `zodia-pipeline` (shared decode/materialize path), `zodia-sdk` (`create_circle`/`open_circle`/`invite_to_circle`/`revoke_from_circle`/`share_interp_to_circle`/`circle_members`), and `sdk/tests/features/circle_sharing.feature` (an invited member reads a share; a never-invited peer doesn't) all real, all passing, no regressions to the existing 16-scenario suite. No UI yet. Known gap: all of an author's circles currently share one log (see "Wiring into zodia-sync" below).
+**Status:** shipped end-to-end, backend through GTK UI — `zodia-sync` (one unified `LogSync` engine, `ZodiaExtensions`), `zodia-pipeline` (shared decode/materialize path), `zodia-sdk` (`create_circle`/`open_circle`/`invite_to_circle`/`revoke_from_circle`/`share_interp_to_circle`/`circle_members`), `sdk/tests/features/circle_sharing.feature` (BDD-proven over the real network: an invited member reads a share, a never-invited peer doesn't), and a relm4/libadwaita UI (a Circles sidebar section with per-circle pages, and a share-to-circle picker on feed cards that creates a circle on the fly). Known gap: all of an author's circles currently share one log (see "Wiring into zodia-sync" below).
 **Branch:** `main`
 **Foundation required:** `docs/prd/p2panda-0.7-migration.md` (ships `p2panda-spaces`, `p2panda-auth`, `p2panda-encryption`, and p2panda-stream's `spaces` processor — all load-bearing here)
 
@@ -63,9 +63,14 @@ The original sketch here (composing p2panda-stream's `spaces::Spaces` processor 
 
 What a circle-shared interpretation needs downstream is the *same* decode-then-materialize logic `DecodeProcessor`/`MaterializationProcessor` already have for `InterpOp`/`DocOp` bytes — it just needs to run on `Event::Application`'s plaintext `data: Vec<u8>` instead of `Operation<OpExtensions>.body`. The fix is a refactor, not a new processor type: pull the `InterpOp`/`DocOp` match arms in `MaterializationProcessor::process` out into a free function taking `(op_id: Hash, author: VerifyingKey, timestamp: Timestamp, plaintext: &[u8]) -> StateEvent`, callable from both the existing `Operation<OpExtensions>` path and a new circle-content path. `op_id`/`author` for circle content come from the *circle* operation that carried the ciphertext (`CircleOperation`'s own hash/verifying_key, both already exposed via its `Digest`/`Provenance` impls) — the plaintext `InterpOp` itself carries neither. `timestamp` has no equivalent on a `CircleOperation` (its extensions slot is `SpacesArgs<C>`, not `OpExtensions`) — local receipt time (`Timestamp::now()` when the `Application` event arrives) is the practical stand-in, same reasoning as any other "when did I learn about this" display value.
 
-### "Share with..." UI
+### "Share with..." UI — shipped, and reshaped mid-build by real-time direction
 
-Per the parent PRD: a picker on each contribution choosing public network (current behaviour) vs. a named circle. The plumbing above is now real and BDD-proven — this is next.
+Per the parent PRD: a picker on each contribution choosing public network (current behaviour) vs. a named circle. Shipped, but not as originally sketched — two explicit steers changed the shape while building it:
+
+- **No bundled "Circles" management tab.** The first pass built exactly that (one static sidebar entry, one page listing every circle with create/invite/members all together) — reworked into a dedicated **Circles sidebar section**, one row per circle, each opening its own dynamically-added page (mirrors how connected-peer pages already work — a plain widget-builder function, `circle_page.rs`, not a relm4 sub-`Component`, since it only needs to fire `AppMsg`s on click). Ranks directly below Chart/Sky/Network and above the "Others" (direct-peer) section.
+- **No standalone "create circle" form.** Circle creation is folded into the share flow itself: the new share button on a feed card's own contributions (visible under the same rule as the existing revoke button — your own `InterpOp::Author` only) opens a picker listing existing circles plus an entry to type a new name — picking a name creates the circle and shares to it in one step, "born out of" whatever's being shared rather than an abstract management action.
+
+Local-only circle names live in `circles.tsv` (`circle_id_hex → name`), same flat-TSV pattern `nicknames.tsv` already established for "this identifier is a hash with no name."
 
 ### Two things the real API taught us that no amount of reading source would have (found via the failing tests, not guessed)
 
