@@ -7,7 +7,7 @@ description = "Consent tier key material — identity keypair, X3DH, symmetric r
 
 [dependencies]
 zodia-core.workspace = true
-p2panda-core = "0.6"
+p2panda-core = "0.7"
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 blake3.workspace = true

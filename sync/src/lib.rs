@@ -3,7 +3,7 @@
 //! `ZodiaSyncNode` owns the `p2panda-net::LogSync` machinery and exposes
 //! two simple channels to the app layer:
 //!
-//! * `inbound_ops` — every received `Operation<()>`, raw.  The app feeds
+//! * `inbound_ops` — every received `Operation<OpExtensions>`, raw.  The app feeds
 //!   these into a `zodia-pipeline::ZodiaPipeline` for decoding, ordering,
 //!   access-control, materialisation.
 //! * `publish(op: InterpOp)` — encode the canonical Zodia op into a body,
@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use zodia_core::topic_key_for_interp;
-use zodia_ops::{DocOp, InterpOp, log_id_for_key};
+use zodia_ops::{DocOp, InterpOp, OpExtensions, log_id_for_key};
 
 // ── sync event ────────────────────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ use zodia_ops::{DocOp, InterpOp, log_id_for_key};
 pub enum SyncEvent {
     /// A peer's operation came down the wire.  Will get decoded + materialised
     /// by `zodia-pipeline` downstream.
-    OperationReceived(Box<Operation<()>>),
+    OperationReceived(Box<Operation<OpExtensions>>),
     /// A catch-up sync session opened with `remote`.
     SyncStarted {
         remote: VerifyingKey,
@@ -93,7 +93,7 @@ pub enum SyncError {
 // ── sync node ─────────────────────────────────────────────────────────────────
 
 /// The live sync handle.  Keeps the p2panda LogSync machinery alive and
-/// exposes a raw `Operation<()>` channel for the app's pipeline to consume.
+/// exposes a raw `Operation<OpExtensions>` channel for the app's pipeline to consume.
 ///
 /// Phase C-2: holds one `SyncHandle` per subscribed topic rather than a
 /// single fixed one.  `global_topic` (legacy `InterpOp` traffic, log 0)
@@ -106,14 +106,14 @@ pub struct ZodiaSyncNode {
     sync_store:   SqliteStore,
     /// Shared LogSync engine — `.stream()` opens a new topic subscription
     /// without needing a fresh endpoint/gossip pair.
-    log_sync:     LogSync<SqliteStore, u64, ()>,
+    log_sync:     LogSync<SqliteStore, u64, OpExtensions>,
     /// The always-on legacy topic; `publish` (InterpOp) targets this one.
     global_topic: Topic,
     /// Forwarder-task sender, cloned into each newly opened topic's pump.
     ev_tx:        mpsc::Sender<SyncEvent>,
     /// Live handles keyed by topic. Dropping an entry ends that topic's
     /// sync session (`SyncHandle::drop` sends `ToSyncManager::Close`).
-    handles:      HashMap<Topic, SyncHandle<Operation<()>, TopicLogSyncEvent<()>>>,
+    handles:      HashMap<Topic, SyncHandle<Operation<OpExtensions>, TopicLogSyncEvent<OpExtensions>>>,
     /// Mixed-purpose channel: operation arrivals plus lifecycle events
     /// (session start / finish / failure).  Operations feed the pipeline;
     /// lifecycle events drive UI sync-status indicators.
@@ -146,7 +146,7 @@ impl ZodiaSyncNode {
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
         // ── LogSync ───────────────────────────────────────────────────────────
-        let log_sync = LogSync::<_, u64, ()>::builder(sync_store.clone(), endpoint, gossip)
+        let log_sync = LogSync::<_, u64, OpExtensions>::builder(sync_store.clone(), endpoint, gossip)
             .spawn()
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
@@ -256,8 +256,8 @@ impl ZodiaSyncNode {
                         debug!(remote = %remote_tag, "sync: catch-up finished");
                         SyncEvent::SyncFinished {
                             remote,
-                            received_ops:   metrics.received_operations(),
-                            received_bytes: metrics.received_bytes(),
+                            received_ops:   metrics.received_operations() as u64,
+                            received_bytes: metrics.received_bytes() as u64,
                         }
                     }
                     TopicLogSyncEvent::Failed { error } => {
@@ -309,7 +309,7 @@ impl ZodiaSyncNode {
         // `get_latest_entry` (unlike `_tx`-suffixed store methods) doesn't
         // need an open transaction — `store_and_associate` below opens its
         // own for the insert+associate+commit that does.
-        let latest: Option<Operation<()>> = self.sync_store
+        let latest: Option<Operation<OpExtensions>> = self.sync_store
             .get_latest_entry(&self.signing_key.verifying_key(), &log_id)
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
@@ -321,16 +321,15 @@ impl ZodiaSyncNode {
 
         let body_op = Body::new(&payload_bytes);
 
-        let mut header = Header::<()> {
+        let mut header = Header::<OpExtensions> {
             version:       1,
             verifying_key: self.signing_key.verifying_key(),
             signature:     None,
             payload_size:  body_op.size(),
             payload_hash:  Some(body_op.hash()),
-            timestamp:     Timestamp::now(),
             seq_num,
             backlink,
-            extensions:    (),
+            extensions:    OpExtensions { timestamp: Timestamp::now() },
         };
         header.sign(&self.signing_key);
         let op_hash = header.hash();
@@ -351,7 +350,6 @@ impl ZodiaSyncNode {
             .get(&topic)
             .expect("publish_bytes called after open_topic")
             .publish(operation)
-            .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
 
         Ok(())
@@ -377,7 +375,7 @@ async fn store_and_associate(
     author:    &VerifyingKey,
     log_id:    u64,
     id:        &Hash,
-    operation: &Operation<()>,
+    operation: &Operation<OpExtensions>,
 ) -> Result<(), SyncError> {
     let permit = store.begin().await.map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
@@ -397,25 +395,53 @@ async fn store_and_associate(
 /// live network — same reasoning as this crate's `associate`/transaction
 /// tests: `ZodiaSyncNode` itself needs a real `Endpoint`/`Gossip` to spawn.
 ///
-/// Timestamps are stored as plain decimal text (`operations_v1.timestamp`,
-/// matching `p2panda_store`'s own `Timestamp::to_string()` convention), so
-/// `<` here is a lexicographic string comparison — correct as long as both
-/// values have the same digit count. Microsecond-since-epoch timestamps
-/// are a stable 16 digits from year ~2001 to ~2287, comfortably covering
-/// any realistic op.
+/// p2panda-store 0.7 dropped the `operations_v1.timestamp` column (matching
+/// `Header::timestamp`'s own removal upstream — see [`zodia_ops::OpExtensions`]).
+/// The timestamp now only exists CBOR-encoded inside `operations_v1.header`,
+/// so this reads the header blob back with the same `p2panda_core::cbor`
+/// codec `p2panda-store` itself uses to write it, decodes each candidate's
+/// `Timestamp` extension, and only then deletes the ones past cutoff — still
+/// a single bulk `DELETE ... WHERE hash IN (...)` rather than one call per
+/// row through `OperationStore::delete_operation`.
 async fn prune_older_than(
     store:  &SqliteStore,
     keep:   &VerifyingKey,
     cutoff: Timestamp,
 ) -> Result<u64, SyncError> {
-    let result = sqlx::query(
-        "DELETE FROM operations_v1 WHERE timestamp < ? AND verifying_key != ?",
+    let candidates: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT hash, header FROM operations_v1 WHERE verifying_key != ?",
     )
-    .bind(cutoff.to_string())
     .bind(keep.to_hex())
-    .execute(store.pool())
+    .fetch_all(store.pool())
     .await
     .map_err(|e| SyncError::PandaStore(e.to_string()))?;
+
+    let mut stale_hashes = Vec::new();
+    for (hash_hex, header_bytes) in candidates {
+        let header: Header<OpExtensions> = p2panda_core::cbor::decode_cbor(&header_bytes[..])
+            .map_err(|e| SyncError::PandaStore(format!("failed to decode stored header: {e}")))?;
+        let timestamp = header
+            .extension::<Timestamp>()
+            .expect("every zodia op carries a timestamp extension");
+        if timestamp < cutoff {
+            stale_hashes.push(hash_hex);
+        }
+    }
+
+    if stale_hashes.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders = std::iter::repeat("?").take(stale_hashes.len()).collect::<Vec<_>>().join(",");
+    let query_str = format!("DELETE FROM operations_v1 WHERE hash IN ({placeholders})");
+    let mut query = sqlx::query(&query_str);
+    for hash_hex in &stale_hashes {
+        query = query.bind(hash_hex);
+    }
+    let result = query
+        .execute(store.pool())
+        .await
+        .map_err(|e| SyncError::PandaStore(e.to_string()))?;
     Ok(result.rows_affected())
 }
 
@@ -432,22 +458,21 @@ async fn prune_older_than(
 mod tests {
     use super::*;
 
-    fn signed_op(key: &SigningKey, payload: &[u8]) -> Operation<()> {
+    fn signed_op(key: &SigningKey, payload: &[u8]) -> Operation<OpExtensions> {
         signed_op_at(key, payload, Timestamp::now())
     }
 
-    fn signed_op_at(key: &SigningKey, payload: &[u8], timestamp: Timestamp) -> Operation<()> {
+    fn signed_op_at(key: &SigningKey, payload: &[u8], timestamp: Timestamp) -> Operation<OpExtensions> {
         let body = Body::new(payload);
-        let mut header = Header::<()> {
+        let mut header = Header::<OpExtensions> {
             version:       1,
             verifying_key: key.verifying_key(),
             signature:     None,
             payload_size:  body.size(),
             payload_hash:  Some(body.hash()),
-            timestamp,
             seq_num:       0,
             backlink:      None,
-            extensions:    (),
+            extensions:    OpExtensions { timestamp },
         };
         header.sign(key);
         Operation { hash: header.hash(), header, body: Some(body) }
@@ -548,7 +573,7 @@ mod tests {
             store.resolve(&topic).await.expect("resolve");
         assert_eq!(found.get(&author.verifying_key()), Some(&vec![log_id]));
 
-        let stored = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &op.hash)
+        let stored = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &op.hash)
             .await.expect("get");
         assert!(stored.is_some());
     }
@@ -564,7 +589,7 @@ mod tests {
     /// constraint as `publish_bytes` — see `associate_after_commit_is_
     /// rejected...` above), so tests that just need an op sitting in the
     /// store wrap it here rather than repeating begin/commit each time.
-    async fn insert_op(store: &SqliteStore, op: &Operation<()>, log_id: u64) {
+    async fn insert_op(store: &SqliteStore, op: &Operation<OpExtensions>, log_id: u64) {
         let permit = store.begin().await.expect("begin");
         store.insert_operation(&op.hash, op, &log_id).await.expect("insert");
         store.commit(permit).await.expect("commit");
@@ -584,7 +609,7 @@ mod tests {
 
         // Then it's kept — 0 removed, and it's still readable.
         assert_eq!(removed, 0);
-        let still_there = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &op.hash)
+        let still_there = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &op.hash)
             .await.expect("get");
         assert!(still_there.is_some());
     }
@@ -607,9 +632,9 @@ mod tests {
 
         // Then only the old op is gone; the recent one remains.
         assert_eq!(removed, 1);
-        let old_still_there = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &old_op.hash)
+        let old_still_there = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &old_op.hash)
             .await.expect("get old");
-        let recent_still_there = OperationStore::<Operation<()>, p2panda_core::Hash, u64>::get_operation(&store, &recent_op.hash)
+        let recent_still_there = OperationStore::<Operation<OpExtensions>, p2panda_core::Hash>::get_operation(&store, &recent_op.hash)
             .await.expect("get recent");
         assert!(old_still_there.is_none());
         assert!(recent_still_there.is_some());

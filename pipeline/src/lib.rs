@@ -1,7 +1,7 @@
 //! Inbound-operation pipeline.
 //!
 //! Sits between the raw `p2panda-net::sync::LogSync` event stream and the
-//! relm4 app layer.  Operations arrive at one end as `Operation<()>`; they
+//! relm4 app layer.  Operations arrive at one end as `Operation<OpExtensions>`; they
 //! flow through a stack of [`p2panda_stream::Processor`]s and emerge at
 //! the other end as typed [`StateEvent`]s the app consumes.
 //!
@@ -23,13 +23,13 @@
 
 use std::cell::RefCell;
 
-use p2panda_core::{Hash, Operation, VerifyingKey};
+use p2panda_core::{Hash, Operation, Timestamp, VerifyingKey};
 use p2panda_stream::{
     ComposedError, ComposedProcessors, LayeredBuilder, Pipeline, PipelineBuilder, Processor,
 };
 use thiserror::Error;
 use tracing::{debug, trace};
-use zodia_ops::{DocOp, InterpOp, OpCodecError};
+use zodia_ops::{DocOp, InterpOp, OpCodecError, OpExtensions};
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -138,32 +138,32 @@ pub enum PipelineError {
 
 // ── decode processor ──────────────────────────────────────────────────────────
 
-/// Pipeline stage: `Operation<()>` → either a decoded `(Operation, InterpOp)`
+/// Pipeline stage: `Operation<OpExtensions>` → either a decoded `(Operation, InterpOp)`
 /// pair or a `StateEvent::Skipped` if the body is missing/malformed.
 ///
 /// Pass-through behaviour for downstream layers: `Decoded` flows on,
 /// `Skipped` short-circuits straight to the app as a `StateEvent`.
 #[derive(Debug, Clone, Default)]
 pub struct DecodeProcessor {
-    inbox:  RefCell<Vec<Operation<()>>>,
+    inbox:  RefCell<Vec<Operation<OpExtensions>>>,
     outbox: RefCell<Vec<DecodeOutput>>,
 }
 
 #[derive(Debug, Clone)]
 pub enum DecodeOutput {
-    /// `op` is boxed because `Operation<()>` is ~400 bytes and the `Skipped`
+    /// `op` is boxed because `Operation<OpExtensions>` is ~400 bytes and the `Skipped`
     /// variant is tiny — keeps the common case from inflating the enum.
-    Decoded { op: Box<Operation<()>>, interp: InterpOp },
+    Decoded { op: Box<Operation<OpExtensions>>, interp: InterpOp },
     /// Phase F-collab: op body decoded as a `DocOp` instead.
-    DecodedDoc { op: Box<Operation<()>>, doc: DocOp },
+    DecodedDoc { op: Box<Operation<OpExtensions>>, doc: DocOp },
     Skipped { reason: SkipReason },
 }
 
-impl Processor<Operation<()>> for DecodeProcessor {
+impl Processor<Operation<OpExtensions>> for DecodeProcessor {
     type Output = DecodeOutput;
     type Error  = PipelineError;
 
-    async fn process(&self, input: Operation<()>) -> Result<(), Self::Error> {
+    async fn process(&self, input: Operation<OpExtensions>) -> Result<(), Self::Error> {
         self.inbox.borrow_mut().push(input);
         // Decode synchronously into outbox; in a more elaborate stage this
         // could batch, dedupe, or apply back-pressure.
@@ -243,7 +243,7 @@ impl Processor<DecodeOutput> for MaterializationProcessor {
             DecodeOutput::DecodedDoc { op, doc } => {
                 let op_id  = op.header.hash();
                 let by     = op.header.verifying_key;
-                let ts: u64 = u64::from(op.header.timestamp);
+                let ts: u64 = u64::from(op.header.extension::<Timestamp>().expect("every zodia op carries a timestamp extension"));
                 match doc {
                     DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks } =>
                         StateEvent::DocEdited {
@@ -292,15 +292,15 @@ impl ZodiaPipeline {
     /// Today: `Decode → Materialize`.  Future phases insert
     /// `CausalOrdering`, `AccessControl`, `Pruning` between the two.
     pub fn new() -> Self {
-        let layered: LayeredBuilder<DecodeProcessor, Operation<()>> =
-            PipelineBuilder::<Operation<()>>::new().layer(DecodeProcessor::default());
+        let layered: LayeredBuilder<DecodeProcessor, Operation<OpExtensions>> =
+            PipelineBuilder::<Operation<OpExtensions>>::new().layer(DecodeProcessor::default());
         let layered = layered.layer(MaterializationProcessor::default());
         Self { inner: layered.build() }
     }
 
     /// Feed one raw operation into the pipeline.  Back-pressure-aware:
     /// returns once the operation is queued (not necessarily processed).
-    pub async fn process(&self, op: Operation<()>) -> Result<(), PipelineError> {
+    pub async fn process(&self, op: Operation<OpExtensions>) -> Result<(), PipelineError> {
         self.inner.process(op).await.map_err(flatten_composed_err)
     }
 
@@ -332,18 +332,17 @@ mod tests {
     use super::*;
     use p2panda_core::{Body, Header, SigningKey, Timestamp};
 
-    fn make_op(signing_key: &SigningKey, body_bytes: Vec<u8>, seq_num: u64) -> Operation<()> {
+    fn make_op(signing_key: &SigningKey, body_bytes: Vec<u8>, seq_num: u32) -> Operation<OpExtensions> {
         let body = Body::new(&body_bytes);
-        let mut header = Header::<()> {
+        let mut header = Header::<OpExtensions> {
             version:       1,
             verifying_key: signing_key.verifying_key(),
             signature:     None,
             payload_size:  body.size(),
             payload_hash:  Some(body.hash()),
-            timestamp:     Timestamp::now(),
             seq_num,
             backlink:      None,
-            extensions:    (),
+            extensions:    OpExtensions { timestamp: Timestamp::now() },
         };
         header.sign(signing_key);
         let hash = header.hash();

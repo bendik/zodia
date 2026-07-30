@@ -2,8 +2,12 @@
 //!
 //! Every valuable network event — authoring an interpretation, affirming
 //! someone's, riffing on one — is encoded as an `InterpOp` and replicated
-//! as the body of a p2panda `Operation<()>`.  The p2panda header carries
-//! authentication (verifying key + signature); the body is just the
+//! as the body of a p2panda `Operation<OpExtensions>`.  The p2panda header
+//! carries authentication (verifying key + signature) and, via
+//! `OpExtensions`, the operation's timestamp (p2panda 0.7 dropped
+//! `Header::timestamp` as a built-in field — extensions are now the
+//! sanctioned place for per-operation metadata like this, per
+//! `p2panda-core`'s own `extensions` example). The body is just the
 //! CBOR-encoded `InterpOp`.
 //!
 //! Phase A scope: `Author` is the only variant that actually flows yet;
@@ -17,9 +21,28 @@
 //! representation; that representation is stable as long as variant names
 //! are preserved.  Renames require a wire-format version bump.
 
-use p2panda_core::Hash;
+use p2panda_core::{Extension, Hash, Header, Timestamp};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+// ── header extensions ───────────────────────────────────────────────────────
+
+/// Per-operation metadata carried in the p2panda `Header`'s extensions slot.
+///
+/// p2panda 0.7 removed `Header::timestamp` as a built-in field; this is the
+/// replacement, following the pattern from `p2panda-core`'s own `extensions`
+/// example (a small `Extension<T>`-implementing struct rather than a custom
+/// side-channel).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpExtensions {
+    pub timestamp: Timestamp,
+}
+
+impl Extension<Timestamp> for OpExtensions {
+    fn extract(header: &Header<Self>) -> Option<Timestamp> {
+        Some(header.extensions.timestamp)
+    }
+}
 
 // ── operation ─────────────────────────────────────────────────────────────────
 

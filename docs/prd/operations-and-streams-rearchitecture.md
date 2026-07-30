@@ -1,8 +1,8 @@
-# PRD: Operations-and-streams rearchitecture (p2panda 0.6 era)
+# PRD: Operations-and-streams rearchitecture
 
-**Status:** partially shipped — Phases A, B, C-1 shipped in 0.7.0; C-2 and D not started
-**Branch:** `feat/ops-streams-arch` (Phases A–C-1 merged to `main`); C-2/D remain TBD
-**Foundation already landed:** 0.6.0 (iroh 0.98 + p2panda 0.6 + sqlx-backed store)
+**Status:** partially shipped — Phases A, B, C-1, C-2 shipped; D partially shipped (pruning slice + p2panda 0.7 migration prerequisite), `zodia-channels`/`zodia-circles` not started
+**Branch:** `main`
+**Foundation already landed:** 0.6.0 (iroh 0.98 + p2panda 0.6 + sqlx-backed store), upgraded to p2panda 0.7.0 / iroh 1.0.3 per `docs/prd/p2panda-0.7-migration.md`
 
 ## Problem Statement
 
@@ -150,7 +150,7 @@ A user-facing "Share with..." picker on each contribution decides whether it goe
 - **Phase B — First behavioural payoffs** (shipped 0.7.0): network-replicated affirmations; sync metrics in UI.
 - **Phase C-1 — Causal threads** (shipped 0.7.0): `RespondTo` + ordering. See `docs/prd/activity-feed.md` and `docs/prd/collaborative-interpretations.md` for the UI-layer phases (E, F-collab) that cashed this in — both shipped together as 0.7.1.
 - **Phase C-2 — Granular subscription** (not started): per-key topics with lazy subscribe/unsubscribe. Deferred by both Phase E and Phase F-collab PRDs. Drafted in `docs/prd/granular-topic-subscription.md`, which also corrects this section's original topic-partitioning sketch against what Phase A actually shipped (single global topic, single per-author log).
-- **Phase D — Architectural reach** (pruning slice shipped, rest not started): stream-negotiated pair channels (`zodia-channels`, dropping ALPN) and group encryption (`zodia-circles`) remain untouched — both bigger and riskier than pruning per this PRD's own Risks section. The pruning processor's first slice (age + own-authorship exemption, on-demand) is drafted and shipped in `docs/prd/pruning.md`, which also documents a real bug found while building it: received (not self-authored) operations were never durably persisted at all, meaning this device could never relay them to a third peer. Fixed as part of that PRD. Referenced as a prerequisite for the later real-time-presence and audio phases (H/I) in `collaborative-interpretations.md`.
+- **Phase D — Architectural reach** (pruning slice shipped; p2panda 0.7 migration shipped as a prerequisite; `zodia-channels`/`zodia-circles` not started): stream-negotiated pair channels (`zodia-channels`, dropping ALPN) and group encryption (`zodia-circles`) remain untouched — both bigger and riskier than pruning per this PRD's own Risks section. The pruning processor's first slice (age + own-authorship exemption, on-demand) is drafted and shipped in `docs/prd/pruning.md`, which also documents a real bug found while building it: received (not self-authored) operations were never durably persisted at all, meaning this device could never relay them to a third peer. Fixed as part of that PRD. Referenced as a prerequisite for the later real-time-presence and audio phases (H/I) in `collaborative-interpretations.md`. Before `zodia-circles` could start for real, the whole p2panda stack needed 0.6→0.7 (this PRD's own text about "wrapping p2panda 0.6's group-encryption primitives" was wrong — that crate doesn't exist at 0.6.x) — see `docs/prd/p2panda-0.7-migration.md` for what that upgrade actually touched, including a schema-change regression in the just-shipped pruning feature that its own cucumber tests caught.
 
 Each phase is independently shippable; A is a no-user-visible foundation, B-D each ship a 0.x.0 bump with observable user value.
 

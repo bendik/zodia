@@ -9,5 +9,5 @@ description = "Canonical operation enum (Author / Affirm / RespondTo) — Zodia'
 ciborium.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-p2panda-core = "0.6"
+p2panda-core = "0.7"
 blake3.workspace = true

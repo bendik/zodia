@@ -20,7 +20,7 @@ zodia-ops.workspace = true
 zodia-pipeline.workspace = true
 zodia-doc.workspace = true
 zodia-sdk.workspace = true
-p2panda-core = "0.6"
+p2panda-core = "0.7"
 ciborium.workspace = true
 blake3.workspace = true
 relm4 = { version = "0.10", features = ["macros", "libadwaita", "gnome_45"] }

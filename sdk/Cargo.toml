@@ -12,8 +12,8 @@ zodia-sync.workspace = true
 zodia-pipeline.workspace = true
 zodia-ops.workspace = true
 ed25519-dalek.workspace = true
-p2panda-core = "0.6"
-p2panda-net = { version = "0.6", features = [
+p2panda-core = "0.7"
+p2panda-net = { version = "0.7", features = [
     "address_book",
     "iroh_endpoint",
     "gossip",
@@ -28,7 +28,7 @@ cucumber = "0.23.0"
 rand_core.workspace = true
 tempfile = "3"
 zodia-core.workspace = true
-p2panda-core = "0.6"
+p2panda-core = "0.7"
 ed25519-dalek.workspace = true
 tokio.workspace = true
 
