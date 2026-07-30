@@ -27,3 +27,13 @@ Feature: Local storage pruning removes old operations from other peers
     And 1 second passes
     And "Alice" prunes local storage with a retention of 0 seconds
     Then pruning removed 0 operations
+
+  Scenario: A recently received peer operation survives pruning within the retention window
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And "Alice" is subscribed to "natal:mercury_square_neptune"
+    And "Bob" is subscribed to "natal:mercury_square_neptune"
+    When "Bob" edits "natal:mercury_square_neptune"
+    And "Alice" observes a doc edit on "natal:mercury_square_neptune" within 15 seconds
+    And "Alice" prunes local storage with a retention of 300 seconds
+    Then pruning removed 0 operations
