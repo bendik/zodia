@@ -54,6 +54,9 @@ pub enum FeedViewMsg {
     /// Internal: user pressed revoke on a card.  Relayed to output.
     #[doc(hidden)]
     CardRevoke { log_id: [u8; 32] },
+    /// Internal: user pressed "share to circle" on a card.  Relayed to output.
+    #[doc(hidden)]
+    CardShareToCircle { interp_key: String, body: String },
     /// Internal: explicit read-state change from card context menu.
     #[doc(hidden)]
     CardSetRead { event_id: [u8; 32], read: bool },
@@ -78,6 +81,10 @@ pub enum FeedViewOut {
     /// User asked to revoke + delete their own authored interpretation.
     /// `log_id` = BLAKE3(interp_key || body) — the row primary key.
     Revoke { log_id: [u8; 32] },
+    /// User asked to share their own authored interpretation privately
+    /// with a circle. Host opens the circle picker (it owns circle state,
+    /// this component doesn't).
+    ShareToCircle { interp_key: String, body: String },
     /// Explicit read-state change from card context menu.  Host persists to
     /// `feed_read` and refreshes the bell badge.
     SetRead { event_id: [u8; 32], read: bool },
@@ -237,6 +244,8 @@ impl SimpleComponent for FeedView {
                     FeedViewMsg::CardActivated { event_id, payload },
                 FeedCardOut::Revoke { log_id } =>
                     FeedViewMsg::CardRevoke { log_id },
+                FeedCardOut::ShareToCircle { interp_key, body } =>
+                    FeedViewMsg::CardShareToCircle { interp_key, body },
                 FeedCardOut::SetRead { event_id, read } =>
                     FeedViewMsg::CardSetRead { event_id, read },
             });
@@ -281,6 +290,9 @@ impl SimpleComponent for FeedView {
             }
             FeedViewMsg::CardRevoke { log_id } => {
                 let _ = sender.output(FeedViewOut::Revoke { log_id });
+            }
+            FeedViewMsg::CardShareToCircle { interp_key, body } => {
+                let _ = sender.output(FeedViewOut::ShareToCircle { interp_key, body });
             }
             FeedViewMsg::CardSetRead { event_id, read } => {
                 self.set_read(event_id, read);
@@ -535,6 +547,7 @@ pub enum FeedCardMsg {
 pub enum FeedCardOut {
     Activated { event_id: [u8; 32], payload: FeedPayload },
     Revoke    { log_id:   [u8; 32] },
+    ShareToCircle { interp_key: String, body: String },
     SetRead   { event_id: [u8; 32], read: bool },
 }
 
@@ -566,6 +579,7 @@ pub struct FeedCardWidgets {
     sub_meta:   gtk::Label,
     unread:     gtk::Image,
     revoke_btn: gtk::Button,
+    share_btn:  gtk::Button,
 }
 
 impl FactoryComponent for FeedCard {
@@ -655,6 +669,15 @@ impl FactoryComponent for FeedCard {
         right_col.append(&footer);
         right_col.append(&sub_meta);
         outer.append(&right_col);
+
+        // Right: share-to-circle button.
+        let share_btn = gtk::Button::from_icon_name("avatar-default-symbolic");
+        share_btn.set_tooltip_text(Some("Share to a circle"));
+        share_btn.add_css_class("flat");
+        share_btn.add_css_class("circular");
+        share_btn.set_valign(gtk::Align::Center);
+        share_btn.set_visible(is_own_authored(&self.item.payload, &self.me));
+        outer.append(&share_btn);
 
         // Right: revoke button.
         let revoke_btn = gtk::Button::from_icon_name("user-trash-symbolic");
@@ -753,8 +776,19 @@ impl FactoryComponent for FeedCard {
             }
         });
 
+        // Share button → emit ShareToCircle with the interp_key/body.
+        let share_payload = self.item.payload.clone();
+        let s3 = sender.clone();
+        share_btn.connect_clicked(move |_| {
+            if let FeedPayload::InterpAuthored { interp_key, body, .. } = &share_payload {
+                let _ = s3.output(FeedCardOut::ShareToCircle {
+                    interp_key: interp_key.clone(), body: body.clone(),
+                });
+            }
+        });
+
         let _ = root;
-        FeedCardWidgets { glyph, title, subtitle, footer, sub_meta, unread, revoke_btn }
+        FeedCardWidgets { glyph, title, subtitle, footer, sub_meta, unread, revoke_btn, share_btn }
     }
 
     fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
@@ -766,6 +800,7 @@ impl FactoryComponent for FeedCard {
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: FactorySender<Self>) {
         widgets.unread.set_visible(false);
         widgets.revoke_btn.set_visible(is_own_authored(&self.item.payload, &self.me));
+        widgets.share_btn.set_visible(is_own_authored(&self.item.payload, &self.me));
         render_into(
             &self.item,
             &widgets.glyph, &widgets.title, &widgets.subtitle,

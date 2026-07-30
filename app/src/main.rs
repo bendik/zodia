@@ -7,6 +7,7 @@ mod app;
 mod aspect_list;
 mod aspect_view;
 mod baseline;
+mod circle_page;
 mod feed_item;
 mod feed_view;
 mod interp_row;

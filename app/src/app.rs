@@ -222,6 +222,24 @@ pub enum AppMsg {
     /// Phase E internal: push a single live feed item into the FeedView.
     #[doc(hidden)]
     __PushFeedItem(crate::feed_item::FeedItem),
+
+    // ── circles (docs/prd/circles.md) ────────────────────────────────────────
+    /// User pressed "share to circle" on their own feed card. Opens a
+    /// picker (existing circles + "create new") since this component
+    /// doesn't itself hold circle state.
+    OpenShareToCirclePicker { interp_key: String, body: String },
+    /// User picked an existing circle in the share picker.
+    ShareInterpToExistingCircle { id_hex: String, interp_key: String, body: String },
+    /// User typed a new circle name in the share picker instead of picking
+    /// an existing one — circles are "born out of" whatever's being shared,
+    /// not created from a standalone form.
+    CreateCircleAndShare { name: String, interp_key: String, body: String },
+    /// Sidebar circle row clicked — (re)build and show that circle's page.
+    OpenCirclePage(String),
+    /// "+" next to a known peer in a circle page's Invite list.
+    InviteToCircle { id_hex: String, peer_id: PeerId },
+    /// Revoke button next to a member row in a circle page.
+    RevokeFromCircle { id_hex: String, member_hex: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -256,6 +274,20 @@ pub struct AppModel {
     /// Peers the user has explicitly tapped; pages pushed once Tier-1 completes.
     /// Uses `RefCell` for interior mutability inside `update_view (&self)`.
     pending_push_queue: RefCell<Vec<PeerId>>,
+
+    /// Local (non-synced) circle registry: circle_id_hex → name. Circle ids
+    /// are just hashes with no inherent name, same "hash has no name"
+    /// problem `stargazer_nicknames` solves — persisted to circles.tsv.
+    circles: HashMap<String, String>,
+    circles_changed_token: u64,
+    /// Circle pages to (re)build and show — populated after `OpenCirclePage`
+    /// and after any invite/revoke, once the fresh member list is back from
+    /// `circle_members`. Same `RefCell`-in-`update_view` reasoning as
+    /// `pending_push_queue`.
+    pending_circle_push_queue: RefCell<Vec<(String, Vec<(p2panda_core::VerifyingKey, zodia_sdk::CircleAccess<()>)>)>>,
+    /// Set by `OpenShareToCirclePicker`; `update_view` builds + presents the
+    /// dialog (it has window access, `update()` doesn't) then clears this.
+    share_picker_request: RefCell<Option<(String, String)>>,
 
     config: LocalConfig,
     /// Sender for the SetupPage child component (only used while setup is shown).
@@ -359,6 +391,13 @@ pub struct AppWidgets {
     /// `model.editor_presence`.
     discussions_list:   gtk::ListBox,
     discussions_header: gtk::Label,
+
+    /// Circles sidebar section — one row per circle, rebuilt from
+    /// `model.circles` whenever `circles_changed_token` advances.
+    circles_list:       gtk::ListBox,
+    circles_header:     gtk::Label,
+    circles_row_order:  Rc<RefCell<Vec<String>>>,
+    circles_changed_token_shown: u64,
 
     /// Counter of the last bell-click we acted on.  Diverges from
     /// `AppModel::nav_to_sky_token` only when a new click is pending; switch
@@ -487,6 +526,10 @@ impl AsyncComponent for AppModel {
             network_changed_token: 0,
             peers_factory,
             pending_push_queue: RefCell::new(Vec::new()),
+            circles: load_circles(init.config.data_dir()),
+            circles_changed_token: 0,
+            pending_circle_push_queue: RefCell::new(Vec::new()),
+            share_picker_request: RefCell::new(None),
             config: init.config,
             setup_sender: None,
             notif_sender: None,
@@ -1561,6 +1604,67 @@ impl AsyncComponent for AppModel {
                 }
                 let _ = sender.input_sender().send(AppMsg::RefreshBellBadge);
             }
+
+            // ── circles (docs/prd/circles.md) ────────────────────────────────
+            AppMsg::OpenShareToCirclePicker { interp_key, body } => {
+                // Dialog needs a window to present on, which `update()`
+                // doesn't have — `update_view` does. Stash the request and
+                // let it build + show the picker, same pattern as every
+                // other pending-in-update_view field in this model.
+                *self.share_picker_request.borrow_mut() = Some((interp_key, body));
+            }
+            AppMsg::ShareInterpToExistingCircle { id_hex, interp_key, body } => {
+                if let (Some(client), Ok(circle_id)) =
+                    (&self.zodia_client, decode_circle_id(&id_hex))
+                {
+                    if let Err(e) = client.share_interp_to_circle(circle_id, &interp_key, body).await {
+                        warn!("share_interp_to_circle: {e}");
+                    }
+                }
+            }
+            AppMsg::CreateCircleAndShare { name, interp_key, body } => {
+                if let Some(client) = &self.zodia_client {
+                    match client.create_circle(vec![]).await {
+                        Ok(circle_id) => {
+                            let id_hex = hex::encode(circle_id.as_bytes());
+                            self.circles.insert(id_hex.clone(), name);
+                            save_circles(self.config.data_dir(), &self.circles);
+                            self.circles_changed_token += 1;
+                            if let Err(e) = client.share_interp_to_circle(circle_id, &interp_key, body).await {
+                                warn!("share_interp_to_circle (new circle): {e}");
+                            }
+                        }
+                        Err(e) => warn!("create_circle: {e}"),
+                    }
+                }
+            }
+            AppMsg::OpenCirclePage(id_hex) => {
+                self.refresh_circle_page(&id_hex).await;
+            }
+            AppMsg::InviteToCircle { id_hex, peer_id } => {
+                if let (Some(client), Ok(circle_id), Ok(member)) = (
+                    &self.zodia_client, decode_circle_id(&id_hex),
+                    p2panda_core::VerifyingKey::from_bytes(&peer_id.0),
+                ) {
+                    if let Err(e) = client.invite_to_circle(circle_id, member, zodia_sdk::CircleAccess::read()).await {
+                        warn!("invite_to_circle: {e}");
+                    }
+                }
+                self.refresh_circle_page(&id_hex).await;
+            }
+            AppMsg::RevokeFromCircle { id_hex, member_hex } => {
+                if let (Some(client), Ok(circle_id), Ok(member_arr)) = (
+                    &self.zodia_client, decode_circle_id(&id_hex),
+                    hex::decode(&member_hex).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).ok_or(()),
+                ) {
+                    if let Ok(member) = p2panda_core::VerifyingKey::from_bytes(&member_arr) {
+                        if let Err(e) = client.revoke_from_circle(circle_id, member).await {
+                            warn!("revoke_from_circle: {e}");
+                        }
+                    }
+                }
+                self.refresh_circle_page(&id_hex).await;
+            }
         }
     }
 
@@ -1892,6 +1996,70 @@ impl AsyncComponent for AppModel {
             ));
         }
 
+        // ── circles sidebar section ────────────────────────────────────────────
+
+        if widgets.circles_changed_token_shown != self.circles_changed_token {
+            widgets.circles_changed_token_shown = self.circles_changed_token;
+            rebuild_circles_list(
+                &widgets.circles_list, &widgets.circles_header,
+                &self.circles, &widgets.circles_row_order,
+            );
+        }
+
+        // ── circle pages: (re)build + show whatever refresh_circle_page queued ─
+
+        let queued: Vec<(String, Vec<(p2panda_core::VerifyingKey, zodia_sdk::CircleAccess<()>)>)> =
+            self.pending_circle_push_queue.borrow_mut().drain(..).collect();
+        for (id_hex, members) in queued {
+            let Some(name) = self.circles.get(&id_hex) else { continue };
+            let member_hexes: std::collections::HashSet<String> = members.iter()
+                .map(|(vk, _)| hex::encode(vk.as_bytes()))
+                .collect();
+            let page_members: Vec<crate::circle_page::CirclePageMember> = members.iter()
+                .map(|(vk, access)| {
+                    let pubkey_hex = hex::encode(vk.as_bytes());
+                    let tag = hex::encode_upper(&vk.as_bytes()[..4]);
+                    let label = self.stargazer_nicknames.get(&tag)
+                        .filter(|n| !n.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("···{tag}"));
+                    crate::circle_page::CirclePageMember {
+                        pubkey_hex, label, access: format!("{access}"),
+                    }
+                })
+                .collect();
+            let known_peers: Vec<crate::circle_page::CirclePagePeer> = self.stargazers.values()
+                .filter(|sg| matches!(sg.state, StargazerState::Connected { .. }))
+                .filter(|sg| !member_hexes.contains(&hex::encode(sg.peer_id.0)))
+                .map(|sg| {
+                    let tag = hex::encode_upper(&sg.peer_id.0[..4]);
+                    let label = self.stargazer_nicknames.get(&tag)
+                        .filter(|n| !n.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("···{tag}"));
+                    crate::circle_page::CirclePagePeer { peer_id: sg.peer_id.clone(), label }
+                })
+                .collect();
+
+            if let Some(old) = widgets.content_stack.child_by_name(&id_hex) {
+                widgets.content_stack.remove(&old);
+            }
+            let page = crate::circle_page::build_circle_page(
+                &id_hex, name, &page_members, &known_peers, &sender, &widgets.split_view,
+            );
+            widgets.content_stack.add_named(&page, Some(&id_hex));
+            widgets.content_stack.set_visible_child_name(&id_hex);
+            if let Some(s) = &self.sidebar_sender {
+                let _ = s.send(crate::sidebar::SidebarMsg::UnselectNav);
+            }
+        }
+
+        // ── share-to-circle picker ──────────────────────────────────────────────
+
+        if let Some((interp_key, body)) = self.share_picker_request.borrow_mut().take() {
+            present_share_to_circle_picker(&widgets.split_view, &self.circles, &sender, interp_key, body);
+        }
+
         // ── rebuild network view and sync page titles when content changes ────
 
         if self.network_changed_token != widgets.network_changed_token_shown {
@@ -2180,6 +2348,113 @@ fn rebuild_discussions_list(
         row.add_controller(click);
         list.append(&row);
     }
+}
+
+/// Wipe + repopulate the sidebar Circles list from `model.circles`. Each
+/// row's index is recorded in `row_order` so the click handler wired in
+/// `build_main_page` (fired via `ListBox::connect_row_activated`, which only
+/// gives us the row, not which circle it was for) can look up the right
+/// `id_hex`.
+fn rebuild_circles_list(
+    list:      &gtk::ListBox,
+    header:    &gtk::Label,
+    circles:   &HashMap<String, String>,
+    row_order: &Rc<RefCell<Vec<String>>>,
+) {
+    while let Some(row) = list.first_child() {
+        list.remove(&row);
+    }
+    header.set_visible(!circles.is_empty());
+
+    let mut sorted: Vec<(&String, &String)> = circles.iter().collect();
+    sorted.sort_by(|a, b| a.1.cmp(b.1));
+
+    let mut order = row_order.borrow_mut();
+    order.clear();
+    for (id_hex, name) in sorted {
+        let row = gtk::ListBoxRow::new();
+        let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        outer.set_margin_start(12);
+        outer.set_margin_end(12);
+        outer.set_margin_top(8);
+        outer.set_margin_bottom(8);
+        let icon = gtk::Image::from_icon_name("avatar-default-symbolic");
+        outer.append(&icon);
+        let label = gtk::Label::new(Some(name));
+        label.set_halign(gtk::Align::Start);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_hexpand(true);
+        outer.append(&label);
+        row.set_child(Some(&outer));
+        list.append(&row);
+        order.push(id_hex.clone());
+    }
+}
+
+/// Build + present the "share to circle" dialog: existing circles as
+/// selectable rows, plus an entry for a brand-new circle name — circles are
+/// "born out of" whatever's being shared, not created from a standalone
+/// form (see `docs/prd/circles.md` and the sidebar's own Circles section,
+/// which only ever lists what already exists).
+fn present_share_to_circle_picker(
+    parent:     &adw::OverlaySplitView,
+    circles:    &HashMap<String, String>,
+    sender:     &AsyncComponentSender<AppModel>,
+    interp_key: String,
+    body:       String,
+) {
+    let dialog = adw::AlertDialog::new(Some("Share to a circle"), None);
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("share", "Share");
+    dialog.set_response_appearance("share", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("share"));
+    dialog.set_close_response("cancel");
+
+    let extra = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+    let mut sorted: Vec<(String, String)> = circles.iter()
+        .map(|(id_hex, name)| (id_hex.clone(), name.clone()))
+        .collect();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let existing_list = gtk::ListBox::new();
+    existing_list.set_selection_mode(gtk::SelectionMode::Single);
+    existing_list.add_css_class("boxed-list");
+    for (_, name) in &sorted {
+        existing_list.append(&gtk::Label::new(Some(name)));
+    }
+    if !sorted.is_empty() {
+        extra.append(&gtk::Label::new(Some("Existing circles")));
+        extra.append(&existing_list);
+    }
+
+    let new_name_entry = gtk::Entry::new();
+    new_name_entry.set_placeholder_text(Some("...or name a new circle"));
+    extra.append(&new_name_entry);
+
+    dialog.set_extra_child(Some(&extra));
+
+    let s = sender.clone();
+    let ids: Vec<String> = sorted.into_iter().map(|(id_hex, _)| id_hex).collect();
+    let selected_list = existing_list.clone();
+    let entry = new_name_entry.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "share" { return; }
+        let new_name = entry.text().to_string();
+        if !new_name.trim().is_empty() {
+            s.input(AppMsg::CreateCircleAndShare {
+                name: new_name, interp_key: interp_key.clone(), body: body.clone(),
+            });
+        } else if let Some(row) = selected_list.selected_row() {
+            if let Some(id_hex) = ids.get(row.index() as usize) {
+                s.input(AppMsg::ShareInterpToExistingCircle {
+                    id_hex: id_hex.clone(), interp_key: interp_key.clone(), body: body.clone(),
+                });
+            }
+        }
+    });
+
+    dialog.present(Some(parent));
 }
 
 // ── factory peer sync ─────────────────────────────────────────────────────────
@@ -2611,6 +2886,7 @@ fn build_widgets(
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
         discussions_list, discussions_header,
+        circles_list, circles_header, circles_row_order,
     ) = build_main_page(model, sender, model.peers_factory.widget(), notif_widget);
     outer_stack.add_named(&main_view, Some("main"));
 
@@ -2683,6 +2959,10 @@ fn build_widgets(
         content_stack,
         discussions_list,
         discussions_header,
+        circles_list,
+        circles_header,
+        circles_row_order,
+        circles_changed_token_shown: u64::MAX, // force initial circles list build
         nav_to_sky_token_shown: 0,
         stargazer_msg_lists: HashMap::new(),
         stargazer_chat_shown: HashMap::new(),
@@ -3017,6 +3297,8 @@ fn mount_sky_feed(
                 AppMsg::FeedActivated { event_id, payload },
             crate::feed_view::FeedViewOut::Revoke { log_id } =>
                 AppMsg::SubmitRevoke { log_id },
+            crate::feed_view::FeedViewOut::ShareToCircle { interp_key, body } =>
+                AppMsg::OpenShareToCirclePicker { interp_key, body },
             crate::feed_view::FeedViewOut::SetRead { event_id, read } =>
                 AppMsg::FeedSetRead { event_id, read },
         },
@@ -3076,6 +3358,7 @@ fn build_main_page(
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // incoming consent bar
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
     gtk::ListBox, gtk::Label,                           // discussions_list, discussions_header
+    gtk::ListBox, gtk::Label, Rc<RefCell<Vec<String>>>, // circles_list, circles_header, circles_row_order
 ) {
     // ── Content area — single crossfade Stack for all views ──────────────────
 
@@ -3139,11 +3422,43 @@ fn build_main_page(
     discussions_header.set_margin_bottom(2);
     discussions_header.set_visible(false);
 
+    // Circles — sidebar section, one row per circle. Populated dynamically
+    // from `model.circles` on update_view (see `rebuild_circles_list`),
+    // same treatment as Discussions above. Ranks above the "Others" (direct
+    // peer) section per the user's own steer that circles take precedence.
+    let circles_list = gtk::ListBox::new();
+    circles_list.set_selection_mode(gtk::SelectionMode::None);
+    circles_list.add_css_class("navigation-sidebar");
+    let circles_header = gtk::Label::new(Some("Circles"));
+    circles_header.add_css_class("heading");
+    circles_header.add_css_class("dim-label");
+    circles_header.set_halign(gtk::Align::Start);
+    circles_header.set_margin_start(12);
+    circles_header.set_margin_end(12);
+    circles_header.set_margin_top(12);
+    circles_header.set_margin_bottom(2);
+    circles_header.set_visible(false);
+
+    // Row-index → circle_id_hex, kept in sync by `rebuild_circles_list` on
+    // every rebuild; the click handler below reads it at click time.
+    let circles_row_order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let order = Rc::clone(&circles_row_order);
+        let s = sender.clone();
+        circles_list.connect_row_activated(move |_, row| {
+            if let Some(id_hex) = order.borrow().get(row.index() as usize) {
+                s.input(AppMsg::OpenCirclePage(id_hex.clone()));
+            }
+        });
+    }
+
     // Sidebar — Component owning Zodia header, NotifBell pack, nav list, peers slot.
     let (sidebar_toolbar, sidebar_sender) = crate::sidebar::launch(crate::sidebar::SidebarInit {
         peers_list:         peers_list.clone(),
         discussions_list:   discussions_list.clone(),
         discussions_header: discussions_header.clone(),
+        circles_list:       circles_list.clone(),
+        circles_header:     circles_header.clone(),
         notif_widget:       notif_widget.clone(),
         split_view:         split_view.clone(),
         content_stack:      content_stack.clone(),
@@ -3270,6 +3585,7 @@ fn build_main_page(
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
         discussions_list, discussions_header,
+        circles_list, circles_header, circles_row_order,
     )
 }
 
@@ -3395,4 +3711,58 @@ fn save_nicknames(data_dir: &std::path::Path, nicknames: &HashMap<String, String
         .map(|(k, v)| format!("{k}\t{v}\n"))
         .collect();
     let _ = std::fs::write(data_dir.join("nicknames.tsv"), content);
+}
+
+// ── circle persistence ─────────────────────────────────────────────────────────
+//
+// Circle ids are just hashes with no inherent name — same "hash has no
+// name" problem nicknames.tsv solves for peers, same flat-TSV pattern.
+// Device-local only: circle names are never synced (nor is anything else
+// about "which circles do I know of" — see docs/prd/circles.md's own
+// scope notes on this being a device-local concept).
+
+fn load_circles(data_dir: &std::path::Path) -> HashMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(data_dir.join("circles.tsv")) else {
+        return HashMap::new();
+    };
+    content.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let id_hex = parts.next()?.to_string();
+            let name   = parts.next()?.to_string();
+            Some((id_hex, name))
+        })
+        .collect()
+}
+
+fn save_circles(data_dir: &std::path::Path, circles: &HashMap<String, String>) {
+    let content: String = circles.iter()
+        .map(|(id_hex, name)| format!("{id_hex}\t{name}\n"))
+        .collect();
+    let _ = std::fs::write(data_dir.join("circles.tsv"), content);
+}
+
+/// `zodia_sdk::CircleId` (= `p2panda_core::Hash`) from its hex text form —
+/// the inverse of `hex::encode(circle_id.as_bytes())`, used everywhere a
+/// circle id crosses the `AppMsg`/`circles.tsv` boundary as a plain `String`.
+fn decode_circle_id(id_hex: &str) -> Result<zodia_sdk::CircleId, ()> {
+    let bytes = hex::decode(id_hex).map_err(|_| ())?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| ())?;
+    Ok(p2panda_core::Hash::from_bytes(arr))
+}
+
+impl AppModel {
+    /// Fetch `id_hex`'s current membership and queue its page for
+    /// (re)building — consumed by `update_view`, same "can't touch widgets
+    /// from `update()`" reasoning as `pending_push_queue`.
+    async fn refresh_circle_page(&self, id_hex: &str) {
+        let Some(client) = &self.zodia_client else { return };
+        let Ok(circle_id) = decode_circle_id(id_hex) else { return };
+        match client.circle_members(circle_id).await {
+            Ok(members) => {
+                self.pending_circle_push_queue.borrow_mut().push((id_hex.to_string(), members));
+            }
+            Err(e) => warn!("circle_members: {e}"),
+        }
+    }
 }

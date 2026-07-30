@@ -23,6 +23,13 @@ pub struct SidebarInit {
     pub peers_list:         gtk::ListBox,
     pub discussions_list:   gtk::ListBox,
     pub discussions_header: gtk::Label,
+    /// Private circles this device created or was invited into — one row
+    /// per circle, each opening its own dynamically-added page (mirrors how
+    /// connected-peer pages work). Circles rank above `peers_list` ("direct
+    /// peer contact") since the user asked for circles to take precedence,
+    /// but below the static Chart/Sky/Network rows.
+    pub circles_list:       gtk::ListBox,
+    pub circles_header:     gtk::Label,
     pub notif_widget:       gtk::MenuButton,
     pub split_view:         adw::OverlaySplitView,
     pub content_stack:      gtk::Stack,
@@ -83,6 +90,7 @@ impl SimpleComponent for Sidebar {
     ) -> ComponentParts<Self> {
         let SidebarInit {
             peers_list, discussions_list, discussions_header,
+            circles_list, circles_header,
             notif_widget, split_view, content_stack,
         } = init;
 
@@ -161,6 +169,8 @@ impl SimpleComponent for Sidebar {
                 append: &nav_list,
                 append: &discussions_header,
                 append: &discussions_list,
+                append: &circles_header,
+                append: &circles_list,
                 append: &others_header,
                 append: &peers_list,
             }
