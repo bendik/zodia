@@ -37,9 +37,11 @@
   <script>
   (function () {
     var REPO = 'https://github.com/bendik/zodia/releases/latest/download';
+    // Note: Intel (x86_64) Mac builds are disabled in the release workflow
+    // (.github/workflows/release.yml) — no zodia-x86_64-apple-darwin.zip
+    // asset has been published since v0.4.2, so it isn't offered here.
     var all = {
       'mac-arm':   { href: REPO + '/zodia-aarch64-apple-darwin.zip',        label: 'Download for Mac',     sub: 'Apple Silicon · M1 / M2 / M3 / M4', cls: 'btn-mac'      },
-      'mac-x64':   { href: REPO + '/zodia-x86_64-apple-darwin.zip',          label: 'Download for Mac',     sub: 'Intel · x86_64',                     cls: 'btn-mac'      },
       'linux-x64': { href: REPO + '/zodia-x86_64-unknown-linux-gnu',          label: 'Download for Linux',   sub: 'x86_64 binary',                      cls: 'btn-platform' },
       'linux-arm': { href: REPO + '/zodia-aarch64-unknown-linux-gnu',         label: 'Download for Linux',   sub: 'aarch64 binary',                     cls: 'btn-platform' },
       'flathub':   { href: 'https://flathub.org/apps/io.github.bendik.Zodia', label: 'Get it on Flathub',   sub: 'Linux · Flatpak',                    cls: 'btn-flathub'  },
@@ -49,7 +51,7 @@
     var ua = navigator.userAgent;
     var order;
     if (/Windows/.test(ua))                          order = ['windows',  'flathub'];
-    else if (/Macintosh|Mac OS X/.test(ua))          order = ['mac-arm',  'mac-x64', 'flathub'];
+    else if (/Macintosh|Mac OS X/.test(ua))          order = ['mac-arm',  'flathub'];
     else if (/Linux/.test(ua) && !/Android/.test(ua)) order = ['flathub', 'linux-x64', 'linux-arm'];
     else                                              order = ['flathub',  'mac-arm',   'windows'];
 
@@ -87,6 +89,12 @@
              loading="lazy">
         <figcaption>Synastry and composite placements with a connected peer</figcaption>
       </figure>
+      <figure>
+        <img src="screenshots/circles.png"
+             alt="A private circle with an invited member"
+             loading="lazy">
+        <figcaption>Share a reading with a private circle instead of the whole network</figcaption>
+      </figure>
     </div>
   </section>
 
@@ -110,6 +118,20 @@
         <p>Talk directly with connected peers over encrypted QUIC. No central
            server relays the audio. Your birth data and conversation history
            never leave your device.</p>
+      </div>
+      <div class="feature">
+        <h3>Community &amp; Activity</h3>
+        <p>Aspect readings are edited collaboratively rather than competing
+           for the best take. Hearts, replies, and live transits show up in
+           an activity feed as they happen, with edit history and a veto
+           window so nobody's contribution just disappears.</p>
+      </div>
+      <div class="feature">
+        <h3>Private Circles</h3>
+        <p>Share a reading with specific people instead of the whole
+           network. Invite friends straight from your connected peers, with
+           read-only or posting access — only invited members can decrypt
+           what you share there.</p>
       </div>
     </div>
   </section>
