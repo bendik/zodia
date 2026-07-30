@@ -9,11 +9,14 @@ description = "Private-circle sharing — a thin wrapper over p2panda-spaces gro
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+ciborium.workspace = true
+blake3.workspace = true
 
 p2panda-core = { version = "0.7", default-features = false }
 p2panda-store = { version = "0.7", default-features = false, features = ["sqlite", "spaces"] }
 p2panda-spaces = "0.7"
 p2panda-auth = { version = "0.7", default-features = false, features = ["serde"] }
+p2panda-encryption = { version = "0.7", features = ["data_scheme"] }
 
 [dev-dependencies]
 p2panda-spaces = { version = "0.7", features = ["test_utils"] }

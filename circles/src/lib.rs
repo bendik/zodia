@@ -16,7 +16,7 @@
 use std::borrow::Borrow;
 
 use p2panda_core::traits::{Digest, Provenance};
-use p2panda_core::{Hash, Header, Operation, SigningKey, VerifyingKey};
+use p2panda_core::{Hash, Header, Operation, SigningKey, Topic, VerifyingKey};
 use p2panda_spaces::manager::Manager;
 use p2panda_spaces::space::Space;
 use p2panda_store::logs::LogStore;
@@ -83,6 +83,27 @@ pub type CircleSpace = Space<CircleSpacesStore, ZodiaForge, CircleConditions, Ci
 /// different types and cannot share a log.
 pub const CIRCLE_LOG_ID: u64 = 0;
 
+/// This circle's dedicated sync topic (`Topic::from(blake3("circle:" ||
+/// circle_id))` per the parent architecture PRD's sketch) — everything
+/// exchanged for one circle (its auth/membership messages and its
+/// application messages) flows over this one topic, distinct per circle.
+pub fn topic_for_circle(circle_id: SpaceId) -> Topic {
+    Topic::from(*blake3::hash(&[b"zodia:v1:circle:", circle_id.as_bytes().as_slice()].concat()).as_bytes())
+}
+
+/// The well-known topic every device subscribes to so peers can discover
+/// each other's `p2panda-encryption` key bundles — the prerequisite for
+/// being added to *any* circle. `Manager::key_bundle_message()` produces a
+/// signed `SpacesArgs::KeyBundle` op; broadcasting it here and having every
+/// peer `process` what they receive is `p2panda-spaces`'s own intended
+/// mechanism for member discovery (`Member` itself is deliberately not
+/// constructible from raw bytes outside the crate — see `KeyBundle`'s own
+/// doc comment — so this op, not a hand-rolled invite handshake, is the
+/// real path).
+pub fn circle_directory_topic() -> Topic {
+    Topic::from(*blake3::hash(b"zodia:v1:circle-directory").as_bytes())
+}
+
 /// Persist a received circle operation into the local store before handing
 /// it to `Manager::process_persisted`/`process`.
 ///
@@ -107,6 +128,67 @@ pub async fn persist_received(
 pub enum CircleError {
     #[error("p2panda store: {0}")]
     Store(#[from] SqliteError),
+    #[error("random generation: {0}")]
+    Rng(String),
+    #[error("identity secret file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("identity secret codec: {0}")]
+    Codec(String),
+    #[error("circle manager: {0}")]
+    Manager(String),
+}
+
+/// Load this device's persisted circle `identity_secret`, or generate and
+/// persist a fresh one if none exists yet.
+///
+/// `p2panda_spaces::Credentials::from_keys` reuses Zodia's existing
+/// `SigningKey` directly (see module docs — "one new secret, not a new
+/// identity"), but the `identity_secret` half (an x25519 key used for
+/// `p2panda-encryption`'s key agreement) has to be a real one, and
+/// `p2panda_encryption::crypto::x25519::SecretKey` can only be constructed
+/// via `SecretKey::from_rng` outside the crate's own `test_utils` feature —
+/// there's no public deterministic-derivation path, by design (the crate
+/// doesn't want callers rolling their own key derivation). So it has to be
+/// generated once and persisted, not re-derived from the signing key on
+/// every launch — a stable `identity_secret` is required for key agreement
+/// with peers to keep working across restarts.
+fn load_or_create_identity_secret(
+    path: &std::path::Path,
+) -> Result<p2panda_encryption::crypto::x25519::SecretKey, CircleError> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(secret) = ciborium::de::from_reader(&bytes[..]) {
+            return Ok(secret);
+        }
+    }
+    let rng = p2panda_encryption::Rng::default();
+    let secret = p2panda_encryption::crypto::x25519::SecretKey::from_rng(&rng)
+        .map_err(|e| CircleError::Rng(e.to_string()))?;
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&secret, &mut buf).map_err(|e| CircleError::Codec(e.to_string()))?;
+    std::fs::write(path, buf)?;
+    Ok(secret)
+}
+
+/// Build the `CircleManager` for this device: loads/creates the persisted
+/// `identity_secret`, wires `ZodiaForge` onto the given `SqliteStore`
+/// (the same store `zodia-sync` already owns), and constructs the
+/// `p2panda_spaces::Manager`.
+///
+/// `identity_secret_path` should live alongside the sync store's own file
+/// (e.g. `store_dir.join("circle_identity_secret.cbor")`) — a small,
+/// device-local secret, not something synced or shared.
+pub fn new_manager(
+    identity_secret_path: &std::path::Path,
+    store: SqliteStore,
+    signing_key: SigningKey,
+) -> Result<CircleManager, CircleError> {
+    let identity_secret = load_or_create_identity_secret(identity_secret_path)?;
+    let credentials = Credentials::from_keys(signing_key.clone(), identity_secret);
+    let spaces_store = CircleSpacesStore::new(store.clone());
+    let forge = ZodiaForge::new(store, signing_key);
+    let rng = p2panda_encryption::Rng::default();
+    CircleManager::new(spaces_store, forge, credentials, rng)
+        .map_err(|e| CircleError::Manager(e.to_string()))
 }
 
 /// Signs and persists `p2panda-spaces` control/application messages using
@@ -175,6 +257,23 @@ mod tests {
     use p2panda_store::SqliteStore;
 
     use super::*;
+
+    #[test]
+    fn identity_secret_round_trips_across_a_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "zodia-circles-test-identity-secret-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        // First "launch": no file yet, one gets created.
+        let first = load_or_create_identity_secret(&path).expect("create");
+        // Second "launch": the same file must be reused, not regenerated —
+        // a device whose identity_secret changed on every restart could
+        // never keep key agreement working with peers across a restart.
+        let second = load_or_create_identity_secret(&path).expect("load");
+        assert_eq!(first, second, "identity_secret must survive a restart unchanged");
+        let _ = std::fs::remove_file(&path);
+    }
 
     async fn make_manager(seed: u8) -> (CircleManager, SqliteStore) {
         let rng = Rng::from_seed([seed; 32]);
