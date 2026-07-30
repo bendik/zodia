@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Post-release hook for cargo-release.
-# Updates the flathub submodule (manifest, metainfo, cargo-sources) and pushes.
+# Syncs the flathub submodule (manifest, metainfo, cargo-sources) to a
+# released version and pushes. NOT wired into cargo-release itself — it
+# has no post-release-hook, only pre-release-hook (confirmed against its
+# own docs) — so this either runs via .github/workflows/flathub-sync.yml
+# on tag push, or manually: `bash scripts/flatpak-sync.sh <version>`.
 set -euo pipefail
 
 VERSION="$1"

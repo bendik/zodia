@@ -1,0 +1,56 @@
+name: Sync Flathub
+
+# Keeps flatpak/flathub (a submodule tracking flathub/io.github.bendik.Zodia)
+# in step with every tagged release. cargo-release has no post-release-hook
+# mechanism (only pre-release-hook — confirmed against its own docs), so
+# scripts/flatpak-sync.sh was never actually invoked anywhere before this
+# workflow existed; Flathub silently sat 5 releases stale as a result.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  flathub-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Deploy key with write access to flathub/io.github.bendik.Zodia —
+      # the default GITHUB_TOKEN only has permissions on this repo, not
+      # that separate one. One-time setup, see README.
+      - name: Set up SSH for Flathub push
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FLATHUB_DEPLOY_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      # .gitmodules already points at the SSH URL — do this after the key
+      # is in place so the submodule fetch/push both use it.
+      - name: Init flathub submodule
+        run: git submodule update --init flatpak/flathub
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install cargo-sources generator deps
+        run: pip install aiohttp tomlkit
+
+      - name: Sync Flathub submodule
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash scripts/flatpak-sync.sh "$VERSION"

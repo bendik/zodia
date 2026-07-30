@@ -13,13 +13,29 @@ flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
 
 ### Python deps (for cargo-sources regeneration)
 ```sh
-pip install aiohttp toml
+pip install aiohttp tomlkit
 ```
 
 ### cargo-release (for the release chore)
 ```sh
 cargo install cargo-release
 ```
+
+### CI deploy key (one-time, repo admin only)
+
+`.github/workflows/flathub-sync.yml` needs write access to the separate
+`flathub/io.github.bendik.Zodia` repo, which the default `GITHUB_TOKEN`
+doesn't have (it's scoped to this repo only):
+
+1. Generate a dedicated keypair: `ssh-keygen -t ed25519 -f flathub-deploy-key -N ""`
+2. Add `flathub-deploy-key.pub` as a **Deploy key** (with write access) on
+   `flathub/io.github.bendik.Zodia`'s repo settings.
+3. Add the private key (`flathub-deploy-key`) as a **repository secret**
+   named `FLATHUB_DEPLOY_KEY` on `bendik/zodia`.
+4. Delete both local key files.
+
+Without this, `flathub-sync.yml` runs but fails at the SSH push step —
+`cargo release` itself and the GitHub release/binaries are unaffected either way.
 
 ## Making a release
 
@@ -29,12 +45,14 @@ cargo install cargo-release
    ```sh
    cargo release <version>
    ```
-   This will:
-   - Bump `[workspace.package] version` in `Cargo.toml`
-   - Stage the updated metainfo.xml
-   - Commit, tag (`v<version>`), and push to origin
-   - Update the flathub submodule (manifest tag/commit, regenerate `cargo-sources.json`,
-     sync metainfo), commit + push to Flathub, then record the submodule bump in zodia
+   This bumps `[workspace.package] version`, stages metainfo.xml, commits, tags
+   (`v<version>`), and pushes to origin. **cargo-release itself does not touch
+   Flathub** — it only supports a `pre-release-hook`, not a post-release one (see
+   `release.toml` / `scripts/release-prep.sh`). The Flathub sync is a separate step:
+
+   - Automatically, via `.github/workflows/flathub-sync.yml`, triggered by the
+     same tag push — commits + pushes a branch on Flathub's repo and opens a PR.
+   - Or manually: `bash scripts/flatpak-sync.sh <version>` (no `v` prefix).
 
 3. Dry-run first if unsure:
    ```sh
