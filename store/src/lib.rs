@@ -521,6 +521,56 @@ impl ZodiaStore {
             .collect())
     }
 
+    // ── peer display names ────────────────────────────────────────────────────
+
+    /// Upsert `name` for `peer_pk`, but only if `updated_at` is newer than
+    /// whatever's already on file — last-writer-wins, guards against an
+    /// out-of-order redelivery clobbering a more recent name with a stale
+    /// one. Returns whether the row was actually written.
+    pub async fn set_peer_display_name_if_newer(
+        &self,
+        peer_pk:    &[u8; 32],
+        name:       &str,
+        updated_at: u64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO peer_display_names (peer_pk, name, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(peer_pk) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at
+             WHERE excluded.updated_at > peer_display_names.updated_at",
+        )
+        .bind(peer_pk.as_slice())
+        .bind(name)
+        .bind(updated_at as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// The display name a peer has broadcast for themself, if any.
+    pub async fn peer_display_name(&self, peer_pk: &[u8; 32]) -> Result<Option<String>, StoreError> {
+        let row = sqlx::query("SELECT name FROM peer_display_names WHERE peer_pk = ?")
+            .bind(peer_pk.as_slice())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    /// Every known peer display name, keyed by pubkey — for bulk-loading
+    /// into an in-memory lookup on startup rather than querying per-row.
+    pub async fn all_peer_display_names(&self) -> Result<Vec<([u8; 32], String)>, StoreError> {
+        let rows = sqlx::query("SELECT peer_pk, name FROM peer_display_names")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let pk: Vec<u8> = row.get(0);
+                let name: String = row.get(1);
+                <[u8; 32]>::try_from(pk.as_slice()).ok().map(|pk| (pk, name))
+            })
+            .collect())
+    }
+
     // ── responses (causal threads) ────────────────────────────────────────────
 
     /// Persist a response that hangs off `parent_log_id`.  Uses the same
@@ -1564,6 +1614,17 @@ const SCHEMA_STMTS: &[&str] = &[
         voter_pk    BLOB NOT NULL,
         affirmed_at INTEGER NOT NULL,
         PRIMARY KEY (interp_key, target_rev, voter_pk)
+    )",
+    // A peer's self-broadcast display name (InterpOp::SetDisplayName).
+    // One row per peer, replaced wholesale — last-writer-wins by
+    // `updated_at` (the op's Timestamp extension), enforced by the caller
+    // (`set_peer_display_name_if_newer`) rather than the schema.  Purely an
+    // untrusted display hint: a local nickname always takes precedence, see
+    // `zodia_ops::InterpOp::SetDisplayName`'s doc comment.
+    "CREATE TABLE IF NOT EXISTS peer_display_names (
+        peer_pk     BLOB    NOT NULL PRIMARY KEY,
+        name        TEXT    NOT NULL,
+        updated_at  INTEGER NOT NULL
     )",
 ];
 

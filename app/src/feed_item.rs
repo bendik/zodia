@@ -266,6 +266,9 @@ pub fn state_event_to_feed_item(
         },
         StateEvent::Skipped { .. } => return None,
         StateEvent::InterpRevoked { .. } => return None,
+        // Handled directly in app.rs's dispatch (store write + in-memory
+        // name map); not a feed-worthy event on its own.
+        StateEvent::DisplayNameSet { .. } => return None,
         StateEvent::DocEdited { by, interp_key: key, .. } => FeedItem {
             event_id:   match event {
                 StateEvent::DocEdited { op_id, .. } => *op_id.as_bytes(),

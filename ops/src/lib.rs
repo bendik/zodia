@@ -143,6 +143,18 @@ pub enum InterpOp {
     Revoke {
         target_log_id: Hash,
     },
+
+    /// Set this peer's self-chosen display name, shown to other peers in
+    /// place of their truncated hex pubkey. Peer-scoped mutable state, not
+    /// accumulating content like `Author` — receivers keep only the latest
+    /// one per author (last-writer-wins by the op's `Timestamp` extension),
+    /// same as `DocOp::EditorPresence`'s "latest wins" handling. An
+    /// untrusted hint only: no uniqueness is enforced, so a local nickname
+    /// (already the user's escape hatch for a peer they've named
+    /// themselves) always takes precedence over a broadcast name.
+    SetDisplayName {
+        name: String,
+    },
 }
 
 // ── DocOp (Phase F-collab) ────────────────────────────────────────────────────

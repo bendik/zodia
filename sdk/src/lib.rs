@@ -29,6 +29,16 @@ use zodia_sync::{SyncEvent, SyncError, ZodiaSyncNode};
 pub use zodia_circles::{Access as CircleAccess, SpaceId as CircleId};
 pub use zodia_pipeline::StateEvent;
 
+/// Reserved `set_display_name` value automated test/dev peers should
+/// broadcast so real clients can filter them out of discovery UI instead
+/// of showing throwaway test identities as if they were real people to
+/// connect with. Not a security boundary — any peer can claim this name —
+/// just a courtesy convention for tooling that spins up ephemeral
+/// identities on shared infrastructure (mDNS reaches the whole LAN, so a
+/// local test run is visible to every real Zodia instance nearby). See
+/// `sdk/tests/cucumber.rs`'s `peer_connected` step for the producer side.
+pub const TEST_PEER_DISPLAY_NAME: &str = "zodia-test-peer";
+
 /// Per-peer catch-up lifecycle, raw (unlike [`SyncStatus`]'s aggregate
 /// counts) — for UIs that want to show per-peer detail (e.g. a "Sync
 /// activity" panel listing which peers are caught up and how many ops
@@ -313,6 +323,17 @@ impl ZodiaClient {
         self.call(|reply| Command::Revoke { target_log_id, reply }).await
     }
 
+    /// Broadcast a self-chosen display name (`InterpOp::SetDisplayName`,
+    /// log 0) — shown to other peers in place of their truncated hex
+    /// pubkey for this identity. Same always-on-global-topic propagation
+    /// as `author()`/`revoke()`; not re-sent automatically on reconnect,
+    /// callers should call this again after every successful connect if
+    /// they want it to stay visible to newly-met peers (mirrors
+    /// `ZodiaNetwork::publish_announce()`'s per-connect pattern).
+    pub async fn set_display_name(&self, name: String) -> Result<(), ClientError> {
+        self.call(|reply| Command::SetDisplayName { name, reply }).await
+    }
+
     /// Apply a CRDT edit to a key's collaborative doc.
     pub async fn edit(
         &self,
@@ -411,6 +432,7 @@ enum Command {
     },
     Author { interp_key: String, body: String, reply: Reply },
     Revoke { target_log_id: Hash, reply: Reply },
+    SetDisplayName { name: String, reply: Reply },
     Edit {
         interp_key:      String,
         base_rev:        Hash,
@@ -614,6 +636,10 @@ async fn handle_command(
         }
         Command::Revoke { target_log_id, reply } => {
             let res = node.publish(InterpOp::Revoke { target_log_id }).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::SetDisplayName { name, reply } => {
+            let res = node.publish(InterpOp::SetDisplayName { name }).await.map_err(sync_err);
             let _ = reply.send(res);
         }
         Command::Edit { interp_key, base_rev, crdt_update, affected_blocks, reply } => {

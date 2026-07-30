@@ -66,6 +66,13 @@ async fn peer_connected(world: &mut ZodiaWorld, name: String) {
         data_dir:    data_dir.clone(),
     };
     let client = ZodiaClient::connect(config).await.expect("client connects");
+    // Self-tag as a test peer so real Zodia instances on the same LAN (mDNS
+    // reaches the whole network, not just this test process) can filter
+    // this ephemeral identity out of their discovery UI instead of
+    // treating it as a real person to connect with — see
+    // `zodia_sdk::TEST_PEER_DISPLAY_NAME`'s doc comment.
+    client.set_display_name(zodia_sdk::TEST_PEER_DISPLAY_NAME.to_string()).await
+        .expect("set_display_name succeeds");
     world.events.insert(name.clone(), client.events());
     world.identities.insert(name.clone(), (signing_key, data_dir));
     world.clients.insert(name, client);
@@ -90,6 +97,8 @@ async fn peer_reconnects(world: &mut ZodiaWorld, name: String) {
         data_dir,
     };
     let client = ZodiaClient::connect(config).await.expect("client reconnects");
+    client.set_display_name(zodia_sdk::TEST_PEER_DISPLAY_NAME.to_string()).await
+        .expect("set_display_name succeeds");
     world.events.insert(name.clone(), client.events());
     world.clients.insert(name, client);
 }
@@ -208,6 +217,37 @@ async fn peer_authors_many(world: &mut ZodiaWorld, name: String, count: u64) {
         client.author(&format!("natal:backpressure_{i}"), format!("body {i}")).await
             .expect("author succeeds");
     }
+}
+
+#[when(regex = r#"^"([^"]+)" sets their display name to "([^"]+)"$"#)]
+async fn peer_sets_display_name(world: &mut ZodiaWorld, name: String, display_name: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .set_display_name(display_name)
+        .await
+        .expect("set_display_name succeeds");
+}
+
+// Registered for both Then and When: this file's other dual-registered
+// steps are reused as an "And" following either keyword; this scenario's
+// second display-name change is asserted mid-scenario after a "When".
+#[then(regex = r#"^"([^"]+)" observes "([^"]+)" set their display name to "([^"]+)" within (\d+) seconds?$"#)]
+#[when(regex = r#"^"([^"]+)" observes "([^"]+)" set their display name to "([^"]+)" within (\d+) seconds?$"#)]
+async fn observes_display_name(
+    world: &mut ZodiaWorld, observer: String, author: String, display_name: String, secs: u64,
+) {
+    let (author_signing_key, _) = world.identities.get(&author)
+        .unwrap_or_else(|| panic!("no prior identity for peer {author}"))
+        .clone();
+    let author_verifying_key = PandaSigningKey::from_bytes(author_signing_key.as_bytes()).verifying_key();
+    let seen = wait_for(world, &observer, secs, |event| {
+        matches!(
+            event,
+            StateEvent::DisplayNameSet { by, name, .. }
+                if *by == author_verifying_key && name == &display_name
+        )
+    }).await;
+    assert!(seen, "{observer} did not observe {author} set their display name to {display_name:?} within {secs}s");
 }
 
 #[when(expr = "{string} authors an interpretation on {string}")]

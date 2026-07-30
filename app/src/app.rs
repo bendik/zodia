@@ -134,6 +134,8 @@ pub enum AppMsg {
     SendViaRelay { relay: PeerId, dest: PeerId, text: String },
     /// User set or updated a nickname for a connected peer.
     SetNickname { peer_id: PeerId, name: String },
+    /// User set (or cleared, if empty) their own broadcast display name.
+    SetOwnDisplayName(String),
     /// "+" on a discovered peer — immediately enters OutgoingPending and starts connecting.
     ProposeConsent(PeerId),
     /// "×" on a pending/connected sidebar row — remove from all state and disk.
@@ -308,7 +310,14 @@ pub struct AppModel {
     chat_logs: HashMap<PeerId, Vec<(bool, String)>>,
 
     /// User-assigned nicknames, keyed by 4-byte upper-hex stargazer tag.
+    /// Always takes precedence over `stargazer_display_names` — see
+    /// `resolved_peer_name`.
     stargazer_nicknames: HashMap<String, String>,
+    /// Names peers have broadcast for themselves (`InterpOp::SetDisplayName`),
+    /// keyed the same way as `stargazer_nicknames`. An untrusted hint, shown
+    /// only when the local user hasn't already set their own nickname for
+    /// that peer — see `resolved_peer_name`.
+    stargazer_display_names: HashMap<String, String>,
     /// Unread message counts per peer (cleared when their page is opened).
     unread_messages: HashMap<String, usize>,
 
@@ -464,6 +473,11 @@ impl AsyncComponent for AppModel {
         let baseline = Rc::new(init.baseline);
 
         let stargazer_nicknames = load_nicknames(init.config.data_dir());
+        let stargazer_display_names: HashMap<String, String> = store.all_peer_display_names().await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(pk, name)| (hex::encode_upper(&pk[..4]), name))
+            .collect();
 
         // Build unified stargazer map from both persisted connected peers and
         // saved outgoing-pending peers.
@@ -540,6 +554,7 @@ impl AsyncComponent for AppModel {
             active_audio: None,
             chat_logs,
             stargazer_nicknames,
+            stargazer_display_names,
             unread_messages: HashMap::new(),
             zodia_client: None,
             recent_interps: Vec::new(),
@@ -598,6 +613,9 @@ impl AsyncComponent for AppModel {
 
         let (widgets, network_tab_sender, sidebar_sender) =
             build_widgets(&root, &model, &sender, &setup_widget, &notif_widget);
+        if let Some(name) = model.config.display_name.clone() {
+            let _ = network_tab_sender.send(crate::network_tab::NetworkTabMsg::SetOwnName(Some(name)));
+        }
         model.network_tab_sender = Some(network_tab_sender);
         model.sidebar_sender = Some(sidebar_sender);
 
@@ -806,6 +824,22 @@ impl AsyncComponent for AppModel {
                 sync_peers_factory(self);
             }
 
+            AppMsg::SetOwnDisplayName(name) => {
+                let trimmed = name.trim().to_string();
+                if let Err(e) = self.config.save_display_name(trimmed.clone()) {
+                    warn!("save_display_name: {e}");
+                }
+                if let Some(client) = &self.zodia_client {
+                    if let Err(e) = client.set_display_name(trimmed.clone()).await {
+                        warn!("set_display_name: {e}");
+                    }
+                }
+                if let Some(s) = &self.network_tab_sender {
+                    let shown = if trimmed.is_empty() { None } else { Some(trimmed) };
+                    let _ = s.send(crate::network_tab::NetworkTabMsg::SetOwnName(shown));
+                }
+            }
+
             AppMsg::ProposeConsent(peer_id) => {
                 // Idempotent: skip if already Connected or already seeking.
                 match self.stargazers.get(&peer_id).map(|s| &s.state) {
@@ -851,9 +885,7 @@ impl AsyncComponent for AppModel {
             AppMsg::ConnectionComplete { peer_id, their_blob, channel, navigate, is_new } => {
                 let peer_hex = hex::encode_upper(&peer_id.0[..4]);
                 if is_new {
-                    let name = self.stargazer_nicknames.get(&peer_hex)
-                        .cloned()
-                        .unwrap_or_else(|| format!("···{peer_hex}"));
+                    let name = self.resolved_peer_name(&peer_hex);
                     notify::send(
                         &format!("connected-{peer_hex}"),
                         "Connected",
@@ -1284,6 +1316,21 @@ impl AsyncComponent for AppModel {
                                 debug!("ignored revoke: author mismatch or already revoked");
                             }
                             Err(e) => warn!("revoke persist failed: {e}"),
+                        }
+                    }
+                    StateEvent::DisplayNameSet { by, name, timestamp, .. } => {
+                        let peer_pk:  [u8; 32] = *by.as_bytes();
+                        let peer_hex = hex::encode_upper(&peer_pk[..4]);
+                        match self.store.set_peer_display_name_if_newer(&peer_pk, name, *timestamp).await {
+                            Ok(true) => {
+                                self.stargazer_display_names.insert(peer_hex, name.clone());
+                                self.network_changed_token += 1;
+                                sync_peers_factory(self);
+                            }
+                            Ok(false) => {
+                                debug!(peer = %peer_hex, "ignored display name: not newer than what's on file");
+                            }
+                            Err(e) => warn!("display name persist failed: {e}"),
                         }
                     }
                 }
@@ -1810,9 +1857,7 @@ impl AsyncComponent for AppModel {
                 }
 
                 info!(peer = %peer_hex, "incoming consent request — waiting for user approval");
-                let name = self.stargazer_nicknames.get(&peer_hex)
-                    .cloned()
-                    .unwrap_or_else(|| format!("···{peer_hex}"));
+                let name = self.resolved_peer_name(&peer_hex);
                 notify::send(
                     &format!("consent-{peer_hex}"),
                     "Chart exchange request",
@@ -1838,9 +1883,7 @@ impl AsyncComponent for AppModel {
             }
             ZodiaNetEvent::CallOffer { from, session_id } => {
                 let peer_hex = hex::encode_upper(&from.0[..4]);
-                let name = self.stargazer_nicknames.get(&peer_hex)
-                    .cloned()
-                    .unwrap_or_else(|| format!("···{peer_hex}"));
+                let name = self.resolved_peer_name(&peer_hex);
                 notify::send(
                     &format!("call-{peer_hex}"),
                     "Incoming call",
@@ -1869,9 +1912,7 @@ impl AsyncComponent for AppModel {
             }
             ZodiaNetEvent::ChatReceived { from, text } => {
                 let tag = hex::encode_upper(&from.0[..4]);
-                let name = self.stargazer_nicknames.get(&tag)
-                    .cloned()
-                    .unwrap_or_else(|| format!("···{tag}"));
+                let name = self.resolved_peer_name(&tag);
                 let preview: String = text.chars().take(80).collect();
                 notify::send(
                     &format!("chat-{tag}"),
@@ -2051,10 +2092,7 @@ impl AsyncComponent for AppModel {
                 .map(|(vk, access)| {
                     let pubkey_hex = hex::encode(vk.as_bytes());
                     let tag = hex::encode_upper(&vk.as_bytes()[..4]);
-                    let label = self.stargazer_nicknames.get(&tag)
-                        .filter(|n| !n.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| format!("···{tag}"));
+                    let label = self.resolved_peer_name(&tag);
                     crate::circle_page::CirclePageMember {
                         pubkey_hex, label, access: format!("{access}"),
                     }
@@ -2065,10 +2103,7 @@ impl AsyncComponent for AppModel {
                 .filter(|sg| !member_hexes.contains(&hex::encode(sg.peer_id.0)))
                 .map(|sg| {
                     let tag = hex::encode_upper(&sg.peer_id.0[..4]);
-                    let label = self.stargazer_nicknames.get(&tag)
-                        .filter(|n| !n.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| format!("···{tag}"));
+                    let label = self.resolved_peer_name(&tag);
                     crate::circle_page::CirclePagePeer { peer_id: sg.peer_id.clone(), label }
                 })
                 .collect();
@@ -2104,10 +2139,7 @@ impl AsyncComponent for AppModel {
                 let glyph    = if s.solar_month > 0 { sign_glyph(s.solar_month) } else { "" };
                 #[allow(deprecated)]
                 if let Some(tw) = widgets.stargazer_titles.get(&peer_hex) {
-                    let title = self.stargazer_nicknames.get(&peer_hex)
-                        .filter(|n| !n.is_empty())
-                        .map(|n| format!("{glyph}  {n}"))
-                        .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
+                    let title = format!("{glyph}  {}", self.resolved_peer_name(&peer_hex));
                     tw.set_title(&title);
                 }
             }
@@ -2229,9 +2261,7 @@ impl AsyncComponent for AppModel {
             let chat_summary: String = self.unread_messages.iter()
                 .filter(|(_, &n)| n > 0)
                 .map(|(tag, n)| {
-                    let name = self.stargazer_nicknames.get(tag)
-                        .cloned()
-                        .unwrap_or_else(|| format!("···{tag}"));
+                    let name = self.resolved_peer_name(tag);
                     format!("{name}  ·  {n} unread")
                 })
                 .collect::<Vec<_>>()
@@ -2518,9 +2548,7 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
         StargazerState::Discovered => unreachable!(),
     };
     let display_name = if is_connected {
-        model.stargazer_nicknames.get(&peer_hex)
-            .cloned()
-            .unwrap_or_else(|| format!("···{peer_hex}"))
+        model.resolved_peer_name(&peer_hex)
     } else {
         format!("···{peer_hex}")
     };
@@ -2608,6 +2636,7 @@ fn send_network_refresh(model: &AppModel) {
 
     let peers: Vec<crate::network_tab::NetPeer> = model.stargazers.values()
         .filter(|sg| matches!(sg.state, StargazerState::Discovered))
+        .filter(|sg| !model.is_test_peer(&sg.peer_id))
         .map(|sg| crate::network_tab::NetPeer {
             peer_id:        sg.peer_id.clone(),
             solar_month:    sg.solar_month,
@@ -2726,6 +2755,15 @@ async fn try_spawn_sync(
         Ok(c) => c,
         Err(e) => { warn!("zodia-sdk client attach failed: {e}"); return None; }
     };
+
+    // Re-broadcast our own display name on every (re)connect — not carried
+    // in the announce/consent blobs, so newly-met peers only learn it via
+    // this always-on-topic op (see `ZodiaClient::set_display_name`'s doc).
+    if let Some(name) = config.display_name.clone() {
+        if let Err(e) = client.set_display_name(name).await {
+            warn!("set_display_name on connect failed: {e}");
+        }
+    }
 
     let mut events = client.events();
     let sender_events = sender.clone();
@@ -3093,7 +3131,8 @@ fn op_id_for(ev: &StateEvent) -> [u8; 32] {
         | StateEvent::EditorPresenceChanged { op_id, .. }
         | StateEvent::InterpAuthored { op_id, .. }
         | StateEvent::ResponseAdded { op_id, .. }
-        | StateEvent::InterpRevoked { op_id, .. } => *op_id.as_bytes(),
+        | StateEvent::InterpRevoked { op_id, .. }
+        | StateEvent::DisplayNameSet { op_id, .. } => *op_id.as_bytes(),
         StateEvent::AffirmAdded { .. } | StateEvent::Skipped { .. } => [0u8; 32],
     }
 }
@@ -3438,6 +3477,8 @@ fn build_main_page(
         |out| match out {
             crate::network_tab::NetworkTabOut::ProposeConsent(pid) =>
                 AppMsg::ProposeConsent(pid),
+            crate::network_tab::NetworkTabOut::SetOwnDisplayName(name) =>
+                AppMsg::SetOwnDisplayName(name),
         },
     );
     content_stack.add_named(&network_toolbar, Some("network"));
@@ -3799,5 +3840,33 @@ impl AppModel {
             }
             Err(e) => warn!("circle_members: {e}"),
         }
+    }
+
+    /// The name to show for a peer: a local nickname the user set
+    /// themselves, else the name that peer has broadcast for themself
+    /// (`InterpOp::SetDisplayName`), else the truncated hex fallback every
+    /// call site used before either existed.
+    fn resolved_peer_name(&self, peer_hex: &str) -> String {
+        self.stargazer_nicknames.get(peer_hex)
+            .or_else(|| self.stargazer_display_names.get(peer_hex))
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("···{peer_hex}"))
+    }
+
+    /// True iff this peer has broadcast `zodia_sdk::TEST_PEER_DISPLAY_NAME`
+    /// — an ephemeral test/dev identity, not a real person to show as
+    /// discoverable. A local nickname overrides this: if the user has
+    /// explicitly named a peer themselves, respect that instead of hiding
+    /// them (covers a developer who wants to keep a specific test peer
+    /// visible while iterating).
+    fn is_test_peer(&self, peer_id: &PeerId) -> bool {
+        let peer_hex = hex::encode_upper(&peer_id.0[..4]);
+        if self.stargazer_nicknames.contains_key(&peer_hex) {
+            return false;
+        }
+        self.stargazer_display_names.get(&peer_hex)
+            .map(|n| n == zodia_sdk::TEST_PEER_DISPLAY_NAME)
+            .unwrap_or(false)
     }
 }

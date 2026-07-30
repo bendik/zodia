@@ -59,6 +59,10 @@ impl ZodiaDataDir {
     fn birth_path(&self) -> PathBuf {
         self.0.join("birth.cbor")
     }
+
+    fn display_name_path(&self) -> PathBuf {
+        self.0.join("display_name.txt")
+    }
 }
 
 // ── public handle ─────────────────────────────────────────────────────────────
@@ -67,6 +71,7 @@ impl ZodiaDataDir {
 pub struct LocalConfig {
     pub identity: IdentityKeypair,
     pub birth: Option<BirthData>,
+    pub display_name: Option<String>,
     dir: ZodiaDataDir,
 }
 
@@ -84,6 +89,10 @@ impl LocalConfig {
 
         let identity = identity_file::load_or_generate(&dir.identity_path())?;
         let birth = birth_file::load_if_present(&dir.birth_path())?;
+        let display_name = std::fs::read_to_string(dir.display_name_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         if birth.is_some() {
             info!("loaded identity + birth data");
@@ -91,7 +100,7 @@ impl LocalConfig {
             info!("loaded identity (no birth data yet)");
         }
 
-        Ok(LocalConfig { identity, birth, dir })
+        Ok(LocalConfig { identity, birth, display_name, dir })
     }
 
     /// The resolved data directory — e.g. `~/.local/share/zodia/`.
@@ -105,6 +114,20 @@ impl LocalConfig {
         birth_file::save(&self.dir.birth_path(), &birth)?;
         info!(geohash = %birth.geohash, jdn = birth.jdn, "birth data saved");
         self.birth = Some(birth);
+        Ok(())
+    }
+
+    /// Persist this device's self-chosen display name to disk and update
+    /// the in-memory copy. Callers are responsible for re-broadcasting it
+    /// (`ZodiaClient::set_display_name`) — this only handles local storage,
+    /// same division of labor as `save_birth`.
+    #[instrument(skip(self), err)]
+    pub fn save_display_name(&mut self, name: String) -> Result<(), ConfigError> {
+        let trimmed = name.trim().to_string();
+        std::fs::write(self.dir.display_name_path(), &trimmed)
+            .map_err(IdentityFileError::Io)?;
+        info!(name = %trimmed, "display name saved");
+        self.display_name = if trimmed.is_empty() { None } else { Some(trimmed) };
         Ok(())
     }
 }

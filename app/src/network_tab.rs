@@ -5,6 +5,9 @@
 //! whenever `network_changed_token` advances; the component clears and rebuilds
 //! its content list internally.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use libadwaita as adw;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
@@ -66,6 +69,10 @@ where
 #[derive(Debug)]
 pub enum NetworkTabMsg {
     SetStatus(String),
+    /// This device's own display name, if one has been set — kept
+    /// separately from `SetStatus`'s composed status line so the edit
+    /// dialog can prefill with the raw name.
+    SetOwnName(Option<String>),
     Refresh {
         peers:       Vec<NetPeer>,
         recent:      Vec<NetInterp>,
@@ -76,12 +83,18 @@ pub enum NetworkTabMsg {
 #[derive(Debug)]
 pub enum NetworkTabOut {
     ProposeConsent(PeerId),
+    SetOwnDisplayName(String),
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
 
 pub struct NetworkTab {
     status:      String,
+    /// This device's own display name, if set. `Rc<RefCell<_>>` so the
+    /// name-edit dialog (built once in `init`, no `&self` access at click
+    /// time) can read the live value — same pattern as `PeerRow`'s
+    /// `nickname` cell.
+    own_name:    Rc<RefCell<Option<String>>>,
     peers:       Vec<NetPeer>,
     recent:      Vec<NetInterp>,
     sync_status: Vec<NetSyncStatus>,
@@ -93,8 +106,10 @@ pub struct NetworkTab {
 
 pub struct NetworkTabWidgets {
     status_label:  gtk::Label,
-    /// Vertical box that holds `status_label` (always first child) plus the
-    /// dynamic `peers`/`recent` groups appended by `rebuild`.
+    name_edit_btn: gtk::Button,
+    /// Vertical box that holds a header row (status label + name-edit
+    /// button, always first child) plus the dynamic `peers`/`recent`
+    /// groups appended by `rebuild`.
     content_box:   gtk::Box,
     sidebar_btn:   gtk::Button,
 }
@@ -158,15 +173,61 @@ impl SimpleComponent for NetworkTab {
                 set_label: "Starting up…",
                 add_css_class: "dim-label",
                 add_css_class: "caption",
-                set_halign: gtk::Align::Center,
-                set_margin_top: 8,
             }
+        }
+        relm4::view! {
+            name_edit_btn = gtk::Button {
+                set_icon_name: "document-edit-symbolic",
+                add_css_class: "flat",
+                add_css_class: "circular",
+                set_tooltip_text: Some("Set your display name"),
+                set_valign: gtk::Align::Center,
+            }
+        }
+        relm4::view! {
+            status_row = gtk::Box {
+                set_orientation: gtk::Orientation::Horizontal,
+                set_halign: gtk::Align::Center,
+                set_spacing: 4,
+                set_margin_top: 8,
+                append: &status_label,
+                append: &name_edit_btn,
+            }
+        }
+        let own_name = Rc::new(RefCell::new(None::<String>));
+        {
+            let s = sender.clone();
+            let btn_ref = name_edit_btn.clone();
+            let name_cell = Rc::clone(&own_name);
+            name_edit_btn.connect_clicked(move |_| {
+                let current = name_cell.borrow().clone().unwrap_or_default();
+                let dialog = adw::AlertDialog::new(Some("Set Your Display Name"), Some(
+                    "Shown to other peers instead of your hex id. Leave blank to clear.",
+                ));
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("set", "Set");
+                dialog.set_response_appearance("set", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("set"));
+                dialog.set_close_response("cancel");
+                let entry = gtk::Entry::new();
+                entry.set_text(&current);
+                entry.set_placeholder_text(Some("Display name…"));
+                dialog.set_extra_child(Some(&entry));
+                let s_inner = s.clone();
+                let e = entry.clone();
+                dialog.connect_response(None, move |_, id| {
+                    if id == "set" {
+                        let _ = s_inner.output(NetworkTabOut::SetOwnDisplayName(e.text().to_string()));
+                    }
+                });
+                dialog.present(Some(&btn_ref));
+            });
         }
         relm4::view! {
             content_box = gtk::Box {
                 set_orientation: gtk::Orientation::Vertical,
                 set_spacing: 16,
-                append: &status_label,
+                append: &status_row,
             }
         }
         relm4::view! {
@@ -189,18 +250,17 @@ impl SimpleComponent for NetworkTab {
         }
         root.set_content(Some(&scroll));
 
-        let _ = sender; // outputs forwarded by row clicks below
-
         ComponentParts {
             model: NetworkTab {
                 status:              String::new(),
+                own_name:            own_name,
                 peers:               Vec::new(),
                 recent:              Vec::new(),
                 sync_status:         Vec::new(),
                 refresh_token:       0,
                 refresh_token_shown: std::cell::Cell::new(u64::MAX),
             },
-            widgets: NetworkTabWidgets { status_label, content_box, sidebar_btn },
+            widgets: NetworkTabWidgets { status_label, name_edit_btn, content_box, sidebar_btn },
         }
     }
 
@@ -208,6 +268,9 @@ impl SimpleComponent for NetworkTab {
         match msg {
             NetworkTabMsg::SetStatus(s) => {
                 self.status = s;
+            }
+            NetworkTabMsg::SetOwnName(name) => {
+                *self.own_name.borrow_mut() = name;
             }
             NetworkTabMsg::Refresh { peers, recent, sync_status } => {
                 self.peers       = peers;
@@ -219,7 +282,8 @@ impl SimpleComponent for NetworkTab {
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, sender: ComponentSender<Self>) {
-        let _ = &widgets.sidebar_btn; // visibility handled by signal handler
+        let _ = &widgets.sidebar_btn;   // visibility handled by signal handler
+        let _ = &widgets.name_edit_btn; // click handled by signal handler set up in init
 
         widgets.status_label.set_text(&self.status);
 

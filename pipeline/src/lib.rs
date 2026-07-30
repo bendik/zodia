@@ -74,6 +74,16 @@ pub enum StateEvent {
         by:            VerifyingKey,
         target_log_id: Hash,
     },
+    /// A peer set (or changed) their self-chosen display name.  Last-writer-
+    /// wins per author is the caller's responsibility (compare against
+    /// whatever name is already on file before overwriting) — the pipeline
+    /// itself is stateless and just reports what arrived.
+    DisplayNameSet {
+        op_id:     Hash,
+        by:        VerifyingKey,
+        name:      String,
+        timestamp: u64,
+    },
     /// Phase F-collab: a CRDT edit landed against `interp_key`.  The
     /// materialiser persists the update into the local Loro doc and updates
     /// per-block author rings.
@@ -223,7 +233,7 @@ pub struct MaterializationProcessor {
 /// `Operation<ZodiaExtensions>.body`, so it has no `Operation<ZodiaExtensions>` to
 /// pull `op_id`/`author` from; the caller supplies whatever *did* carry it
 /// (for circle content: the wrapping `CircleOperation`'s own hash/author).
-fn materialize_interp(op_id: Hash, author: VerifyingKey, interp: InterpOp) -> StateEvent {
+fn materialize_interp(op_id: Hash, author: VerifyingKey, timestamp: Timestamp, interp: InterpOp) -> StateEvent {
     match interp {
         InterpOp::Author { interp_key, body } => StateEvent::InterpAuthored {
             op_id, author, interp_key, body,
@@ -237,6 +247,9 @@ fn materialize_interp(op_id: Hash, author: VerifyingKey, interp: InterpOp) -> St
         },
         InterpOp::Revoke { target_log_id } => StateEvent::InterpRevoked {
             op_id, by: author, target_log_id,
+        },
+        InterpOp::SetDisplayName { name } => StateEvent::DisplayNameSet {
+            op_id, by: author, name, timestamp: timestamp.into(),
         },
     }
 }
@@ -285,7 +298,7 @@ pub fn materialize_circle_content(
     plaintext:   &[u8],
 ) -> StateEvent {
     match InterpOp::decode(plaintext) {
-        Ok(interp) => materialize_interp(op_id, author, interp),
+        Ok(interp) => materialize_interp(op_id, author, received_at, interp),
         Err(_) => match DocOp::decode(plaintext) {
             Ok(doc) => materialize_doc(op_id, author, received_at, doc),
             Err(OpCodecError::Decode(msg)) => StateEvent::Skipped {
@@ -303,7 +316,9 @@ impl Processor<DecodeOutput> for MaterializationProcessor {
         let event = match input {
             DecodeOutput::Skipped { reason } => StateEvent::Skipped { reason },
             DecodeOutput::Decoded { op, interp } => {
-                materialize_interp(op.header.hash(), op.header.verifying_key, interp)
+                let timestamp = op.header.extension::<Timestamp>()
+                    .expect("every zodia op carries a timestamp extension");
+                materialize_interp(op.header.hash(), op.header.verifying_key, timestamp, interp)
             }
             DecodeOutput::DecodedDoc { op, doc } => {
                 let timestamp = op.header.extension::<Timestamp>()
