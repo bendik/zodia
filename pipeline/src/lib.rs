@@ -214,6 +214,87 @@ pub struct MaterializationProcessor {
     outbox: RefCell<Vec<StateEvent>>,
 }
 
+/// `InterpOp` → `StateEvent`, given the identity of whatever op carried it.
+///
+/// Free function so it's shared between the normal `Operation<OpExtensions>`
+/// path (below) and the circle-content path (`materialize_circle_content`) —
+/// a circle-shared interpretation is decoded from a decrypted
+/// `p2panda_spaces::Event::Application`'s plaintext bytes, not from an
+/// `Operation<OpExtensions>.body`, so it has no `Operation<OpExtensions>` to
+/// pull `op_id`/`author` from; the caller supplies whatever *did* carry it
+/// (for circle content: the wrapping `CircleOperation`'s own hash/author).
+fn materialize_interp(op_id: Hash, author: VerifyingKey, interp: InterpOp) -> StateEvent {
+    match interp {
+        InterpOp::Author { interp_key, body } => StateEvent::InterpAuthored {
+            op_id, author, interp_key, body,
+        },
+        InterpOp::Affirm { target_log_id } => StateEvent::AffirmAdded {
+            target_log_id,
+            voter: author,
+        },
+        InterpOp::RespondTo { parent_log_id, body } => StateEvent::ResponseAdded {
+            op_id, author, parent_log_id, body,
+        },
+        InterpOp::Revoke { target_log_id } => StateEvent::InterpRevoked {
+            op_id, by: author, target_log_id,
+        },
+    }
+}
+
+/// `DocOp` → `StateEvent`, same sharing rationale as [`materialize_interp`].
+/// `timestamp` likewise comes from whatever the caller has: the normal path
+/// reads it off `Operation<OpExtensions>`'s `Timestamp` extension; circle
+/// content has no such extension (its header carries `SpacesArgs<C>`
+/// instead) and passes local receipt time.
+fn materialize_doc(op_id: Hash, by: VerifyingKey, timestamp: Timestamp, doc: DocOp) -> StateEvent {
+    let ts: u64 = u64::from(timestamp);
+    match doc {
+        DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks } =>
+            StateEvent::DocEdited {
+                op_id, by, interp_key, base_rev, crdt_update,
+                affected_blocks, timestamp: ts,
+            },
+        DocOp::Veto { interp_key, target_edit_op_id } => StateEvent::DocVetoProposed {
+            op_id, by, interp_key, target_edit_op_id, timestamp: ts,
+        },
+        DocOp::AffirmRev { interp_key, target_rev } => StateEvent::DocAffirmed {
+            op_id, by, interp_key, target_rev,
+        },
+        DocOp::EditorPresence { interp_key, joined } =>
+            StateEvent::EditorPresenceChanged {
+                op_id, by, interp_key, joined, timestamp: ts,
+            },
+    }
+}
+
+/// Decode + materialize plaintext bytes from a circle's decrypted
+/// `p2panda_spaces::Event::Application` — the circle-sharing equivalent of
+/// what `DecodeProcessor` + `MaterializationProcessor` do for the normal
+/// `Operation<OpExtensions>` path, minus the `Processor` machinery (there's
+/// no further pipeline stage after a circle message is already plaintext).
+///
+/// `op_id`/`author` identify the *circle* operation that carried the
+/// ciphertext (a `zodia_circles::CircleOperation`'s own hash/verifying key —
+/// the plaintext `InterpOp`/`DocOp` bytes carry neither). `received_at` is
+/// used as the timestamp for `DocOp` content, since circle operations carry
+/// no `Timestamp` extension (see [`materialize_doc`]).
+pub fn materialize_circle_content(
+    op_id:       Hash,
+    author:      VerifyingKey,
+    received_at: Timestamp,
+    plaintext:   &[u8],
+) -> StateEvent {
+    match InterpOp::decode(plaintext) {
+        Ok(interp) => materialize_interp(op_id, author, interp),
+        Err(_) => match DocOp::decode(plaintext) {
+            Ok(doc) => materialize_doc(op_id, author, received_at, doc),
+            Err(OpCodecError::Decode(msg)) => StateEvent::Skipped {
+                reason: SkipReason::MalformedOp(msg),
+            },
+        },
+    }
+}
+
 impl Processor<DecodeOutput> for MaterializationProcessor {
     type Output = StateEvent;
     type Error  = PipelineError;
@@ -222,45 +303,12 @@ impl Processor<DecodeOutput> for MaterializationProcessor {
         let event = match input {
             DecodeOutput::Skipped { reason } => StateEvent::Skipped { reason },
             DecodeOutput::Decoded { op, interp } => {
-                let op_id  = op.header.hash();
-                let author = op.header.verifying_key;
-                match interp {
-                    InterpOp::Author { interp_key, body } => StateEvent::InterpAuthored {
-                        op_id, author, interp_key, body,
-                    },
-                    InterpOp::Affirm { target_log_id } => StateEvent::AffirmAdded {
-                        target_log_id,
-                        voter: author,
-                    },
-                    InterpOp::RespondTo { parent_log_id, body } => StateEvent::ResponseAdded {
-                        op_id, author, parent_log_id, body,
-                    },
-                    InterpOp::Revoke { target_log_id } => StateEvent::InterpRevoked {
-                        op_id, by: author, target_log_id,
-                    },
-                }
+                materialize_interp(op.header.hash(), op.header.verifying_key, interp)
             }
             DecodeOutput::DecodedDoc { op, doc } => {
-                let op_id  = op.header.hash();
-                let by     = op.header.verifying_key;
-                let ts: u64 = u64::from(op.header.extension::<Timestamp>().expect("every zodia op carries a timestamp extension"));
-                match doc {
-                    DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks } =>
-                        StateEvent::DocEdited {
-                            op_id, by, interp_key, base_rev, crdt_update,
-                            affected_blocks, timestamp: ts,
-                        },
-                    DocOp::Veto { interp_key, target_edit_op_id } => StateEvent::DocVetoProposed {
-                        op_id, by, interp_key, target_edit_op_id, timestamp: ts,
-                    },
-                    DocOp::AffirmRev { interp_key, target_rev } => StateEvent::DocAffirmed {
-                        op_id, by, interp_key, target_rev,
-                    },
-                    DocOp::EditorPresence { interp_key, joined } =>
-                        StateEvent::EditorPresenceChanged {
-                            op_id, by, interp_key, joined, timestamp: ts,
-                        },
-                }
+                let timestamp = op.header.extension::<Timestamp>()
+                    .expect("every zodia op carries a timestamp extension");
+                materialize_doc(op.header.hash(), op.header.verifying_key, timestamp, doc)
             }
         };
         debug!(?event, "materialised");
@@ -426,6 +474,54 @@ mod tests {
         let pipe = ZodiaPipeline::new();
         pipe.process(op).await.unwrap();
         match pipe.next().await.unwrap() {
+            StateEvent::Skipped { reason: SkipReason::MalformedOp(_) } => {}
+            other => panic!("expected Skipped MalformedOp, got {other:?}"),
+        }
+    }
+
+    /// A circle-shared interpretation has no `Operation<OpExtensions>` to
+    /// pull identity from (it arrives as plaintext bytes from a decrypted
+    /// `p2panda_spaces::Event::Application`) — the caller must supply the
+    /// carrying circle operation's own hash/author instead, and this must
+    /// produce the exact same `StateEvent` shape as the normal path would
+    /// for identical `InterpOp` bytes.
+    #[test]
+    fn circle_content_materializes_same_as_the_normal_path() {
+        let circle_op_author = SigningKey::generate().verifying_key();
+        let circle_op_id = Hash::digest(b"some circle operation");
+        let plaintext = InterpOp::Author {
+            interp_key: "natal:moon_trine_venus".into(),
+            body:       "A private reading, just for you two.".into(),
+        }
+        .encode();
+
+        let event = materialize_circle_content(
+            circle_op_id,
+            circle_op_author,
+            Timestamp::now(),
+            &plaintext,
+        );
+
+        match event {
+            StateEvent::InterpAuthored { op_id, author, interp_key, body } => {
+                assert_eq!(op_id, circle_op_id);
+                assert_eq!(author, circle_op_author);
+                assert_eq!(interp_key, "natal:moon_trine_venus");
+                assert_eq!(body, "A private reading, just for you two.");
+            }
+            other => panic!("expected InterpAuthored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn circle_content_malformed_bytes_yield_skipped() {
+        let event = materialize_circle_content(
+            Hash::digest(b"whatever"),
+            SigningKey::generate().verifying_key(),
+            Timestamp::now(),
+            &[0xff, 0xfe, 0xfd],
+        );
+        match event {
             StateEvent::Skipped { reason: SkipReason::MalformedOp(_) } => {}
             other => panic!("expected Skipped MalformedOp, got {other:?}"),
         }
