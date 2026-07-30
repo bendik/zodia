@@ -235,12 +235,7 @@ async fn peer_creates_circle(world: &mut ZodiaWorld, name: String) {
     world.last_circle = Some(circle_id);
 }
 
-// Registered for both Given and When: circle_sharing.feature's second
-// scenario uses this as an "And" following a "Given", same reasoning as
-// this file's other dual-registered steps.
-#[given(expr = "{string} invites {string} to the circle")]
-#[when(expr = "{string} invites {string} to the circle")]
-async fn peer_invites_to_circle(world: &mut ZodiaWorld, name: String, invitee: String) {
+async fn invite_with_access(world: &mut ZodiaWorld, name: String, invitee: String, access: CircleAccess<()>) {
     let circle_id = world.last_circle.expect("a circle must be created before inviting to it");
     let (invitee_signing_key, _) = world.identities.get(&invitee)
         .unwrap_or_else(|| panic!("no prior identity for peer {invitee}"))
@@ -255,13 +250,28 @@ async fn peer_invites_to_circle(world: &mut ZodiaWorld, name: String, invitee: S
     // established real-elapsed-time-over-synthetic-backdating approach.
     let result = timeout(Duration::from_secs(25), async {
         loop {
-            match client.invite_to_circle(circle_id, invitee_verifying_key, CircleAccess::read()).await {
+            match client.invite_to_circle(circle_id, invitee_verifying_key, access.clone()).await {
                 Ok(()) => return,
                 Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
             }
         }
     }).await;
     result.unwrap_or_else(|_| panic!("{name} could not invite {invitee} to the circle within 25s (key bundle never discovered)"));
+}
+
+// Registered for both Given and When: circle_sharing.feature's second
+// scenario uses this as an "And" following a "Given", same reasoning as
+// this file's other dual-registered steps.
+#[given(expr = "{string} invites {string} to the circle")]
+#[when(expr = "{string} invites {string} to the circle")]
+async fn peer_invites_to_circle(world: &mut ZodiaWorld, name: String, invitee: String) {
+    invite_with_access(world, name, invitee, CircleAccess::read()).await;
+}
+
+#[given(expr = "{string} invites {string} to the circle with write access")]
+#[when(expr = "{string} invites {string} to the circle with write access")]
+async fn peer_invites_to_circle_with_write(world: &mut ZodiaWorld, name: String, invitee: String) {
+    invite_with_access(world, name, invitee, CircleAccess::write()).await;
 }
 
 // Stands in for the invitee learning the circle's id out-of-band (a real

@@ -40,6 +40,20 @@ Feature: Private circles let a user share an interpretation with named friends i
     Then "Bob" observes the authored interpretation on "natal:circle_excluded_reading" within 15 seconds
     And "Carol" observes no authored interpretation on "natal:circle_excluded_reading" within 5 seconds
 
+  Scenario: A member invited with write access can also share into the circle
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And a peer named "Carol" connected to the network
+    And 3 seconds pass
+    And "Alice" creates a circle
+    And "Alice" invites "Bob" to the circle with write access
+    And "Alice" invites "Carol" to the circle
+    And "Bob" joins the circle
+    And "Carol" joins the circle
+    And 1 second passes
+    When "Bob" shares an interpretation on "natal:circle_member_write_share" to the circle
+    Then "Carol" observes the authored interpretation on "natal:circle_member_write_share" within 15 seconds
+
   Scenario: A revoked circle member no longer receives new shares
     Given a peer named "Alice" connected to the network
     And a peer named "Bob" connected to the network
