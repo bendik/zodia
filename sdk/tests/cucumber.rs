@@ -197,6 +197,19 @@ async fn observes_veto_proposal(world: &mut ZodiaWorld, name: String, key: Strin
     assert!(seen, "{name} did not observe a veto proposal on {key} within {secs}s");
 }
 
+// No subscription needed: `author()` is legacy log-0 content, which
+// propagates over the always-on global topic (see `ZodiaClient::revoke`'s
+// doc comment) — every connected peer receives it regardless of what
+// they're subscribed to.
+#[when(regex = r#"^"([^"]+)" authors (\d+) interpretations rapidly$"#)]
+async fn peer_authors_many(world: &mut ZodiaWorld, name: String, count: u64) {
+    let client = world.clients.get(&name).unwrap_or_else(|| panic!("no peer named {name}"));
+    for i in 0..count {
+        client.author(&format!("natal:backpressure_{i}"), format!("body {i}")).await
+            .expect("author succeeds");
+    }
+}
+
 #[when(expr = "{string} authors an interpretation on {string}")]
 async fn peer_authors(world: &mut ZodiaWorld, name: String, key: String) {
     world.clients.get(&name)
@@ -378,6 +391,24 @@ async fn observes_doc_affirmation(world: &mut ZodiaWorld, name: String, key: Str
         matches!(event, StateEvent::DocAffirmed { interp_key, .. } if *interp_key == key)
     }).await;
     assert!(seen, "{name} did not observe a doc affirmation on {key} within {secs}s");
+}
+
+#[then(expr = "{string} observes a lagged events error within {int} seconds")]
+async fn observes_lagged(world: &mut ZodiaWorld, name: String, secs: u64) {
+    let events = world.events.get_mut(&name).unwrap_or_else(|| panic!("no peer named {name}"));
+    let result = timeout(Duration::from_secs(secs), async {
+        loop {
+            match events.recv().await {
+                Err(broadcast::error::RecvError::Lagged(_)) => return true,
+                Err(broadcast::error::RecvError::Closed) => return false,
+                Ok(_) => continue,
+            }
+        }
+    }).await;
+    assert!(
+        result.unwrap_or(false),
+        "{name} did not observe a Lagged events error within {secs}s — either backpressure isn't working or the channel closed"
+    );
 }
 
 #[then(expr = "{string} has caught up with at least {int} peer")]

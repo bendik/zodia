@@ -39,7 +39,7 @@ Ground truth from `cargo test --workspace`, plus this pass's additions:
 
 **5. `zodia-av`: 0 tests, accepted gap.** Real audio I/O (`cpal`, `opus`) isn't meaningfully unit-testable without hardware or a lot of mocking infrastructure this repo doesn't have yet. Not flagging this as neglect — flagging it so it's a documented decision rather than an unexamined zero.
 
-**6. `zodia-sdk`: the `Lagged` backpressure test `docs/prd/zodia-sdk.md`'s Testing Decisions called for.** "Unsubscribed keys stay silent" is now covered — see the `granular_subscription.feature` cucumber scenario below. The backpressure test (a slow subscriber falls behind and gets `RecvError::Lagged` rather than stalling the publisher) is still open.
+**6. `zodia-sdk`: the `Lagged` backpressure test `docs/prd/zodia-sdk.md`'s Testing Decisions called for.** "Unsubscribed keys stay silent" is now covered — see the `granular_subscription.feature` cucumber scenario below. ~~The backpressure test (a slow subscriber falls behind and gets `RecvError::Lagged` rather than stalling the publisher) is still open.~~ Closed — see `backpressure.feature`: a peer who authors 300 interpretations while the other never reads its `events()` stream causes the idle subscriber's next `recv()` to return `Lagged`, not block or grow unbounded. Required a settle window between publishing and observing (the 300 ops need time to actually arrive over the network before drain starts, or the scenario just observes a slow trickle instead of an overflowed buffer) — see the scenario's timing for the concrete numbers.
 
 ## What this pass added
 
