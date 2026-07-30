@@ -1,6 +1,6 @@
 # PRD: zodia-circles — private-circle sharing
 
-**Status:** drafted, not implemented
+**Status:** crate-level foundation shipped (`zodia-circles`: `ZodiaForge`, `CircleManager`/`CircleSpace` wrapping `p2panda-spaces` directly, proven via real crypto round-trip tests — no mocking); not yet wired into `zodia-sync`'s topics, `zodia-pipeline`'s processor chain, or `zodia-sdk`'s command surface, and no UI
 **Branch:** `main`
 **Foundation required:** `docs/prd/p2panda-0.7-migration.md` (ships `p2panda-spaces`, `p2panda-auth`, `p2panda-encryption`, and p2panda-stream's `spaces` processor — all load-bearing here)
 
@@ -51,6 +51,11 @@ Add a `spaces::Spaces` processor stage ahead of (or composed with) `DecodeProces
 ### "Share with..." UI
 
 Per the parent PRD: a picker on each contribution choosing public network (current behaviour) vs. a named circle. Out of scope for this PRD's drafting phase — follows once the crate/pipeline plumbing above is real and testable via cucumber, matching this project's established BDD-outside-in sequencing (crate + pipeline first, driven by a failing scenario; UI last).
+
+### Two things the real API taught us that no amount of reading source would have (found via the failing tests, not guessed)
+
+- **`insert_operation` needs an open store transaction**, exactly like `zodia-sync`'s own pattern (`store_and_associate`) — `ZodiaForge::forge` wraps it in `store.begin()`/`store.commit()`. Confirmed by a real `TransactionMissing` failure, not assumed from reading `p2panda-spaces`'s own `TestForge` (which uses a `tx!` macro that hides the same requirement).
+- **DCGKA key agreement needs each peer's prekey bundle registered on *both* sides**, not just the space creator's. Registering only Bob's bundle with Alice (enough for Alice to encrypt to Bob) produced `MissingPreKeys` when Bob tried to *decrypt* Alice's space-membership message — Bob's own manager needed Alice's bundle registered too, symmetric to how any Diffie-Hellman-style key agreement needs both sides to know the other's public material. `p2panda-spaces`'s own `tests.rs` does this correctly (`send_and_receive` registers both directions) — worth having read after finding the bug, but the bug was caught by an initially-too-narrow test, not by reading their test first.
 
 ## Testing Decisions
 
