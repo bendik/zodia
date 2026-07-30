@@ -218,7 +218,7 @@ impl ZodiaSyncNode {
         // circle (see `zodia_circles::circle_directory_topic`'s doc comment).
         let key_bundle_op = node.circle_manager.key_bundle_message().await
             .map_err(|e| SyncError::Circle(e.to_string()))?;
-        node.broadcast_circle_op(circle_directory_topic(), key_bundle_op)?;
+        node.broadcast_circle_op(circle_directory_topic(), key_bundle_op).await?;
 
         Ok(node)
     }
@@ -401,12 +401,45 @@ impl ZodiaSyncNode {
     /// `CircleManager`/`CircleSpace` method that returns one already
     /// persisted it via `ZodiaForge` — this is just the missing broadcast
     /// step, same division of labour `publish_bytes` has for regular ops).
-    fn broadcast_circle_op(&mut self, topic: Topic, op: CircleOperation) -> Result<(), SyncError> {
+    async fn broadcast_circle_op(&mut self, topic: Topic, op: CircleOperation) -> Result<(), SyncError> {
+        // `ZodiaForge::forge` only inserts the op (it has no topic to
+        // associate it with — `Forge::forge`'s signature carries no such
+        // context). Without `associate` here, a third peer's catch-up
+        // query against us never discovers this (author, CIRCLE_LOG_ID)
+        // log on this topic — the same bug class already found and fixed
+        // once for the interp/doc path this session (`store_and_associate`).
+        // Caught by this exact gap: the circle-sharing cucumber scenario's
+        // "invites" step kept failing after a full 25s retry window
+        // because Bob's own key-bundle broadcast was never discoverable.
+        let permit = self.sync_store.begin().await
+            .map_err(|e| SyncError::PandaStore(e.to_string()))?;
+        if let Err(e) = self.sync_store.associate(&topic, &self.signing_key.verifying_key(), &CIRCLE_LOG_ID).await {
+            let _ = self.sync_store.rollback(permit).await;
+            return Err(SyncError::PandaStore(e.to_string()));
+        }
+        self.sync_store.commit(permit).await.map_err(|e| SyncError::PandaStore(e.to_string()))?;
+
         self.handles
             .get(&topic)
             .expect("broadcast_circle_op called after open_topic")
             .publish(op.0)
             .map_err(|e| SyncError::Sync(format!("{e:?}")))
+    }
+
+    /// Start listening to `circle_id`'s topic.
+    ///
+    /// Inviting someone (`invite_to_circle`) only updates the *inviter's*
+    /// side — it broadcasts the membership change on the circle's topic,
+    /// but broadcasting to a topic nobody else is subscribed to reaches
+    /// nobody. The invitee has to learn `circle_id` some other way (a
+    /// notification, an invite link — out of scope here, same as key-bundle
+    /// discovery being automatic) and then call this so their own device
+    /// starts listening — otherwise they never even receive the
+    /// `SpaceMembership`/`Auth` messages that would tell them they were
+    /// added, let alone any content shared afterward. Idempotent, like
+    /// every other topic the app opens.
+    pub async fn open_circle(&mut self, circle_id: SpaceId) -> Result<(), SyncError> {
+        self.open_topic(topic_for_circle(circle_id), CIRCLE_LOG_ID).await
     }
 
     /// Create a new circle with `initial_members` (beyond ourselves, who is
@@ -433,7 +466,7 @@ impl ZodiaSyncNode {
             &self.circle_manager, &self.sync_store, circle_id, initial_members,
         ).await?;
         for message in messages {
-            self.broadcast_circle_op(topic, message)?;
+            self.broadcast_circle_op(topic, message).await?;
         }
 
         Ok(circle_id)
@@ -455,8 +488,8 @@ impl ZodiaSyncNode {
         let (auth_message, space_message) = zodia_circles::invite_to_circle(
             &self.circle_manager, &self.sync_store, circle_id, member, access,
         ).await?;
-        self.broadcast_circle_op(topic, auth_message)?;
-        self.broadcast_circle_op(topic, space_message)?;
+        self.broadcast_circle_op(topic, auth_message).await?;
+        self.broadcast_circle_op(topic, space_message).await?;
         Ok(())
     }
 
@@ -473,8 +506,8 @@ impl ZodiaSyncNode {
         let (auth_message, space_message) = zodia_circles::revoke_from_circle(
             &self.circle_manager, &self.sync_store, circle_id, member,
         ).await?;
-        self.broadcast_circle_op(topic, auth_message)?;
-        self.broadcast_circle_op(topic, space_message)?;
+        self.broadcast_circle_op(topic, auth_message).await?;
+        self.broadcast_circle_op(topic, space_message).await?;
         Ok(())
     }
 
@@ -492,7 +525,7 @@ impl ZodiaSyncNode {
         let message = zodia_circles::share_to_circle(
             &self.circle_manager, &self.sync_store, circle_id, &plaintext,
         ).await?;
-        self.broadcast_circle_op(topic, message)?;
+        self.broadcast_circle_op(topic, message).await?;
         Ok(())
     }
 

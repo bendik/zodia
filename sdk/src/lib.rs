@@ -247,6 +247,15 @@ impl ZodiaClient {
         reply_rx.await.map_err(|_| ClientError::Disconnected)?
     }
 
+    /// Start listening to `circle_id`'s topic — call this once you've
+    /// learned a circle's id (an invite notification, a shared link;
+    /// out of scope here). Inviting someone only updates the inviter's
+    /// own side; the invitee has to explicitly join to receive anything
+    /// — see `zodia_sync::ZodiaSyncNode::open_circle`'s doc comment.
+    pub async fn open_circle(&self, circle_id: CircleId) -> Result<(), ClientError> {
+        self.call(|reply| Command::OpenCircle { circle_id, reply }).await
+    }
+
     /// Grant `member` `access` in `circle_id`. `member` must be a peer
     /// whose key-bundle this device has already seen — true for any peer
     /// this device has ever been online alongside (see `zodia_sync`'s
@@ -392,6 +401,7 @@ enum Command {
         initial_members: Vec<(VerifyingKey, Access<()>)>,
         reply:           oneshot::Sender<Result<SpaceId, ClientError>>,
     },
+    OpenCircle { circle_id: SpaceId, reply: Reply },
     InviteToCircle { circle_id: SpaceId, member: VerifyingKey, access: Access<()>, reply: Reply },
     RevokeFromCircle { circle_id: SpaceId, member: VerifyingKey, reply: Reply },
     ShareToCircle { circle_id: SpaceId, plaintext: Vec<u8>, reply: Reply },
@@ -576,6 +586,10 @@ async fn handle_command(
     match cmd {
         Command::CreateCircle { initial_members, reply } => {
             let res = node.create_circle(&initial_members).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::OpenCircle { circle_id, reply } => {
+            let res = node.open_circle(circle_id).await.map_err(sync_err);
             let _ = reply.send(res);
         }
         Command::InviteToCircle { circle_id, member, access, reply } => {

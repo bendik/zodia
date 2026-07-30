@@ -17,13 +17,13 @@ use std::time::Duration;
 
 use cucumber::{World as _, given, then, when};
 use ed25519_dalek::SigningKey;
-use p2panda_core::Hash;
+use p2panda_core::{Hash, SigningKey as PandaSigningKey};
 use rand_core::OsRng;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-use zodia_sdk::{StateEvent, ZodiaClient, ZodiaClientConfig};
+use zodia_sdk::{CircleAccess, CircleId, StateEvent, ZodiaClient, ZodiaClientConfig};
 
 #[derive(cucumber::World, Default)]
 struct ZodiaWorld {
@@ -35,6 +35,10 @@ struct ZodiaWorld {
     /// a "disconnects" step drops it.
     identities:       HashMap<String, (SigningKey, std::path::PathBuf)>,
     last_prune_count: Option<u64>,
+    /// The circle most recently created in the scenario — every scenario
+    /// so far only ever deals with one circle at a time, same simplicity
+    /// as `last_prune_count`.
+    last_circle: Option<CircleId>,
 }
 
 // `cucumber::World::run` requires `Debug` (used to log World state on step
@@ -208,6 +212,82 @@ async fn observes_authored(world: &mut ZodiaWorld, name: String, key: String, se
         matches!(event, StateEvent::InterpAuthored { interp_key, .. } if *interp_key == key)
     }).await;
     assert!(seen, "{name} did not observe the authored interpretation on {key} within {secs}s");
+}
+
+#[then(expr = "{string} observes no authored interpretation on {string} within {int} seconds")]
+async fn observes_no_authored(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::InterpAuthored { interp_key, .. } if *interp_key == key)
+    }).await;
+    assert!(
+        !seen,
+        "{name} unexpectedly observed the interpretation on {key} — a peer never invited to the circle should not receive readable content"
+    );
+}
+
+#[given(expr = "{string} creates a circle")]
+async fn peer_creates_circle(world: &mut ZodiaWorld, name: String) {
+    let circle_id = world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .create_circle(vec![])
+        .await
+        .expect("create_circle succeeds");
+    world.last_circle = Some(circle_id);
+}
+
+// Registered for both Given and When: circle_sharing.feature's second
+// scenario uses this as an "And" following a "Given", same reasoning as
+// this file's other dual-registered steps.
+#[given(expr = "{string} invites {string} to the circle")]
+#[when(expr = "{string} invites {string} to the circle")]
+async fn peer_invites_to_circle(world: &mut ZodiaWorld, name: String, invitee: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before inviting to it");
+    let (invitee_signing_key, _) = world.identities.get(&invitee)
+        .unwrap_or_else(|| panic!("no prior identity for peer {invitee}"))
+        .clone();
+    let invitee_verifying_key = PandaSigningKey::from_bytes(invitee_signing_key.as_bytes()).verifying_key();
+    let client = world.clients.get(&name).unwrap_or_else(|| panic!("no peer named {name}"));
+
+    // The invitee's key bundle reaches us via the circle directory topic's
+    // own catch-up sync, same real-network settle time documented for
+    // opening a second brand-new topic between a peer pair (up to ~25s) —
+    // poll rather than guess a fixed sleep, matching this suite's
+    // established real-elapsed-time-over-synthetic-backdating approach.
+    let result = timeout(Duration::from_secs(25), async {
+        loop {
+            match client.invite_to_circle(circle_id, invitee_verifying_key, CircleAccess::read()).await {
+                Ok(()) => return,
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    }).await;
+    result.unwrap_or_else(|_| panic!("{name} could not invite {invitee} to the circle within 25s (key bundle never discovered)"));
+}
+
+// Stands in for the invitee learning the circle's id out-of-band (a real
+// invite notification/link — out of scope here, see
+// ZodiaSyncNode::open_circle's doc comment) and then joining. Registered
+// for both Given and When for the same reason as this file's other
+// dual-registered steps.
+#[given(expr = "{string} joins the circle")]
+#[when(expr = "{string} joins the circle")]
+async fn peer_joins_circle(world: &mut ZodiaWorld, name: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before joining it");
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .open_circle(circle_id)
+        .await
+        .expect("open_circle succeeds");
+}
+
+#[when(expr = "{string} shares an interpretation on {string} to the circle")]
+async fn peer_shares_to_circle(world: &mut ZodiaWorld, name: String, key: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before sharing to it");
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .share_interp_to_circle(circle_id, &key, "a private test interpretation body".to_string())
+        .await
+        .expect("share_interp_to_circle succeeds");
 }
 
 #[when(regex = r#"^"([^"]+)" prunes local storage with a retention of (\d+) seconds?$"#)]
