@@ -237,7 +237,7 @@ pub enum AppMsg {
     /// Sidebar circle row clicked — (re)build and show that circle's page.
     OpenCirclePage(String),
     /// "+" next to a known peer in a circle page's Invite list.
-    InviteToCircle { id_hex: String, peer_id: PeerId },
+    InviteToCircle { id_hex: String, peer_id: PeerId, can_post: bool },
     /// Revoke button next to a member row in a circle page.
     RevokeFromCircle { id_hex: String, member_hex: String },
 }
@@ -1641,12 +1641,17 @@ impl AsyncComponent for AppModel {
             AppMsg::OpenCirclePage(id_hex) => {
                 self.refresh_circle_page(&id_hex).await;
             }
-            AppMsg::InviteToCircle { id_hex, peer_id } => {
+            AppMsg::InviteToCircle { id_hex, peer_id, can_post } => {
                 if let (Some(client), Ok(circle_id), Ok(member)) = (
                     &self.zodia_client, decode_circle_id(&id_hex),
                     p2panda_core::VerifyingKey::from_bytes(&peer_id.0),
                 ) {
-                    if let Err(e) = client.invite_to_circle(circle_id, member, zodia_sdk::CircleAccess::read()).await {
+                    let access = if can_post {
+                        zodia_sdk::CircleAccess::write()
+                    } else {
+                        zodia_sdk::CircleAccess::read()
+                    };
+                    if let Err(e) = client.invite_to_circle(circle_id, member, access).await {
                         warn!("invite_to_circle: {e}");
                     }
                 }
@@ -2378,8 +2383,11 @@ fn rebuild_circles_list(
         outer.set_margin_end(12);
         outer.set_margin_top(8);
         outer.set_margin_bottom(8);
-        let icon = gtk::Image::from_icon_name("avatar-default-symbolic");
-        outer.append(&icon);
+        let dot = gtk::Label::new(None);
+        dot.set_markup(&format!(
+            "<span foreground='{}'>●</span>", crate::circle_page::circle_accent_hex(id_hex),
+        ));
+        outer.append(&dot);
         let label = gtk::Label::new(Some(name));
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
