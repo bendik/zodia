@@ -72,6 +72,13 @@ Per the parent PRD: a picker on each contribution choosing public network (curre
 
 Local-only circle names live in `circles.tsv` (`circle_id_hex → name`), same flat-TSV pattern `nicknames.tsv` already established for "this identifier is a hash with no name."
 
+### Small follow-ups: accent colors + access level at invite
+
+Two low-risk additions on top of the shipped UI:
+
+- **Deterministic per-circle accent color** (`circle_page::circle_accent_hex`), Signal/Matrix-style — derived from the id hash, needs no storage, rendered as a small Pango-markup dot (no `CssProvider` needed for one-off color) in both the sidebar row and the circle page header.
+- **Read vs. read+write at invite time** — two buttons instead of one. `Write` access turns a one-way share into a small collaborative circle where the invitee can post their own `InterpOp`s back (identical plumbing to the owner's own share path, just a different `Access` level). **No in-place promotion**: confirmed by reading `p2panda-auth`'s `group::crdt::state::add` that it errors `AlreadyAdded` on an already-active member — changing someone's level today means revoke, then re-invite at the new level (which also rotates the group key, so it's a real round trip, not a cheap toggle). Real UX gap, left as such rather than worked around.
+
 ### Two things the real API taught us that no amount of reading source would have (found via the failing tests, not guessed)
 
 - **`insert_operation` needs an open store transaction**, exactly like `zodia-sync`'s own pattern (`store_and_associate`) — `ZodiaForge::forge` wraps it in `store.begin()`/`store.commit()`. Confirmed by a real `TransactionMissing` failure, not assumed from reading `p2panda-spaces`'s own `TestForge` (which uses a `tx!` macro that hides the same requirement).
