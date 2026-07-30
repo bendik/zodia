@@ -15,18 +15,24 @@
 
 use std::borrow::Borrow;
 
+use p2panda_auth::group::GroupCrdtState;
 use p2panda_core::traits::{Digest, Provenance};
 use p2panda_core::{Hash, Header, Operation, SigningKey, Topic, VerifyingKey};
 use p2panda_spaces::manager::Manager;
-use p2panda_spaces::space::Space;
+use p2panda_spaces::space::{Space, SpacesState};
+use p2panda_store::groups::GroupsStore;
 use p2panda_store::logs::LogStore;
 use p2panda_store::operations::OperationStore;
-use p2panda_store::spaces::SqliteSpacesStore;
+use p2panda_store::spaces::{SpacesStore, SqliteSpacesStore};
+use p2panda_store::topics::TopicStore;
 use p2panda_store::{SqliteError, SqliteStore, Transaction};
 use thiserror::Error;
 
 pub use p2panda_auth::Access;
-pub use p2panda_spaces::{Config, Credentials, Event, SpaceId, SpacesArgs, StrongRemoveResolver};
+pub use p2panda_spaces::{
+    AuthMessage, Config, Credentials, Event, SpaceId, SpacesArgs, SpacesStoreState,
+    StrongRemoveResolver,
+};
 
 /// Access conditions. Trivial for this first slice — see module docs.
 pub type CircleConditions = ();
@@ -124,6 +130,34 @@ pub async fn persist_received(
     Ok(())
 }
 
+/// Same as [`persist_received`], but also `TopicStore::associate`s
+/// `(topic, author, CIRCLE_LOG_ID)` in the same transaction — the circle
+/// equivalent of `zodia-sync::store_and_associate`, needed so a *third*
+/// peer's catch-up query against this device finds the operation (without
+/// `associate`, it sits in the store but is invisible to `TopicStore::resolve`,
+/// the exact bug `store_and_associate`'s own doc comment describes for the
+/// regular InterpOp path). What the sync-layer receive path should call;
+/// [`persist_received`] stays as the simpler primitive the crate's own
+/// tests use, where no relay/resolve guarantee is being exercised.
+pub async fn persist_received_and_associate(
+    store:  &SqliteStore,
+    topic:  Topic,
+    author: &VerifyingKey,
+    op:     &CircleOperation,
+) -> Result<(), CircleError> {
+    let permit = store.begin().await?;
+    if let Err(e) = store.insert_operation(&op.0.hash, &op.0, &CIRCLE_LOG_ID).await {
+        let _ = store.rollback(permit).await;
+        return Err(e.into());
+    }
+    if let Err(e) = store.associate(&topic, author, &CIRCLE_LOG_ID).await {
+        let _ = store.rollback(permit).await;
+        return Err(e.into());
+    }
+    store.commit(permit).await?;
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum CircleError {
     #[error("p2panda store: {0}")]
@@ -189,6 +223,158 @@ pub fn new_manager(
     let rng = p2panda_encryption::Rng::default();
     CircleManager::new(spaces_store, forge, credentials, rng)
         .map_err(|e| CircleError::Manager(e.to_string()))
+}
+
+// ── production-safe persistence wrappers ────────────────────────────────────
+//
+// `p2panda_spaces::Manager`/`Space` have `_persisted` convenience methods
+// (`create_space_persisted`, `add_persisted`, `remove_persisted`,
+// `publish_persisted`, `process_persisted`) that do exactly what the plain
+// `create_space`/`add`/`remove`/`publish`/`process` do, plus writing the
+// resulting state to the store — but the whole `impl` block those
+// conveniences live in is gated `#[cfg(any(test, feature = "test_utils"))]`
+// in the vendored 0.7.0 source, so they're unavailable to a normal
+// production dependency. The plain methods are NOT gated, and neither are
+// the underlying `p2panda_store::{GroupsStore, SpacesStore}` trait methods
+// they'd otherwise call internally — so this reimplements the same
+// persist-after-mutate sequence (confirmed by reading the gated methods'
+// own source) using only the ungated surface. Nothing here weakens any
+// security property; it's the same store writes the gated wrappers make,
+// just made without them.
+
+/// The exact context key `p2panda-spaces`'s own (gated) `get_groups_state`/
+/// `set_groups_state` use internally (`Hash::digest(b"global-groups-context")`)
+/// — a fixed, hardcoded string in their source, not something generated or
+/// exposed, so reproducing it here reads from/writes to the same slot their
+/// own ungated methods (`create_space`, `add`, `remove`, `process`, ...)
+/// read from internally.
+fn global_groups_context_key() -> Hash {
+    Hash::digest(b"global-groups-context")
+}
+
+type GroupsState = GroupCrdtState<VerifyingKey, Hash, AuthMessage<CircleConditions>, CircleConditions>;
+
+async fn persist_groups_state(store: &SqliteStore, y: &GroupsState) -> Result<(), CircleError> {
+    let permit = store.begin().await?;
+    if let Err(e) = GroupsStore::set_groups_state_tx(store, global_groups_context_key(), y).await {
+        let _ = store.rollback(permit).await;
+        return Err(CircleError::Manager(e.to_string()));
+    }
+    store.commit(permit).await?;
+    Ok(())
+}
+
+async fn persist_space_state(
+    store:    &SqliteStore,
+    space_id: SpaceId,
+    y:        SpacesState<CircleConditions>,
+) -> Result<(), CircleError> {
+    let permit = store.begin().await?;
+    let store_state: SpacesStoreState<CircleConditions> = y.into();
+    let spaces_store = CircleSpacesStore::new(store.clone());
+    if let Err(e) = SpacesStore::set_space_state_tx(&spaces_store, &space_id, &store_state).await {
+        let _ = store.rollback(permit).await;
+        return Err(CircleError::Manager(e.to_string()));
+    }
+    store.commit(permit).await?;
+    Ok(())
+}
+
+/// Create a new circle. `store` must be the same `SqliteStore` `manager`
+/// was built against (`new_manager`'s caller already has both).
+pub async fn create_circle(
+    manager:         &CircleManager,
+    store:           &SqliteStore,
+    id:              SpaceId,
+    initial_members: &[(VerifyingKey, Access<CircleConditions>)],
+) -> Result<Vec<CircleOperation>, CircleError> {
+    let (groups_y, space_y, messages) = manager.create_space(id, initial_members).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?;
+    persist_groups_state(store, &groups_y).await?;
+    persist_space_state(store, space_y.space_id, space_y).await?;
+    Ok(messages)
+}
+
+/// Grant `member` `access` in `circle_id`.
+pub async fn invite_to_circle(
+    manager:   &CircleManager,
+    store:     &SqliteStore,
+    circle_id: SpaceId,
+    member:    VerifyingKey,
+    access:    Access<CircleConditions>,
+) -> Result<(CircleOperation, CircleOperation), CircleError> {
+    let space = manager.space(circle_id).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?
+        .ok_or_else(|| CircleError::Manager("no such circle".into()))?;
+    let (groups_y, space_y, auth_message, space_message) = space.add(member, access).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?;
+    persist_groups_state(store, &groups_y).await?;
+    persist_space_state(store, space_y.space_id, space_y).await?;
+    Ok((auth_message, space_message))
+}
+
+/// Revoke `member`'s access to `circle_id`.
+pub async fn revoke_from_circle(
+    manager:   &CircleManager,
+    store:     &SqliteStore,
+    circle_id: SpaceId,
+    member:    VerifyingKey,
+) -> Result<(CircleOperation, CircleOperation), CircleError> {
+    let space = manager.space(circle_id).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?
+        .ok_or_else(|| CircleError::Manager("no such circle".into()))?;
+    let (groups_y, space_y, auth_message, space_message) = space.remove(member).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?;
+    persist_groups_state(store, &groups_y).await?;
+    persist_space_state(store, space_y.space_id, space_y).await?;
+    Ok((auth_message, space_message))
+}
+
+/// Encrypt and share `plaintext` with every current member of `circle_id`.
+pub async fn share_to_circle(
+    manager:   &CircleManager,
+    store:     &SqliteStore,
+    circle_id: SpaceId,
+    plaintext: &[u8],
+) -> Result<CircleOperation, CircleError> {
+    let space = manager.space(circle_id).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?
+        .ok_or_else(|| CircleError::Manager("no such circle".into()))?;
+    let (space_y, message) = space.publish(plaintext).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?;
+    persist_space_state(store, space_y.space_id, space_y).await?;
+    Ok(message)
+}
+
+/// Current members of `circle_id` and their access levels.
+pub async fn circle_members(
+    manager:   &CircleManager,
+    circle_id: SpaceId,
+) -> Result<Vec<(VerifyingKey, Access<CircleConditions>)>, CircleError> {
+    let space = manager.space(circle_id).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?
+        .ok_or_else(|| CircleError::Manager("no such circle".into()))?;
+    space.members().await.map_err(|e| CircleError::Manager(e.to_string()))
+}
+
+/// Process a received circle operation (already persisted via
+/// [`persist_received_and_associate`]/[`persist_received`]) and persist
+/// whatever state it changed — the production-safe equivalent of the
+/// gated `Manager::process_persisted`.
+pub async fn process_and_persist(
+    manager: &CircleManager,
+    store:   &SqliteStore,
+    op:      &CircleOperation,
+) -> Result<Vec<Event<CircleConditions>>, CircleError> {
+    let (groups_y, space_y, events) = manager.process(op).await
+        .map_err(|e| CircleError::Manager(e.to_string()))?;
+    if let Some(groups_y) = groups_y {
+        persist_groups_state(store, &groups_y).await?;
+    }
+    if let Some(space_y) = space_y {
+        persist_space_state(store, space_y.space_id, space_y).await?;
+    }
+    Ok(events)
 }
 
 /// Signs and persists `p2panda-spaces` control/application messages using
@@ -371,5 +557,44 @@ mod tests {
             events.is_empty(),
             "non-member decrypted a circle share: {events:?}"
         );
+    }
+
+    /// The crate's own production entry points (`create_circle`,
+    /// `invite_to_circle`, `share_to_circle`, `process_and_persist`) rather
+    /// than the test-only `_persisted` sugar the tests above use — proving
+    /// the hand-written persistence (`persist_groups_state`/
+    /// `persist_space_state`, reproducing what the gated `set_groups_state`/
+    /// `set_space_state` do, since that whole convenience layer is
+    /// `#[cfg(any(test, feature = "test_utils"))]` in the vendored source
+    /// and unavailable to a real dependency) is actually equivalent, not
+    /// just plausible from reading their source.
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_path_without_persisted_sugar_still_shares_correctly() {
+        let (alice, alice_store) = make_manager(10).await;
+        let (bob, bob_store) = make_manager(11).await;
+
+        alice.register_member(&bob.me().await.unwrap()).await.unwrap();
+        bob.register_member(&alice.me().await.unwrap()).await.unwrap();
+
+        let space_id = p2panda_spaces::SpaceId::digest(b"production-path-circle");
+        let messages = create_circle(&alice, &alice_store, space_id, &[(bob.id(), Access::read())])
+            .await
+            .unwrap();
+
+        for message in &messages {
+            persist_received(&bob_store, message).await.unwrap();
+            process_and_persist(&bob, &bob_store, message).await.unwrap();
+        }
+
+        let shared = share_to_circle(&alice, &alice_store, space_id, b"produced without _persisted sugar")
+            .await
+            .unwrap();
+
+        persist_received(&bob_store, &shared).await.unwrap();
+        let events = process_and_persist(&bob, &bob_store, &shared).await.unwrap();
+        let Some(Event::Application { data, .. }) = events.first() else {
+            panic!("expected an Application event, got: {events:?}");
+        };
+        assert_eq!(data, b"produced without _persisted sugar");
     }
 }

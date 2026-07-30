@@ -38,6 +38,11 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use zodia_circles::{
+    Access, CircleError, CircleExtensions, CircleManager, CircleOperation,
+    circle_directory_topic, persist_received_and_associate, topic_for_circle,
+};
+pub use zodia_circles::{Event as CircleEvent, SpaceId};
 use zodia_core::topic_key_for_interp;
 use zodia_ops::{DocOp, InterpOp, OpExtensions, log_id_for_key};
 
@@ -68,6 +73,19 @@ pub enum SyncEvent {
         remote: VerifyingKey,
         error:  String,
     },
+    /// A circle's decrypted application message arrived — `plaintext` is
+    /// exactly the bytes `share_to_circle` handed to `Space::publish` on
+    /// the sending side (Zodia encodes it as `InterpOp`/`DocOp` CBOR, same
+    /// as the public path). `op_id`/`author` identify the *circle*
+    /// operation that carried the ciphertext, since the plaintext itself
+    /// carries neither — see `zodia_pipeline::materialize_circle_content`,
+    /// which this is meant to feed directly.
+    CircleContentReceived {
+        space_id:  SpaceId,
+        op_id:     Hash,
+        author:    VerifyingKey,
+        plaintext: Vec<u8>,
+    },
 }
 
 // ── log id ────────────────────────────────────────────────────────────────────
@@ -88,6 +106,14 @@ pub enum SyncError {
     PandaStore(String),
     #[error("p2panda sync: {0}")]
     Sync(String),
+    #[error("circle: {0}")]
+    Circle(String),
+}
+
+impl From<CircleError> for SyncError {
+    fn from(e: CircleError) -> Self {
+        SyncError::Circle(e.to_string())
+    }
 }
 
 // ── sync node ─────────────────────────────────────────────────────────────────
@@ -118,6 +144,19 @@ pub struct ZodiaSyncNode {
     /// (session start / finish / failure).  Operations feed the pipeline;
     /// lifecycle events drive UI sync-status indicators.
     pub inbound: mpsc::Receiver<SyncEvent>,
+    /// Circle membership/encryption state (`p2panda-spaces::Manager`,
+    /// wrapped by `zodia-circles`). Shares `sync_store` — see
+    /// `docs/prd/circles.md`'s "Storage needs nothing new".
+    circle_manager: CircleManager,
+    /// A *second* LogSync engine, distinct from `log_sync` above —
+    /// `LogSync<S, L, E>` is monomorphic in `E`, and circle operations
+    /// (`Operation<CircleExtensions>`) are a different `E` than
+    /// `OpExtensions`, so they can't share the same engine. Shares the same
+    /// `Endpoint`/`Gossip`/`SqliteStore` as `log_sync` regardless — see
+    /// `docs/prd/circles.md`'s "a second LogSync engine, not a new topic".
+    circle_log_sync: LogSync<SqliteStore, u64, CircleExtensions>,
+    /// Circle-topic equivalent of `handles`.
+    circle_handles: HashMap<Topic, SyncHandle<Operation<CircleExtensions>, TopicLogSyncEvent<CircleExtensions>>>,
 }
 
 impl ZodiaSyncNode {
@@ -145,11 +184,27 @@ impl ZodiaSyncNode {
             .await
             .map_err(|e| SyncError::PandaStore(e.to_string()))?;
 
-        // ── LogSync ───────────────────────────────────────────────────────────
-        let log_sync = LogSync::<_, u64, OpExtensions>::builder(sync_store.clone(), endpoint, gossip)
+        // ── LogSync (InterpOp/DocOp) ───────────────────────────────────────────
+        let log_sync = LogSync::<_, u64, OpExtensions>::builder(
+            sync_store.clone(), endpoint.clone(), gossip.clone(),
+        )
             .spawn()
             .await
             .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
+
+        // ── LogSync (circles) — a second engine, see the struct field docs
+        // on `circle_log_sync` for why one engine can't serve both ─────────
+        let circle_log_sync = LogSync::<_, u64, CircleExtensions>::builder(
+            sync_store.clone(), endpoint, gossip,
+        )
+            .spawn()
+            .await
+            .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
+
+        let circle_secret_path = store_dir.join("circle_identity_secret.cbor");
+        let circle_manager = zodia_circles::new_manager(
+            &circle_secret_path, sync_store.clone(), signing_key.clone(),
+        )?;
 
         let (ev_tx, ev_rx) = mpsc::channel::<SyncEvent>(256);
 
@@ -161,8 +216,19 @@ impl ZodiaSyncNode {
             ev_tx,
             handles: HashMap::new(),
             inbound: ev_rx,
+            circle_manager,
+            circle_log_sync,
+            circle_handles: HashMap::new(),
         };
         node.open_topic(sync_topic, INTERP_LOG_ID).await?;
+        node.open_circle_topic(circle_directory_topic()).await?;
+
+        // Announce our own key bundle on the directory topic so any peer we
+        // meet can discover it — the prerequisite for being added to a
+        // circle (see `zodia_circles::circle_directory_topic`'s doc comment).
+        let key_bundle_op = node.circle_manager.key_bundle_message().await
+            .map_err(|e| SyncError::Circle(e.to_string()))?;
+        node.broadcast_circle_op(circle_directory_topic(), key_bundle_op)?;
 
         Ok(node)
     }
@@ -275,6 +341,187 @@ impl ZodiaSyncNode {
         });
 
         self.handles.insert(topic, handle);
+        Ok(())
+    }
+
+    /// Circle-topic equivalent of `open_topic` — a separate method (not a
+    /// generic-over-extensions-type shared one) because it drives the
+    /// *other* LogSync engine (`circle_log_sync`, not `log_sync`) and hands
+    /// received operations to `circle_manager.process_persisted` rather
+    /// than just forwarding raw bytes for the pipeline to decode later —
+    /// circle content is already fully handled (persisted, decrypted if
+    /// applicable) by the time it becomes a `SyncEvent`.
+    async fn open_circle_topic(&mut self, topic: Topic) -> Result<(), SyncError> {
+        if self.circle_handles.contains_key(&topic) {
+            return Ok(());
+        }
+
+        let handle = self.circle_log_sync
+            .stream(topic, true)
+            .await
+            .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
+
+        let mut subscription = handle
+            .subscribe()
+            .await
+            .map_err(|e| SyncError::Sync(format!("{e:?}")))?;
+        let ev_tx = self.ev_tx.clone();
+        let sync_store = self.sync_store.clone();
+        let circle_manager = self.circle_manager.clone();
+
+        tokio::spawn(async move {
+            while let Some(result) = subscription.next().await {
+                let from_sync = match result {
+                    Ok(fs) => fs,
+                    Err(e) => {
+                        warn!("circle sync subscription error: {e}");
+                        continue;
+                    }
+                };
+
+                let TopicLogSyncEvent::OperationReceived { operation, .. } = from_sync.event
+                else {
+                    continue;
+                };
+
+                let author = operation.header.verifying_key;
+                let circle_op = CircleOperation(*operation);
+
+                if let Err(e) = persist_received_and_associate(
+                    &sync_store, topic, &author, &circle_op,
+                ).await {
+                    warn!("failed to persist received circle operation: {e}");
+                    continue;
+                }
+
+                let events = match zodia_circles::process_and_persist(&circle_manager, &sync_store, &circle_op).await {
+                    Ok(events) => events,
+                    Err(e) => {
+                        warn!("failed to process received circle operation: {e}");
+                        continue;
+                    }
+                };
+
+                for event in events {
+                    let sync_event = match event {
+                        CircleEvent::Application { space_id, data } => {
+                            SyncEvent::CircleContentReceived {
+                                space_id,
+                                op_id:  circle_op.0.hash,
+                                author,
+                                plaintext: data,
+                            }
+                        }
+                        other => {
+                            debug!(?other, "circle event (membership/key-bundle), no content to surface yet");
+                            continue;
+                        }
+                    };
+                    if ev_tx.send(sync_event).await.is_err() {
+                        debug!("inbound sync channel closed, stopping circle subscription pump");
+                        return;
+                    }
+                }
+            }
+        });
+
+        self.circle_handles.insert(topic, handle);
+        Ok(())
+    }
+
+    /// Broadcast an already-signed-and-persisted circle op (every
+    /// `CircleManager`/`CircleSpace` method that returns one already
+    /// persisted it via `ZodiaForge` — this is just the missing broadcast
+    /// step, same division of labour `publish_bytes` has for regular ops).
+    fn broadcast_circle_op(&mut self, topic: Topic, op: CircleOperation) -> Result<(), SyncError> {
+        self.circle_handles
+            .get(&topic)
+            .expect("broadcast_circle_op called after open_circle_topic")
+            .publish(op.0)
+            .map_err(|e| SyncError::Sync(format!("{e:?}")))
+    }
+
+    /// Create a new circle with `initial_members` (beyond ourselves, who is
+    /// always added with `Access::manage()` automatically — see
+    /// `Manager::create_space`'s own doc comment). Returns the new circle's
+    /// id, needed for every subsequent `invite_to_circle`/`share_to_circle`/
+    /// `circle_members`/`revoke_from_circle` call.
+    pub async fn create_circle(
+        &mut self,
+        initial_members: &[(VerifyingKey, Access<()>)],
+    ) -> Result<SpaceId, SyncError> {
+        let circle_id = SpaceId::digest(self.signing_key.verifying_key().to_hex().as_bytes())
+            .to_owned();
+        // Salt with the current time so the same identity can create more
+        // than one circle without colliding on the same SpaceId.
+        let circle_id = SpaceId::digest(
+            [circle_id.as_bytes().as_slice(), &Timestamp::now().to_string().into_bytes()].concat(),
+        );
+
+        let topic = topic_for_circle(circle_id);
+        self.open_circle_topic(topic).await?;
+
+        let messages = zodia_circles::create_circle(
+            &self.circle_manager, &self.sync_store, circle_id, initial_members,
+        ).await?;
+        for message in messages {
+            self.broadcast_circle_op(topic, message)?;
+        }
+
+        Ok(circle_id)
+    }
+
+    /// Grant `member` `access` in `circle_id`. `member` must already be
+    /// discoverable — i.e. this device has processed a `KeyBundle` message
+    /// from them at some point, which happens automatically for any peer
+    /// this device has ever synced the directory topic with (see
+    /// `spawn`'s key-bundle announcement and `circle_directory_topic`).
+    pub async fn invite_to_circle(
+        &mut self,
+        circle_id: SpaceId,
+        member:    VerifyingKey,
+        access:    Access<()>,
+    ) -> Result<(), SyncError> {
+        let topic = topic_for_circle(circle_id);
+        let (auth_message, space_message) = zodia_circles::invite_to_circle(
+            &self.circle_manager, &self.sync_store, circle_id, member, access,
+        ).await?;
+        self.broadcast_circle_op(topic, auth_message)?;
+        self.broadcast_circle_op(topic, space_message)?;
+        Ok(())
+    }
+
+    /// Revoke `member`'s access to `circle_id`. Key rotation for the
+    /// remaining members happens automatically inside `p2panda-spaces` —
+    /// see `docs/prd/circles.md`'s "Key rotation on revocation is automatic".
+    pub async fn revoke_from_circle(
+        &mut self,
+        circle_id: SpaceId,
+        member:    VerifyingKey,
+    ) -> Result<(), SyncError> {
+        let topic = topic_for_circle(circle_id);
+        let (auth_message, space_message) = zodia_circles::revoke_from_circle(
+            &self.circle_manager, &self.sync_store, circle_id, member,
+        ).await?;
+        self.broadcast_circle_op(topic, auth_message)?;
+        self.broadcast_circle_op(topic, space_message)?;
+        Ok(())
+    }
+
+    /// Current members of `circle_id` and their access levels.
+    pub async fn circle_members(&self, circle_id: SpaceId) -> Result<Vec<(VerifyingKey, Access<()>)>, SyncError> {
+        zodia_circles::circle_members(&self.circle_manager, circle_id).await.map_err(SyncError::from)
+    }
+
+    /// Encrypt and share `plaintext` (an encoded `InterpOp`/`DocOp`, same
+    /// wire format as the public path — see `zodia_pipeline::materialize_circle_content`)
+    /// to every current member of `circle_id`.
+    pub async fn share_to_circle(&mut self, circle_id: SpaceId, plaintext: Vec<u8>) -> Result<(), SyncError> {
+        let topic = topic_for_circle(circle_id);
+        let message = zodia_circles::share_to_circle(
+            &self.circle_manager, &self.sync_store, circle_id, &plaintext,
+        ).await?;
+        self.broadcast_circle_op(topic, message)?;
         Ok(())
     }
 

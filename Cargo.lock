@@ -8350,6 +8350,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zodia-circles",
  "zodia-core",
  "zodia-ops",
 ]
