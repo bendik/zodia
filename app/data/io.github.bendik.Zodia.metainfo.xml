@@ -84,6 +84,9 @@
   </supports>
 
   <releases>
+    <release version="0.8.0" date="2026-07-30">
+      <description><p>Sync now scales per-key instead of pulling one shared firehose log — your device only replicates operations for the specific charts and aspects you actually view, keeping traffic proportional to what you read rather than total community activity. Fixed a real gap where content received from a peer was never relayed onward to a third peer, so multi-hop sync now works as intended. Interpretations can be revoked by their author, and subscriptions unsubscribe automatically after a grace period instead of holding a topic open forever. Under the hood, the app now runs on a new sync client library shared across the codebase, the foundation for local storage pruning (on-demand for now) and future non-GTK frontends.</p></description>
+    </release>
     <release version="0.7.1" date="2026-07-24">
       <description><p>The Sky tab is now a live activity feed instead of a static transit table — affirmations on your interpretations, replies to your threads, and transit aspects (including house transits) entering or leaving orb all show up as they happen, and the notification bell now badges for real when something targets your own work. Aspect pages move from competing write-ups to a single interpretation everyone edits together, with a "Previous version" toggle to compare revisions; if someone edits a block you wrote, you're notified and can veto the change within 7 days to restore your version. Peers still on 0.7.0 won't see these collaborative edits until they upgrade — nothing breaks, they just don't converge on the new shared text yet.</p></description>
     </release>
