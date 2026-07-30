@@ -317,6 +317,43 @@ async fn peer_revokes_from_circle(world: &mut ZodiaWorld, name: String, member: 
         .expect("revoke_from_circle succeeds");
 }
 
+#[then(expr = "{string} sees {string} as a write member of the circle")]
+async fn sees_write_member(world: &mut ZodiaWorld, name: String, member: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before checking its members");
+    let (member_signing_key, _) = world.identities.get(&member)
+        .unwrap_or_else(|| panic!("no prior identity for peer {member}"))
+        .clone();
+    let member_verifying_key = PandaSigningKey::from_bytes(member_signing_key.as_bytes()).verifying_key();
+    let members = world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .circle_members(circle_id)
+        .await
+        .expect("circle_members succeeds");
+    let found = members.iter().find(|(vk, _)| *vk == member_verifying_key);
+    match found {
+        Some((_, access)) => assert!(access.is_write(), "{member} is a member but not at write access: {access:?}"),
+        None => panic!("{member} is not listed as a circle member at all"),
+    }
+}
+
+#[then(expr = "{string} no longer sees {string} as a member of the circle")]
+async fn no_longer_sees_member(world: &mut ZodiaWorld, name: String, member: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before checking its members");
+    let (member_signing_key, _) = world.identities.get(&member)
+        .unwrap_or_else(|| panic!("no prior identity for peer {member}"))
+        .clone();
+    let member_verifying_key = PandaSigningKey::from_bytes(member_signing_key.as_bytes()).verifying_key();
+    let members = world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .circle_members(circle_id)
+        .await
+        .expect("circle_members succeeds");
+    assert!(
+        !members.iter().any(|(vk, _)| *vk == member_verifying_key),
+        "{member} is still listed as a circle member after being revoked"
+    );
+}
+
 #[when(expr = "{string} shares an interpretation on {string} to the circle")]
 async fn peer_shares_to_circle(world: &mut ZodiaWorld, name: String, key: String) {
     let circle_id = world.last_circle.expect("a circle must be created before sharing to it");
