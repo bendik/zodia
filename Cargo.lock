@@ -4484,9 +4484,12 @@ checksum = "885df80e133b676447543f126b70d5e80c7299fb28ce4af5c8528ed4737d2f41"
 dependencies = [
  "p2panda-core",
  "petgraph 0.8.3",
+ "rand 0.10.1",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8182,6 +8185,20 @@ dependencies = [
  "tracing",
  "zodia-core",
  "zodia-net",
+]
+
+[[package]]
+name = "zodia-circles"
+version = "0.8.0"
+dependencies = [
+ "p2panda-auth",
+ "p2panda-core",
+ "p2panda-encryption",
+ "p2panda-spaces",
+ "p2panda-store",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@ members = [
     "sync",
     "ops",
     "pipeline",
+    "circles",
     "doc",
     "sdk",
     "config",
@@ -29,6 +30,7 @@ zodia-crypto = { path = "crypto" }
 zodia-sync   = { path = "sync" }
 zodia-ops    = { path = "ops" }
 zodia-pipeline = { path = "pipeline" }
+zodia-circles = { path = "circles" }
 zodia-doc    = { path = "doc" }
 zodia-sdk    = { path = "sdk" }
 zodia-av     = { path = "av" }

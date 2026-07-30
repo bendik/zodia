@@ -1,0 +1,22 @@
+[package]
+name = "zodia-circles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Private-circle sharing — a thin wrapper over p2panda-spaces group encryption"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+p2panda-core = { version = "0.7", default-features = false }
+p2panda-store = { version = "0.7", default-features = false, features = ["sqlite", "spaces"] }
+p2panda-spaces = "0.7"
+p2panda-auth = { version = "0.7", default-features = false, features = ["serde"] }
+
+[dev-dependencies]
+p2panda-spaces = { version = "0.7", features = ["test_utils"] }
+p2panda-store = { version = "0.7", default-features = false, features = ["sqlite", "spaces", "test_utils"] }
+p2panda-auth = { version = "0.7", default-features = false, features = ["serde", "test_utils"] }
+p2panda-encryption = { version = "0.7", features = ["test_utils"] }
