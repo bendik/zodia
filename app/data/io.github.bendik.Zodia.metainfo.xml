@@ -47,6 +47,10 @@
       <caption>Synastry view between two connected users</caption>
       <image type="source">https://bendik.github.io/zodia/screenshots/synastry.png</image>
     </screenshot>
+    <screenshot>
+      <caption>A private circle shared with an invited member</caption>
+      <image type="source">https://bendik.github.io/zodia/screenshots/circles.png</image>
+    </screenshot>
   </screenshots>
 
   <url type="homepage">https://github.com/bendik/zodia</url>
