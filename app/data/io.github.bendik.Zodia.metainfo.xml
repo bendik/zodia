@@ -88,6 +88,9 @@
   </supports>
 
   <releases>
+    <release version="0.9.1" date="2026-07-30">
+      <description><p>Fixed private circles being unreachable from the app: sharing a reading required an authoring action nothing in the interface actually triggered, so the share button never appeared. Your own edits and contributions now show up in your own activity feed and can be shared to a circle from there, same as any other reading.</p></description>
+    </release>
     <release version="0.9.0" date="2026-07-30">
       <description><p>Private circles: share a reading with specific people instead of the whole network. Create a circle, invite friends straight from your connected peers, and only invited members can decrypt what you share there — everyone else sees nothing readable, even if the encrypted traffic reaches them. Invite someone as read-only, or with posting rights of their own so the circle becomes a small shared space rather than a one-way share. Hearts and replies work on circle-shared readings exactly the same as public ones. Circles get their own row in the sidebar, right alongside Chart, Sky, and Network, each with a small colored marker so they're easy to tell apart at a glance.</p></description>
     </release>
