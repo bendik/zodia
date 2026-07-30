@@ -88,6 +88,9 @@
   </supports>
 
   <releases>
+    <release version="0.9.2" date="2026-07-30">
+      <description><p>Peers can now set their own display name, shown to others instead of a hex id — set yours from the pencil icon next to your node status on the Network tab. Applies wherever a peer's name appears (sidebar, notifications, chat), with a nickname you've set for someone yourself always taking priority.</p></description>
+    </release>
     <release version="0.9.1" date="2026-07-30">
       <description><p>Fixed private circles being unreachable from the app: sharing a reading required an authoring action nothing in the interface actually triggered, so the share button never appeared. Your own edits and contributions now show up in your own activity feed and can be shared to a circle from there, same as any other reading.</p></description>
     </release>
