@@ -3507,6 +3507,10 @@ fn present_glyph_legend(parent: &impl IsA<gtk::Widget>) {
     retro_row.set_title("℞");
     retro_row.set_subtitle("Retrograde — apparent backward motion from Earth's vantage point");
     other_group.add(&retro_row);
+    let critical_row = adw::ActionRow::new();
+    critical_row.set_title("Critical degree");
+    critical_row.set_subtitle("A placement in the last degree (29°) of its sign");
+    other_group.add(&critical_row);
     for phase in [
         zodia_core::MoonPhase::New, zodia_core::MoonPhase::WaxingCrescent,
         zodia_core::MoonPhase::FirstQuarter, zodia_core::MoonPhase::WaxingGibbous,

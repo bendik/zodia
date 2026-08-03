@@ -21,7 +21,7 @@ pub use aspects::{Aspect, AspectKind, AspectSet, AspectSig, SynastryAspect,
 pub use balance::{Balance, Element, Modality, natal_balance, sign_element, sign_modality};
 pub use birth::{BirthData, birth_from_coords};
 pub use calendar::{gregorian_to_jdn, current_jdn, jdn_to_gregorian, jdn_to_display_date};
-pub use chart::Chart;
+pub use chart::{BigThree, Chart, is_critical_degree};
 pub use ephemeris::{EphemerisError, compute_positions, is_retrograde};
 pub use houses::{HouseError, HouseKind, HouseSystem};
 pub use interp::{Angle, InterpKey, InterpKind, humanize_key, parse_interp_sig};

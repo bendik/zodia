@@ -22,6 +22,14 @@ fn sign_of(lon: f64) -> u8 {
     (lon.rem_euclid(360.0) / 30.0).floor() as u8 % 12
 }
 
+/// Whether `lon` falls in the last degree of its sign (29°00′–29°59′59″) —
+/// the "critical" or "anaretic" degree, a well-defined, unambiguous
+/// astrological concept (urgency/culmination themes) with no prior support
+/// in this app despite needing nothing beyond the longitude itself.
+pub fn is_critical_degree(lon: f64) -> bool {
+    (lon.rem_euclid(360.0) % 30.0) >= 29.0
+}
+
 /// A fully computed natal chart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chart {
@@ -137,5 +145,22 @@ mod tests {
         let mut chart = Chart::compute(birth).expect("chart computes");
         chart.positions.0.remove(&Planet::Moon);
         assert!(chart.big_three().is_none());
+    }
+
+    #[test]
+    fn critical_degree_is_only_the_last_degree_of_a_sign() {
+        assert!(!is_critical_degree(0.0));    // 0° Aries — start of sign
+        assert!(!is_critical_degree(28.99));  // just short
+        assert!(is_critical_degree(29.0));    // exactly the boundary
+        assert!(is_critical_degree(29.99));   // last moment of the sign
+    }
+
+    #[test]
+    fn critical_degree_applies_per_sign_not_just_near_0_aries() {
+        // 30° = 0° Taurus (not critical); 59° = 29° Taurus (critical).
+        // Guards against an implementation that only checks the raw
+        // longitude's fractional part instead of the within-sign degree.
+        assert!(!is_critical_degree(30.0));
+        assert!(is_critical_degree(59.5));
     }
 }

@@ -43,7 +43,7 @@ pub fn placement_items(chart: &Chart) -> Vec<AspectItem> {
             keys,
             title,
             symbol_line,
-            meta_line: Some(deg_str),
+            meta_line: Some(critical_degree_meta(lon, deg_str)),
             transit_context: None,
         });
     }
@@ -55,7 +55,7 @@ pub fn placement_items(chart: &Chart) -> Vec<AspectItem> {
         keys:        vec![KeyEntry { label: "Sign".to_string(), key: asc_key.clone() }],
         title:       asc_key.plain_name(),
         symbol_line: format!("ASC {}", sign_glyph(asc_sign)),
-        meta_line:   Some(asc_deg),
+        meta_line:   Some(critical_degree_meta(chart.houses.ascendant, asc_deg)),
         transit_context: None,
     });
 
@@ -65,9 +65,20 @@ pub fn placement_items(chart: &Chart) -> Vec<AspectItem> {
         keys:        vec![KeyEntry { label: "Sign".to_string(), key: mc_key.clone() }],
         title:       mc_key.plain_name(),
         symbol_line: format!("MC {}", sign_glyph(mc_sign)),
-        meta_line:   Some(mc_deg),
+        meta_line:   Some(critical_degree_meta(chart.houses.midheaven, mc_deg)),
         transit_context: None,
     });
 
     items
+}
+
+/// Appends a "critical degree" note to a placement's degree label when it
+/// falls in the last degree of its sign (29°) — a well-known, unambiguous
+/// astrological concept that previously had nowhere to show at all.
+fn critical_degree_meta(lon: f64, deg_str: String) -> String {
+    if zodia_core::is_critical_degree(lon) {
+        format!("{deg_str} · critical degree")
+    } else {
+        deg_str
+    }
 }
