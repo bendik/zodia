@@ -1505,6 +1505,18 @@ impl AsyncComponent for AppModel {
                     .unwrap_or_default();
                 if present.is_empty() {
                     info!(key = %interp_key, "no other peers present — audio noop");
+                    // The button used to fail silently here — confirmed
+                    // confusing a real user, who had no way to tell a click
+                    // registered at all. A notification is a stopgap; the
+                    // real fix is disabling the button until presence
+                    // exists, tracked as follow-up UI work.
+                    notify::send(
+                        "no-editor-presence",
+                        "No one to talk to yet",
+                        "Nobody else is currently viewing this reading — voice rooms need someone else present to join.",
+                        "dialog-information-symbolic",
+                        &[],
+                    );
                     return;
                 }
                 // Walk present peers; for each that we have a Connected

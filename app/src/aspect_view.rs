@@ -461,6 +461,23 @@ async fn build_doc_reading_group(
         });
     });
 
+    // Share-to-circle, directly reachable from the content itself instead
+    // of only via a small icon on a Sky feed card once it happens to
+    // appear there — circles previously had no real "front door".
+    let share_btn = gtk::Button::from_icon_name("avatar-default-symbolic");
+    share_btn.add_css_class("flat");
+    share_btn.add_css_class("circular");
+    share_btn.set_tooltip_text(Some("Share to a circle"));
+    let key_for_share = key_sig.clone();
+    let sender_for_share = sender.clone();
+    share_btn.connect_clicked(move |_| {
+        sender_for_share.input(AppMsg::OpenShareToCirclePicker {
+            interp_key: key_for_share.clone(),
+            body:       String::new(),
+        });
+    });
+
+    actions.append(&share_btn);
     actions.append(&audio_btn);
     actions.append(&publish_btn);
     editor_box.append(&actions);
