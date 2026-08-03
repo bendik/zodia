@@ -48,13 +48,14 @@ pub enum SetupPageMsg {
 #[derive(Debug)]
 pub enum SetupPageOut {
     Submit {
-        year:   i32,
-        month:  u32,
-        day:    u32,
-        hour:   u32,
-        minute: u32,
-        lat:    f64,
-        lon:    f64,
+        year:         i32,
+        month:        u32,
+        day:          u32,
+        hour:         u32,
+        minute:       u32,
+        lat:          f64,
+        lon:          f64,
+        display_name: String,
     },
     Error(String),
 }
@@ -100,6 +101,24 @@ impl SimpleComponent for SetupPage {
             }
         }
         root.add_top_bar(&header_bar);
+
+        // ── display name ──────────────────────────────────────────────────────
+        relm4::view! {
+            name_row = adw::EntryRow {
+                set_title: "Your name",
+                set_input_purpose: gtk::InputPurpose::Name,
+            }
+        }
+        relm4::view! {
+            name_group = adw::PreferencesGroup {
+                set_title: "Introduce Yourself",
+                set_description: Some(
+                    "Shown to other Zodia users instead of a hex id. Optional — you can set \
+                     or change this later from the Network tab.",
+                ),
+                add: &name_row,
+            }
+        }
 
         // ── date / time group ─────────────────────────────────────────────────
         relm4::view! {
@@ -251,13 +270,14 @@ impl SimpleComponent for SetupPage {
         }
 
         {
-            let s    = sender.output_sender().clone();
-            let yr   = year_row.clone();
-            let mr   = month_row.clone();
-            let dr   = day_row.clone();
-            let hr   = hour_row.clone();
-            let minr = minute_row.clone();
-            let loc  = Rc::clone(&selected_loc);
+            let s     = sender.output_sender().clone();
+            let yr    = year_row.clone();
+            let mr    = month_row.clone();
+            let dr    = day_row.clone();
+            let hr    = hour_row.clone();
+            let minr  = minute_row.clone();
+            let loc   = Rc::clone(&selected_loc);
+            let namer = name_row.clone();
             btn.connect_clicked(move |_| {
                 let (lat, lon) = match *loc.borrow() {
                     Some(v) => v,
@@ -273,6 +293,7 @@ impl SimpleComponent for SetupPage {
                     hour:   hr.value() as u32,
                     minute: minr.value() as u32,
                     lat, lon,
+                    display_name: namer.text().to_string(),
                 });
             });
         }
@@ -297,6 +318,7 @@ impl SimpleComponent for SetupPage {
                     set_max_width_chars: 50,
                 },
 
+                append: &name_group,
                 append: &date_group,
                 append: &city_section,
                 append: &manual_section,

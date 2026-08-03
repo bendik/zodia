@@ -113,6 +113,7 @@ pub enum AppMsg {
         year: i32, month: u32, day: u32,
         hour: u32, minute: u32,
         lat: f64, lon: f64,
+        display_name: String,
     },
     SetupError(String),
     /// User tapped a stargazer row — connect (if needed) then open their page.
@@ -596,8 +597,8 @@ impl AsyncComponent for AppModel {
         let (setup_widget, setup_sender) = crate::setup_page::launch(
             sender.input_sender(),
             |out| match out {
-                crate::setup_page::SetupPageOut::Submit { year, month, day, hour, minute, lat, lon } =>
-                    AppMsg::ConfirmBirth { year, month, day, hour, minute, lat, lon },
+                crate::setup_page::SetupPageOut::Submit { year, month, day, hour, minute, lat, lon, display_name } =>
+                    AppMsg::ConfirmBirth { year, month, day, hour, minute, lat, lon, display_name },
                 crate::setup_page::SetupPageOut::Error(e) =>
                     AppMsg::SetupError(e),
             },
@@ -665,7 +666,7 @@ impl AsyncComponent for AppModel {
         _root: &Self::Root,
     ) {
         match msg {
-            AppMsg::ConfirmBirth { year, month, day, hour, minute, lat, lon } => {
+            AppMsg::ConfirmBirth { year, month, day, hour, minute, lat, lon, display_name } => {
                 if lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 {
                     sender.input(AppMsg::SetupError(
                         "Latitude must be −90…90, longitude −180…180".to_string(),
@@ -681,6 +682,17 @@ impl AsyncComponent for AppModel {
                 if let Err(e) = self.config.save_birth(birth.clone()) {
                     sender.input(AppMsg::SetupError(e.to_string()));
                     return;
+                }
+                // Optional — save_display_name no-ops to None on an empty
+                // string, same as later edits from the Network tab.
+                if !display_name.trim().is_empty() {
+                    if let Err(e) = self.config.save_display_name(display_name) {
+                        warn!("save_display_name: {e}");
+                    } else if let Some(s) = &self.network_tab_sender {
+                        let _ = s.send(crate::network_tab::NetworkTabMsg::SetOwnName(
+                            self.config.display_name.clone(),
+                        ));
+                    }
                 }
                 match Chart::compute(birth.clone()) {
                     Ok(chart) => {

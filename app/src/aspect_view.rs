@@ -442,10 +442,15 @@ async fn build_doc_reading_group(
         }
     });
 
-    let audio_btn = gtk::Button::with_label("Start discussion");
+    // Named to avoid colliding with the unrelated "Circles" privacy feature
+    // (private encrypted sharing, see zodia-circles) — this is a live voice
+    // room, nothing to do with that. Was "Start discussion" / "voice
+    // circle" in copy, which read as the same feature and confused at
+    // least one real user into expecting circle-creation here.
+    let audio_btn = gtk::Button::with_label("Talk about this");
     audio_btn.add_css_class("pill");
     audio_btn.set_tooltip_text(Some(
-        "Open a live voice circle on this reading.  Anyone editing the doc \
+        "Open a live voice room on this reading.  Anyone editing the doc \
          can join from their sidebar.  Audio mesh, max 6 participants.",
     ));
     let key_for_audio = key_sig.clone();
