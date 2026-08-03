@@ -77,3 +77,73 @@ Feature: Private circles let a user share an interpretation with named friends i
     When "Alice" revokes "Bob" from the circle
     And "Alice" shares an interpretation on "natal:circle_revoke_after" to the circle
     Then "Bob" observes no authored interpretation on "natal:circle_revoke_after" within 5 seconds
+
+  Scenario: Revoking then reinviting a member restores their access, with a new level
+    # p2panda-auth has no in-place access-level promotion (AlreadyAdded on
+    # an active member) — revoke-then-reinvite is the documented workaround
+    # for "give this read-only member write access instead". Nobody had
+    # proven the workaround actually works end-to-end until this scenario.
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And 3 seconds pass
+    And "Alice" creates a circle
+    And "Alice" invites "Bob" to the circle
+    And "Bob" joins the circle
+    And 1 second passes
+    When "Alice" revokes "Bob" from the circle
+    And "Alice" invites "Bob" to the circle with write access
+    And "Bob" shares an interpretation on "natal:circle_reinvite_write_share" to the circle
+    Then "Alice" observes the authored interpretation on "natal:circle_reinvite_write_share" within 15 seconds
+
+  Scenario: A member of one circle does not see another circle's shares
+    # Both circles are authored by the same peer (Alice), which matters
+    # here specifically: all of one author's circles currently share one
+    # underlying log (zodia_circles::CIRCLE_LOG_ID is fixed), so Carol —
+    # a member of Beta but never invited to Alpha — still receives
+    # Alpha's ciphertext over the wire. This proves she genuinely can't
+    # decrypt it, not just that she wasn't sent it.
+    #
+    # Two invites into two different circles for overlapping peer pairs
+    # back-to-back is the same class of p2panda-net multi-topic session-
+    # negotiation jitter documented for multi_key_isolation.feature.
+    # Unlike that case, extra settle time here did not reduce the failure
+    # rate (tried 3s, then 5s+1s+3s split across circle creation) — the
+    # invite's own internal 25s retry loop is what actually matters, and
+    # this specific combination (3 peers, 2 circles from one author,
+    # sharing one underlying log per CIRCLE_LOG_ID) still occasionally
+    # exceeds it. Documented as an accepted flaky characteristic of this
+    # scenario, same as multi_key_isolation.feature, rather than chased
+    # further — real app usage doesn't create two circles back-to-back
+    # the instant two peers connect the way this deliberately stresses.
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And a peer named "Carol" connected to the network
+    And 5 seconds pass
+    And "Alice" creates a circle named "Alpha"
+    And 1 second passes
+    And "Alice" creates a circle named "Beta"
+    And 3 seconds pass
+    And "Alice" invites "Bob" to circle "Alpha"
+    And "Alice" invites "Carol" to circle "Beta"
+    And "Bob" joins circle "Alpha"
+    And "Carol" joins circle "Beta"
+    And 1 second passes
+    When "Alice" shares an interpretation on "natal:circle_isolation_alpha" to circle "Alpha"
+    Then "Bob" observes the authored interpretation on "natal:circle_isolation_alpha" within 15 seconds
+    And "Carol" observes no authored interpretation on "natal:circle_isolation_alpha" within 5 seconds
+
+  Scenario: A revoked member's own view of the circle converges too
+    # Every other revocation scenario only checks state from the circle
+    # owner's side (Alice). This checks it from Bob's own client instead —
+    # does the revoke message actually reach and get applied by the
+    # person it targets, or does only the revoker's own state update?
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And 3 seconds pass
+    And "Alice" creates a circle
+    And "Alice" invites "Bob" to the circle
+    And "Bob" joins the circle
+    And 1 second passes
+    When "Alice" revokes "Bob" from the circle
+    And 3 seconds pass
+    Then "Bob" no longer sees themself as a member of the circle

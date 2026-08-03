@@ -39,6 +39,11 @@ struct ZodiaWorld {
     /// so far only ever deals with one circle at a time, same simplicity
     /// as `last_prune_count`.
     last_circle: Option<CircleId>,
+    /// Circles created with an explicit label (`"Alice" creates a circle
+    /// named "Alpha"`) — for scenarios juggling more than one circle at
+    /// once, where `last_circle` alone can't disambiguate. Keyed by the
+    /// scenario's own chosen label, not any peer name.
+    named_circles: HashMap<String, CircleId>,
 }
 
 // `cucumber::World::run` requires `Debug` (used to log World state on step
@@ -142,6 +147,7 @@ async fn peer_touches_subscription(world: &mut ZodiaWorld, name: String, key: St
 
 #[given(regex = r"^(\d+) seconds? (?:pass|passes)$")]
 #[when(regex = r"^(\d+) seconds? (?:pass|passes)$")]
+#[then(regex = r"^(\d+) seconds? (?:pass|passes)$")]
 async fn time_passes(_world: &mut ZodiaWorld, secs: u64) {
     tokio::time::sleep(Duration::from_secs(secs)).await;
 }
@@ -297,8 +303,21 @@ async fn peer_creates_circle(world: &mut ZodiaWorld, name: String) {
     world.last_circle = Some(circle_id);
 }
 
-async fn invite_with_access(world: &mut ZodiaWorld, name: String, invitee: String, access: CircleAccess<()>) {
-    let circle_id = world.last_circle.expect("a circle must be created before inviting to it");
+// Labelled variant for scenarios juggling more than one circle at once
+// (e.g. proving isolation between circles) — `last_circle` alone can't
+// disambiguate which of several circles a later step means.
+#[given(expr = "{string} creates a circle named {string}")]
+async fn peer_creates_named_circle(world: &mut ZodiaWorld, name: String, label: String) {
+    let circle_id = world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .create_circle(vec![])
+        .await
+        .expect("create_circle succeeds");
+    world.last_circle = Some(circle_id);
+    world.named_circles.insert(label, circle_id);
+}
+
+async fn invite_with_access(world: &mut ZodiaWorld, name: String, invitee: String, circle_id: CircleId, access: CircleAccess<()>) {
     let (invitee_signing_key, _) = world.identities.get(&invitee)
         .unwrap_or_else(|| panic!("no prior identity for peer {invitee}"))
         .clone();
@@ -327,13 +346,24 @@ async fn invite_with_access(world: &mut ZodiaWorld, name: String, invitee: Strin
 #[given(expr = "{string} invites {string} to the circle")]
 #[when(expr = "{string} invites {string} to the circle")]
 async fn peer_invites_to_circle(world: &mut ZodiaWorld, name: String, invitee: String) {
-    invite_with_access(world, name, invitee, CircleAccess::read()).await;
+    let circle_id = world.last_circle.expect("a circle must be created before inviting to it");
+    invite_with_access(world, name, invitee, circle_id, CircleAccess::read()).await;
 }
 
 #[given(expr = "{string} invites {string} to the circle with write access")]
 #[when(expr = "{string} invites {string} to the circle with write access")]
 async fn peer_invites_to_circle_with_write(world: &mut ZodiaWorld, name: String, invitee: String) {
-    invite_with_access(world, name, invitee, CircleAccess::write()).await;
+    let circle_id = world.last_circle.expect("a circle must be created before inviting to it");
+    invite_with_access(world, name, invitee, circle_id, CircleAccess::write()).await;
+}
+
+// Labelled variant — see `peer_creates_named_circle`'s doc comment.
+#[given(expr = "{string} invites {string} to circle {string}")]
+#[when(expr = "{string} invites {string} to circle {string}")]
+async fn peer_invites_to_named_circle(world: &mut ZodiaWorld, name: String, invitee: String, label: String) {
+    let circle_id = *world.named_circles.get(&label)
+        .unwrap_or_else(|| panic!("no circle named {label}"));
+    invite_with_access(world, name, invitee, circle_id, CircleAccess::read()).await;
 }
 
 // Stands in for the invitee learning the circle's id out-of-band (a real
@@ -345,6 +375,19 @@ async fn peer_invites_to_circle_with_write(world: &mut ZodiaWorld, name: String,
 #[when(expr = "{string} joins the circle")]
 async fn peer_joins_circle(world: &mut ZodiaWorld, name: String) {
     let circle_id = world.last_circle.expect("a circle must be created before joining it");
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .open_circle(circle_id)
+        .await
+        .expect("open_circle succeeds");
+}
+
+// Labelled variant — see `peer_creates_named_circle`'s doc comment.
+#[given(expr = "{string} joins circle {string}")]
+#[when(expr = "{string} joins circle {string}")]
+async fn peer_joins_named_circle(world: &mut ZodiaWorld, name: String, label: String) {
+    let circle_id = *world.named_circles.get(&label)
+        .unwrap_or_else(|| panic!("no circle named {label}"));
     world.clients.get(&name)
         .unwrap_or_else(|| panic!("no peer named {name}"))
         .open_circle(circle_id)
@@ -403,9 +446,55 @@ async fn no_longer_sees_member(world: &mut ZodiaWorld, name: String, member: Str
     );
 }
 
+// A revoked peer's own circle_members() call converges on one of two
+// terminal states, and which one is a timing race rather than a bug:
+// either it errors outright ("no such circle" — revocation orphaned
+// their local materialised space state before the query landed) or it
+// succeeds with a list that no longer includes themself (state finished
+// converging first). Verified empirically across repeated runs — both
+// outcomes were observed for the identical scenario, never a third
+// (Bob still listed as an active member never happened). Polls rather
+// than asserting once, since a fixed settle time caught the state
+// mid-transition often enough to make the scenario flaky.
+#[then(expr = "{string} no longer sees themself as a member of the circle")]
+async fn no_longer_sees_self_as_member(world: &mut ZodiaWorld, name: String) {
+    let (own_signing_key, _) = world.identities.get(&name)
+        .unwrap_or_else(|| panic!("no prior identity for peer {name}"))
+        .clone();
+    let own_verifying_key = PandaSigningKey::from_bytes(own_signing_key.as_bytes()).verifying_key();
+    let circle_id = world.last_circle.expect("a circle must be created before checking its members");
+    let client = world.clients.get(&name).unwrap_or_else(|| panic!("no peer named {name}"));
+
+    let result = timeout(Duration::from_secs(20), async {
+        loop {
+            match client.circle_members(circle_id).await {
+                Err(_) => return,
+                Ok(members) if !members.iter().any(|(vk, _)| *vk == own_verifying_key) => return,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    }).await;
+    assert!(
+        result.is_ok(),
+        "{name} still saw themself as an active circle member 20s after being revoked"
+    );
+}
+
 #[when(expr = "{string} shares an interpretation on {string} to the circle")]
 async fn peer_shares_to_circle(world: &mut ZodiaWorld, name: String, key: String) {
     let circle_id = world.last_circle.expect("a circle must be created before sharing to it");
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .share_interp_to_circle(circle_id, &key, "a private test interpretation body".to_string())
+        .await
+        .expect("share_interp_to_circle succeeds");
+}
+
+// Labelled variant — see `peer_creates_named_circle`'s doc comment.
+#[when(expr = "{string} shares an interpretation on {string} to circle {string}")]
+async fn peer_shares_to_named_circle(world: &mut ZodiaWorld, name: String, key: String, label: String) {
+    let circle_id = *world.named_circles.get(&label)
+        .unwrap_or_else(|| panic!("no circle named {label}"));
     world.clients.get(&name)
         .unwrap_or_else(|| panic!("no peer named {name}"))
         .share_interp_to_circle(circle_id, &key, "a private test interpretation body".to_string())
