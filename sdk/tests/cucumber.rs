@@ -357,6 +357,48 @@ async fn peer_invites_to_circle_with_write(world: &mut ZodiaWorld, name: String,
     invite_with_access(world, name, invitee, circle_id, CircleAccess::write()).await;
 }
 
+#[when(expr = "{string} notifies {string} of the circle invite")]
+async fn peer_notifies_circle_invite(world: &mut ZodiaWorld, name: String, recipient: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before notifying about it");
+    let (recipient_signing_key, _) = world.identities.get(&recipient)
+        .unwrap_or_else(|| panic!("no prior identity for peer {recipient}"))
+        .clone();
+    let recipient_verifying_key = PandaSigningKey::from_bytes(recipient_signing_key.as_bytes()).verifying_key();
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .notify_circle_invite(circle_id, recipient_verifying_key)
+        .await
+        .expect("notify_circle_invite succeeds");
+}
+
+#[then(expr = "{string} observes a circle invite notification within {int} seconds")]
+async fn observes_circle_invite_notification(world: &mut ZodiaWorld, name: String, secs: u64) {
+    let (own_signing_key, _) = world.identities.get(&name)
+        .unwrap_or_else(|| panic!("no prior identity for peer {name}"))
+        .clone();
+    let own_verifying_key = PandaSigningKey::from_bytes(own_signing_key.as_bytes()).verifying_key();
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::CircleInviteReceived { recipient, .. } if *recipient == own_verifying_key)
+    }).await;
+    assert!(seen, "{name} did not observe a circle invite notification addressed to them within {secs}s");
+}
+
+#[then(expr = "{string} observes a circle invite notification not addressed to them within {int} seconds")]
+async fn observes_circle_invite_not_for_them(world: &mut ZodiaWorld, name: String, secs: u64) {
+    let (own_signing_key, _) = world.identities.get(&name)
+        .unwrap_or_else(|| panic!("no prior identity for peer {name}"))
+        .clone();
+    let own_verifying_key = PandaSigningKey::from_bytes(own_signing_key.as_bytes()).verifying_key();
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::CircleInviteReceived { recipient, .. } if *recipient != own_verifying_key)
+    }).await;
+    assert!(
+        seen,
+        "{name} never received the broadcast circle invite notification at all — expected to receive it \
+         (it's on the always-on global topic) but recognize via the recipient field that it isn't theirs"
+    );
+}
+
 // Labelled variant — see `peer_creates_named_circle`'s doc comment.
 #[given(expr = "{string} invites {string} to circle {string}")]
 #[when(expr = "{string} invites {string} to circle {string}")]

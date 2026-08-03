@@ -286,6 +286,20 @@ impl ZodiaClient {
         self.call(|reply| Command::RevokeFromCircle { circle_id, member, reply }).await
     }
 
+    /// Broadcast an invite notification for `recipient` (`InterpOp::CircleInviteNotify`,
+    /// log 0) — separate from `invite_to_circle` itself, which only updates
+    /// the inviter's own membership state. Call this right after a
+    /// successful invite so the invitee's own client can surface an
+    /// in-app "you've been invited" prompt, instead of the invitee having
+    /// no way to learn the circle exists at all. Carries no circle name
+    /// (see `InterpOp::CircleInviteNotify`'s doc comment on why) — every
+    /// other connected peer also technically receives this since it rides
+    /// the always-on global topic, but only `recipient`'s own client
+    /// should act on it.
+    pub async fn notify_circle_invite(&self, circle_id: CircleId, recipient: VerifyingKey) -> Result<(), ClientError> {
+        self.call(|reply| Command::NotifyCircleInvite { circle_id, recipient, reply }).await
+    }
+
     /// Share an interpretation privately with `circle_id`'s current
     /// members instead of the public network — encodes the same
     /// `InterpOp::Author` the public path (`Self::author`) uses, so once
@@ -425,6 +439,7 @@ enum Command {
     OpenCircle { circle_id: SpaceId, reply: Reply },
     InviteToCircle { circle_id: SpaceId, member: VerifyingKey, access: Access<()>, reply: Reply },
     RevokeFromCircle { circle_id: SpaceId, member: VerifyingKey, reply: Reply },
+    NotifyCircleInvite { circle_id: SpaceId, recipient: VerifyingKey, reply: Reply },
     ShareToCircle { circle_id: SpaceId, plaintext: Vec<u8>, reply: Reply },
     CircleMembers {
         circle_id: SpaceId,
@@ -620,6 +635,10 @@ async fn handle_command(
         }
         Command::RevokeFromCircle { circle_id, member, reply } => {
             let res = node.revoke_from_circle(circle_id, member).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::NotifyCircleInvite { circle_id, recipient, reply } => {
+            let res = node.publish(InterpOp::CircleInviteNotify { circle_id, recipient }).await.map_err(sync_err);
             let _ = reply.send(res);
         }
         Command::ShareToCircle { circle_id, plaintext, reply } => {

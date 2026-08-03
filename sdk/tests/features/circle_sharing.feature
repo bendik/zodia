@@ -8,9 +8,12 @@ Feature: Private circles let a user share an interpretation with named friends i
   together, via a well-known directory topic every device subscribes
   to on connect, so a short settle window after connecting is needed
   before inviting. Inviting someone only updates the inviter's own
-  side; the invitee separately has to join the circle's topic (standing
-  in for them learning the circle's id via some real invite notification
-  or link, out of scope here) before they receive anything. A peer who
+  side; the invitee separately has to join the circle's topic. A real
+  invite notification exists now (InterpOp::CircleInviteNotify, see the
+  scenario below) telling the invitee's own client the circle id — the
+  app still has to act on it by calling open_circle, which these earlier
+  scenarios do directly to isolate the sharing guarantee from the
+  notification one. A peer who
   was never invited receives nothing readable, even if they join the
   same topic — the ciphertext reaches every subscriber, but only an
   invited member can derive the group secret to decrypt it.
@@ -147,3 +150,23 @@ Feature: Private circles let a user share an interpretation with named friends i
     When "Alice" revokes "Bob" from the circle
     And 3 seconds pass
     Then "Bob" no longer sees themself as a member of the circle
+
+  Scenario: An invited peer receives a real notification, correctly addressed
+    # Closes the gap this feature's own header used to call out of scope:
+    # the invitee previously had no in-app way to learn a circle existed
+    # at all. Carol's half of this proves the notification is genuinely
+    # addressable, not just "Bob happens to be listening": her client also
+    # receives the broadcast (it rides the always-on global topic, same as
+    # every InterpOp — no metadata-hiding here, only the circle's actual
+    # content is encrypted) but can tell from the recipient field it isn't
+    # hers. Filtering that out of her own UI is the app layer's job, not
+    # something the SDK pretends to do by hiding the event from her.
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And a peer named "Carol" connected to the network
+    And 3 seconds pass
+    And "Alice" creates a circle
+    And "Alice" invites "Bob" to the circle
+    When "Alice" notifies "Bob" of the circle invite
+    Then "Bob" observes a circle invite notification within 15 seconds
+    And "Carol" observes a circle invite notification not addressed to them within 15 seconds

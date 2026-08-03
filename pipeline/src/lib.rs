@@ -84,6 +84,17 @@ pub enum StateEvent {
         name:      String,
         timestamp: u64,
     },
+    /// Someone invited `recipient` to a circle. Every connected peer
+    /// technically receives this (it rides the same always-on global topic
+    /// as every other `InterpOp`), but only the app layer for `recipient`
+    /// should act on it — everyone else should silently ignore it, same as
+    /// they'd ignore mail addressed to someone else.
+    CircleInviteReceived {
+        op_id:     Hash,
+        inviter:   VerifyingKey,
+        circle_id: Hash,
+        recipient: VerifyingKey,
+    },
     /// Phase F-collab: a CRDT edit landed against `interp_key`.  The
     /// materialiser persists the update into the local Loro doc and updates
     /// per-block author rings.
@@ -250,6 +261,9 @@ fn materialize_interp(op_id: Hash, author: VerifyingKey, timestamp: Timestamp, i
         },
         InterpOp::SetDisplayName { name } => StateEvent::DisplayNameSet {
             op_id, by: author, name, timestamp: timestamp.into(),
+        },
+        InterpOp::CircleInviteNotify { circle_id, recipient } => StateEvent::CircleInviteReceived {
+            op_id, inviter: author, circle_id, recipient,
         },
     }
 }

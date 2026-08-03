@@ -155,6 +155,23 @@ pub enum InterpOp {
     SetDisplayName {
         name: String,
     },
+
+    /// A circle invite happened — lets the invitee's own UI show a "you've
+    /// been invited" prompt instead of requiring them to already know the
+    /// circle exists out-of-band (the real gap this closes: inviting
+    /// someone only ever updated the inviter's own side; the invitee had
+    /// no in-app way to learn about it at all). Deliberately carries no
+    /// circle name: this rides the same always-on global topic every
+    /// `InterpOp` does, which is plaintext and reaches every connected
+    /// peer — a circle's name is private and stays local-only (mirrors how
+    /// the inviter's own circle names already never leave their device).
+    /// `recipient` lets every receiver except the intended one ignore it
+    /// client-side; the circle's own encryption is what actually protects
+    /// its content regardless of who sees this notification's bytes.
+    CircleInviteNotify {
+        circle_id: Hash,
+        recipient: p2panda_core::VerifyingKey,
+    },
 }
 
 // ── DocOp (Phase F-collab) ────────────────────────────────────────────────────
@@ -370,6 +387,14 @@ mod tests {
     #[test]
     fn revoke_roundtrip() {
         let op = InterpOp::Revoke { target_log_id: sample_hash() };
+        let bytes = op.encode();
+        assert_eq!(op, InterpOp::decode(&bytes).unwrap());
+    }
+
+    #[test]
+    fn circle_invite_notify_roundtrip() {
+        let recipient = p2panda_core::SigningKey::from_bytes(&[0x42u8; 32]).verifying_key();
+        let op = InterpOp::CircleInviteNotify { circle_id: sample_hash(), recipient };
         let bytes = op.encode();
         assert_eq!(op, InterpOp::decode(&bytes).unwrap());
     }
