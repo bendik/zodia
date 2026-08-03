@@ -276,6 +276,29 @@ impl SimpleAsyncComponent for AspectView {
                 balance_group.add(&row);
             }
 
+            // Named aspect patterns — Grand Trine / T-Square — geometric
+            // configurations astrologers specifically look for, previously
+            // undetected even though every individual aspect they're built
+            // from was already computed.
+            for pattern in zodia_core::detect_patterns(&chart.natal_aspects()) {
+                let row = adw::ActionRow::new();
+                match pattern {
+                    zodia_core::ChartPattern::GrandTrine(a, b, c) => {
+                        row.set_title("Grand Trine");
+                        row.set_subtitle(&format!("{} {} {}", a.symbol(), b.symbol(), c.symbol()));
+                    }
+                    zodia_core::ChartPattern::TSquare { apex, opposition } => {
+                        row.set_title("T-Square");
+                        row.set_subtitle(&format!(
+                            "apex {}  ·  {} ☍ {}",
+                            apex.symbol(), opposition.0.symbol(), opposition.1.symbol(),
+                        ));
+                    }
+                }
+                row.set_activatable(false);
+                balance_group.add(&row);
+            }
+
             widgets.content_box.prepend(&balance_group);
 
             // "Big Three" — Sun/Moon/Ascendant signs together, the single
