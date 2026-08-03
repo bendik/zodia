@@ -243,6 +243,10 @@ pub enum AppMsg {
     InviteToCircle { id_hex: String, peer_id: PeerId, can_post: bool },
     /// Revoke button next to a member row in a circle page.
     RevokeFromCircle { id_hex: String, member_hex: String },
+    /// "Join" action on a circle-invite toast.
+    JoinCircle { circle_id: p2panda_core::Hash, inviter: p2panda_core::VerifyingKey },
+    /// User named a circle they just joined via the invite-toast flow.
+    NameJoinedCircle { id_hex: String, name: String },
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -291,6 +295,17 @@ pub struct AppModel {
     /// Set by `OpenShareToCirclePicker`; `update_view` builds + presents the
     /// dialog (it has window access, `update()` doesn't) then clears this.
     share_picker_request: RefCell<Option<(String, String)>>,
+    /// Circle invites this device is the intended recipient of, queued for
+    /// `update_view` to show as an `adw::Toast` with a "Join" action — same
+    /// `RefCell`-in-`update_view` reasoning as `pending_push_queue`.
+    /// `(inviter, circle_id)`.
+    pending_circle_invite_toasts: RefCell<Vec<(p2panda_core::VerifyingKey, p2panda_core::Hash)>>,
+    /// Set right after a successful `open_circle` (from accepting an invite
+    /// toast) so `update_view` can present a "name this circle for
+    /// yourself" dialog — the invitee has no way to know the inviter's own
+    /// local name for it, same reasoning `self.circles` being purely local
+    /// already established for the inviter's side.
+    name_circle_request: RefCell<Option<String>>,
 
     config: LocalConfig,
     /// Sender for the SetupPage child component (only used while setup is shown).
@@ -386,6 +401,9 @@ const PRESENCE_TTL_SECS: u64 = 5 * 60;
 
 #[allow(dead_code)]
 pub struct AppWidgets {
+    /// Wraps `outer_stack` so `adw::Toast`s (circle-invite notifications,
+    /// etc.) can appear over any page, not just one specific tab.
+    toast_overlay: adw::ToastOverlay,
     outer_stack: gtk::Stack,
 
     chart_container: gtk::Box,
@@ -545,6 +563,8 @@ impl AsyncComponent for AppModel {
             circles_changed_token: 0,
             pending_circle_push_queue: RefCell::new(Vec::new()),
             share_picker_request: RefCell::new(None),
+            pending_circle_invite_toasts: RefCell::new(Vec::new()),
+            name_circle_request: RefCell::new(None),
             config: init.config,
             setup_sender: None,
             notif_sender: None,
@@ -1345,6 +1365,17 @@ impl AsyncComponent for AppModel {
                             Err(e) => warn!("display name persist failed: {e}"),
                         }
                     }
+                    StateEvent::CircleInviteReceived { inviter, circle_id, recipient, .. } => {
+                        let me: [u8; 32] = self.identity.public_key();
+                        if recipient.as_bytes() == &me {
+                            self.pending_circle_invite_toasts.borrow_mut()
+                                .push((*inviter, *circle_id));
+                        }
+                        // Not addressed to us: correctly ignored, same as
+                        // mail for someone else — see the op's own doc
+                        // comment on why every connected peer technically
+                        // receives this at all.
+                    }
                 }
                 if let Some(item) = feed_item {
                     if let Some(s) = &self.feed_view_sender {
@@ -1749,8 +1780,17 @@ impl AsyncComponent for AppModel {
                     } else {
                         zodia_sdk::CircleAccess::read()
                     };
-                    if let Err(e) = client.invite_to_circle(circle_id, member, access).await {
-                        warn!("invite_to_circle: {e}");
+                    match client.invite_to_circle(circle_id, member, access).await {
+                        Ok(()) => {
+                            // Separate from invite_to_circle itself, which
+                            // only updates our own membership state — this
+                            // is what lets the invitee's own client learn
+                            // the invite happened at all.
+                            if let Err(e) = client.notify_circle_invite(circle_id, member).await {
+                                warn!("notify_circle_invite: {e}");
+                            }
+                        }
+                        Err(e) => warn!("invite_to_circle: {e}"),
                     }
                 }
                 self.refresh_circle_page(&id_hex).await;
@@ -1766,6 +1806,28 @@ impl AsyncComponent for AppModel {
                         }
                     }
                 }
+                self.refresh_circle_page(&id_hex).await;
+            }
+            AppMsg::JoinCircle { circle_id, .. } => {
+                if let Some(client) = &self.zodia_client {
+                    match client.open_circle(circle_id).await {
+                        Ok(()) => {
+                            let id_hex = hex::encode(circle_id.as_bytes());
+                            // The inviter's own name for this circle is
+                            // never synced (circle names are local-only by
+                            // design, same as the inviter's own — see
+                            // InterpOp::CircleInviteNotify's doc comment),
+                            // so we ask; update_view presents the dialog.
+                            *self.name_circle_request.borrow_mut() = Some(id_hex);
+                        }
+                        Err(e) => warn!("open_circle (from invite toast): {e}"),
+                    }
+                }
+            }
+            AppMsg::NameJoinedCircle { id_hex, name } => {
+                self.circles.insert(id_hex.clone(), name);
+                save_circles(self.config.data_dir(), &self.circles);
+                self.circles_changed_token += 1;
                 self.refresh_circle_page(&id_hex).await;
             }
         }
@@ -2149,6 +2211,28 @@ impl AsyncComponent for AppModel {
 
         if let Some((interp_key, body)) = self.share_picker_request.borrow_mut().take() {
             present_share_to_circle_picker(&widgets.split_view, &self.circles, &sender, interp_key, body);
+        }
+
+        // ── circle-invite toasts ──────────────────────────────────────────────
+
+        for (inviter, circle_id) in self.pending_circle_invite_toasts.borrow_mut().drain(..) {
+            let inviter_hex = hex::encode_upper(&inviter.as_bytes()[..4]);
+            let toast = adw::Toast::builder()
+                .title(format!("{} invited you to a circle", self.resolved_peer_name(&inviter_hex)))
+                .button_label("Join")
+                .timeout(0) // stays until dismissed or acted on — an invite shouldn't silently expire
+                .build();
+            let s = sender.clone();
+            toast.connect_button_clicked(move |_| {
+                s.input(AppMsg::JoinCircle { circle_id, inviter });
+            });
+            widgets.toast_overlay.add_toast(toast);
+        }
+
+        // ── name a circle just joined via an invite toast ─────────────────────
+
+        if let Some(id_hex) = self.name_circle_request.borrow_mut().take() {
+            present_name_circle_dialog(&widgets.split_view, &sender, id_hex);
         }
 
         // ── rebuild network view and sync page titles when content changes ────
@@ -2540,6 +2624,42 @@ fn present_share_to_circle_picker(
                     id_hex: id_hex.clone(), interp_key: interp_key.clone(), body: body.clone(),
                 });
             }
+        }
+    });
+
+    dialog.present(Some(parent));
+}
+
+/// Presented right after accepting a circle-invite toast: the inviter's own
+/// local name for the circle never syncs (see `InterpOp::CircleInviteNotify`'s
+/// doc comment), so the new member picks their own — same reasoning and
+/// dialog shape as `present_share_to_circle_picker`'s "name a new circle"
+/// entry, just without the existing-circles list.
+fn present_name_circle_dialog(
+    parent: &adw::OverlaySplitView,
+    sender: &AsyncComponentSender<AppModel>,
+    id_hex: String,
+) {
+    let dialog = adw::AlertDialog::new(Some("Name This Circle"), Some(
+        "You've joined a private circle — give it a name for your own sidebar.",
+    ));
+    dialog.add_response("cancel", "Skip");
+    dialog.add_response("name", "Save");
+    dialog.set_response_appearance("name", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("name"));
+    dialog.set_close_response("cancel");
+
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("Circle name…"));
+    dialog.set_extra_child(Some(&entry));
+
+    let s = sender.clone();
+    let e = entry.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "name" { return; }
+        let name = e.text().to_string();
+        if !name.trim().is_empty() {
+            s.input(AppMsg::NameJoinedCircle { id_hex: id_hex.clone(), name });
         }
     });
 
@@ -3045,9 +3165,13 @@ fn build_widgets(
     outer_stack.set_visible_child_name(
         if model.on_setup_page { "setup" } else { "main" }
     );
-    root.set_content(Some(&outer_stack));
+
+    let toast_overlay = adw::ToastOverlay::new();
+    toast_overlay.set_child(Some(&outer_stack));
+    root.set_content(Some(&toast_overlay));
 
     let widgets = AppWidgets {
+        toast_overlay,
         outer_stack,
         chart_container,
         sky_container,
@@ -3156,7 +3280,8 @@ fn op_id_for(ev: &StateEvent) -> [u8; 32] {
         | StateEvent::InterpAuthored { op_id, .. }
         | StateEvent::ResponseAdded { op_id, .. }
         | StateEvent::InterpRevoked { op_id, .. }
-        | StateEvent::DisplayNameSet { op_id, .. } => *op_id.as_bytes(),
+        | StateEvent::DisplayNameSet { op_id, .. }
+        | StateEvent::CircleInviteReceived { op_id, .. } => *op_id.as_bytes(),
         StateEvent::AffirmAdded { .. } | StateEvent::Skipped { .. } => [0u8; 32],
     }
 }
