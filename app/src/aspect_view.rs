@@ -258,6 +258,27 @@ impl SimpleAsyncComponent for AspectView {
             modalities_row.set_activatable(false);
             balance_group.add(&modalities_row);
 
+            // Stelliums — 3+ planets clustered in one sign or house, a
+            // well-known "concentration of emphasis" pattern with no prior
+            // home in the UI at all.
+            for (sign, planets) in zodia_core::stelliums_by_sign(&chart.positions) {
+                let name = zodia_core::interp::sign_name_lower(sign);
+                let capitalized = name.chars().next().map(|c| c.to_ascii_uppercase()).into_iter()
+                    .chain(name.chars().skip(1)).collect::<String>();
+                let row = adw::ActionRow::new();
+                row.set_title(&format!("Stellium in {capitalized}"));
+                row.set_subtitle(&planets.iter().map(|p| p.symbol()).collect::<Vec<_>>().join(" "));
+                row.set_activatable(false);
+                balance_group.add(&row);
+            }
+            for (house, planets) in zodia_core::stelliums_by_house(chart) {
+                let row = adw::ActionRow::new();
+                row.set_title(&format!("Stellium in House {house}"));
+                row.set_subtitle(&planets.iter().map(|p| p.symbol()).collect::<Vec<_>>().join(" "));
+                row.set_activatable(false);
+                balance_group.add(&row);
+            }
+
             widgets.content_box.prepend(&balance_group);
         }
 

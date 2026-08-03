@@ -9,6 +9,7 @@ pub mod houses;
 pub mod interp;
 pub mod moon_phase;
 pub mod planet;
+pub mod stellium;
 pub mod topic;
 pub mod transit;
 
@@ -25,6 +26,7 @@ pub use houses::{HouseError, HouseKind, HouseSystem};
 pub use interp::{Angle, InterpKey, InterpKind, humanize_key, parse_interp_sig};
 pub use moon_phase::{MoonPhase, phase_at as moon_phase_at, phase_from_longitudes as moon_phase_from_longitudes};
 pub use planet::{Planet, PlanetPositions};
+pub use stellium::{stelliums_by_house, stelliums_by_sign};
 pub use topic::{TopicKey, solar_longitude, solar_month, topic_key_for_interp,
                 topic_key_global, topic_keys_for_chart};
 pub use transit::{HouseTransit, TransitAspect, TransitSet, build_transit_set,
