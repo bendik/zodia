@@ -186,6 +186,21 @@ impl SimpleComponent for FeedView {
 
         let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
+        // Today's Moon phase — ambient, always-relevant astrological
+        // context that needs no natal chart at all, shown at the top of
+        // the live activity feed. Computed once at page-build time; the
+        // phase only changes over ~3.5 days so a live ticker isn't needed.
+        if let Ok(phase) = zodia_core::moon_phase_at(zodia_core::current_jdn()) {
+            let moon_label = gtk::Label::new(Some(&format!(
+                "Today: {} {}", phase.symbol(), phase.name(),
+            )));
+            moon_label.add_css_class("dim-label");
+            moon_label.add_css_class("caption");
+            moon_label.set_halign(gtk::Align::Center);
+            moon_label.set_margin_top(4);
+            container.append(&moon_label);
+        }
+
         // Category filter bar — segmented ToggleButtons (linked style).
         let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         filter_bar.add_css_class("linked");

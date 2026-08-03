@@ -64,8 +64,8 @@ pub struct AspectViewInit {
     pub items:            Vec<AspectItem>,
     /// Placement rows rendered above the aspects group (Natal only).
     pub placements_items: Vec<AspectItem>,
-    /// No longer used after PR2; kept on the type for callers' convenience.
-    #[allow(dead_code)]
+    /// Used to compute the natal Moon phase shown in the Placements
+    /// section's description (Natal only) — `None` for Synastry/Transit.
     pub chart:            Option<Rc<Chart>>,
     pub store:            ZodiaStore,
     pub baseline:         Rc<BaselineStore>,
@@ -198,6 +198,20 @@ impl SimpleAsyncComponent for AspectView {
                     for ri in p_inits { g.push_back(ri); }
                 }
                 p_rows.widget().set_title("Placements");
+                // Natal Moon phase — a real, commonly-discussed astrological
+                // data point ("born under a Full Moon") that previously had
+                // nowhere to live in the UI at all.
+                if let Some(chart) = &init.chart {
+                    if let (Some(sun), Some(moon)) = (
+                        chart.positions.get(zodia_core::Planet::Sun),
+                        chart.positions.get(zodia_core::Planet::Moon),
+                    ) {
+                        let phase = zodia_core::moon_phase_from_longitudes(sun, moon);
+                        p_rows.widget().set_description(Some(&format!(
+                            "Born under a {} {}", phase.symbol(), phase.name(),
+                        )));
+                    }
+                }
                 Some(p_rows)
             } else { None };
 

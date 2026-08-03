@@ -6,6 +6,7 @@ pub mod chart;
 pub mod ephemeris;
 pub mod houses;
 pub mod interp;
+pub mod moon_phase;
 pub mod planet;
 pub mod topic;
 pub mod transit;
@@ -20,6 +21,7 @@ pub use chart::Chart;
 pub use ephemeris::{EphemerisError, compute_positions, is_retrograde};
 pub use houses::{HouseError, HouseKind, HouseSystem};
 pub use interp::{Angle, InterpKey, InterpKind, humanize_key, parse_interp_sig};
+pub use moon_phase::{MoonPhase, phase_at as moon_phase_at, phase_from_longitudes as moon_phase_from_longitudes};
 pub use planet::{Planet, PlanetPositions};
 pub use topic::{TopicKey, solar_longitude, solar_month, topic_key_for_interp,
                 topic_key_global, topic_keys_for_chart};
