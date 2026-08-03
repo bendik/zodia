@@ -232,6 +232,35 @@ impl SimpleAsyncComponent for AspectView {
             widgets.content_box.prepend(p_rows.widget());
         }
 
+        // Elemental / modal balance — a classic natal-chart summary
+        // ("Fire-dominant", "a lot of Cardinal energy") the app never
+        // surfaced despite already deriving each planet's sign. Two plain
+        // non-interactive rows; no InterpKey plumbing needed since this is
+        // a pure derived summary, not contributable content.
+        if let Some(chart) = &init.chart {
+            let b = zodia_core::natal_balance(chart);
+            let balance_group = adw::PreferencesGroup::new();
+            balance_group.set_title("Balance");
+
+            let elements_row = adw::ActionRow::new();
+            elements_row.set_title("Elements");
+            elements_row.set_subtitle(&format!(
+                "Fire {} · Earth {} · Air {} · Water {}", b.fire, b.earth, b.air, b.water,
+            ));
+            elements_row.set_activatable(false);
+            balance_group.add(&elements_row);
+
+            let modalities_row = adw::ActionRow::new();
+            modalities_row.set_title("Modalities");
+            modalities_row.set_subtitle(&format!(
+                "Cardinal {} · Fixed {} · Mutable {}", b.cardinal, b.fixed, b.mutable,
+            ));
+            modalities_row.set_activatable(false);
+            balance_group.add(&modalities_row);
+
+            widgets.content_box.prepend(&balance_group);
+        }
+
         AsyncComponentParts { model, widgets }
     }
 

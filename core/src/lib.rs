@@ -1,4 +1,5 @@
 pub mod aspects;
+pub mod balance;
 pub mod cities;
 pub mod birth;
 pub mod calendar;
@@ -15,6 +16,7 @@ pub use cities::{CityHit, has_cities, search_cities};
 pub use aspects::{Aspect, AspectKind, AspectSet, AspectSig, SynastryAspect,
                   angular_separation, detect_aspect,
                   compute_aspects, compute_synastry};
+pub use balance::{Balance, Element, Modality, natal_balance, sign_element, sign_modality};
 pub use birth::{BirthData, birth_from_coords};
 pub use calendar::{gregorian_to_jdn, current_jdn, jdn_to_gregorian, jdn_to_display_date};
 pub use chart::Chart;
