@@ -24,6 +24,7 @@ use zodia_crypto::IdentityKeypair;
 use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
+use crate::util::lon_to_sign_deg;
 
 thread_local! {
     /// Phase F-collab: handle to the doc editor's visible TextBuffer for
@@ -300,6 +301,27 @@ impl SimpleAsyncComponent for AspectView {
             }
 
             widgets.content_box.prepend(&balance_group);
+
+            // House cusps — chart.houses.cusps was already computed for
+            // every chart but only ever consulted for a stub-detection
+            // check, never actually shown. A full 12-cusp table is a
+            // standard chart display this app never had.
+            let is_stub = chart.houses.cusps.iter().all(|&c| c == 0.0);
+            if !is_stub {
+                let houses_group = adw::PreferencesGroup::new();
+                houses_group.set_title("Houses");
+                for (i, &cusp) in chart.houses.cusps.iter().enumerate() {
+                    let (sign, deg_str) = lon_to_sign_deg(cusp);
+                    let row = adw::ActionRow::new();
+                    row.set_title(&format!("House {}", i + 1));
+                    row.set_subtitle(&format!(
+                        "{} {deg_str}", capitalize(zodia_core::interp::sign_name_lower(sign)),
+                    ));
+                    row.set_activatable(false);
+                    houses_group.add(&row);
+                }
+                widgets.content_box.prepend(&houses_group);
+            }
 
             // "Big Three" — Sun/Moon/Ascendant signs together, the single
             // most commonly asked-for at-a-glance summary in modern pop

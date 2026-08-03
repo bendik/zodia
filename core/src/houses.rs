@@ -316,6 +316,27 @@ mod tests {
         }
     }
 
+    // ── cross-system invariants ────────────────────────────────────────────────
+
+    /// House 1 starts at the Ascendant's exact degree in every
+    /// degree-based system (Placidus, Koch, Equal) — Whole Sign is the
+    /// real, deliberate exception: its houses start at the *sign
+    /// boundary* the Ascendant falls in, not its literal degree (already
+    /// covered by `whole_sign_cusps_are_multiples_of_30` below, which is
+    /// exactly why the first run of this test failed for WholeSign and
+    /// was excluded rather than "fixed" — that failure was this test's
+    /// wrong assumption, not a bug in the house computation). Worth
+    /// asserting explicitly for the other three: a UI showing a
+    /// house-cusps table needs this to hold, and nothing had checked it
+    /// directly before (only implied by other tests' passing).
+    #[test]
+    fn house_one_cusp_is_exactly_the_ascendant_in_degree_based_systems() {
+        for kind in [HouseKind::Placidus, HouseKind::Koch, HouseKind::Equal] {
+            let sys = HouseSystem::compute(&birth(2451545.0, 51.5, 0.0), kind).unwrap();
+            assert_eq!(sys.cusps[0], sys.ascendant, "{kind:?}: cusps[0] != ascendant");
+        }
+    }
+
     // ── Whole Sign ────────────────────────────────────────────────────────────
 
     #[test]
