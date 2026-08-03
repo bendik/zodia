@@ -22,17 +22,21 @@ pub fn placement_items(chart: &Chart) -> Vec<AspectItem> {
         let Some(lon) = chart.positions.get(planet) else { continue };
         let (sign_idx, deg_str) = lon_to_sign_deg(lon);
         let sign_key = InterpKey::PlacementSign { planet, sign: sign_idx };
+        // ℞ is the classical astrological retrograde glyph — shown next to
+        // any planet whose apparent motion is currently backward from
+        // Earth's vantage point (never Sun/Moon, see is_retrograde's doc).
+        let retro_suffix = if zodia_core::is_retrograde(planet, chart.birth.jdn) { " ℞" } else { "" };
 
         let mut keys = vec![KeyEntry { label: "Sign".to_string(), key: sign_key.clone() }];
         let (title, symbol_line) = if is_stub {
-            (sign_key.plain_name(),
-             format!("{} {}", planet.symbol(), sign_glyph(sign_idx)))
+            (format!("{}{retro_suffix}", sign_key.plain_name()),
+             format!("{} {}{retro_suffix}", planet.symbol(), sign_glyph(sign_idx)))
         } else {
             let house = chart.houses.house_of(lon);
             let house_key = InterpKey::PlacementHouse { planet, house };
             keys.push(KeyEntry { label: "House".to_string(), key: house_key });
-            (format!("{} · House {house}", sign_key.plain_name()),
-             format!("{} {} ⌂{}", planet.symbol(), sign_glyph(sign_idx), house))
+            (format!("{} · House {house}{retro_suffix}", sign_key.plain_name()),
+             format!("{} {} ⌂{}{retro_suffix}", planet.symbol(), sign_glyph(sign_idx), house))
         };
 
         items.push(AspectItem {

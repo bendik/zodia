@@ -85,3 +85,85 @@ fn moon_longitude(d: f64) -> f64 {
     (l + 6.289 * m.sin() - 1.274 * (m - 2.0 * f).sin() + 0.658 * (2.0 * f).sin())
         .rem_euclid(360.0)
 }
+
+/// Whether `planet` appears to be moving backward (retrograde) through the
+/// zodiac at `jdn`, from Earth's point of view. Sun and Moon are never
+/// retrograde in geocentric astrology — real bodies orbiting Earth-ward
+/// don't loop the way outer/inner planets do from our vantage point — so
+/// this always returns `false` for them without sampling.
+///
+/// Detected numerically: sign of the one-day-back longitude delta, handling
+/// the 0°/360° wraparound. No analytic velocity term exists per-body in this
+/// simplified model, and a numerical derivative is exact enough at orbital
+/// timescales (a day is minutes of arc, not a full cycle, for every body
+/// this app tracks).
+pub fn is_retrograde(planet: crate::planet::Planet, jdn: f64) -> bool {
+    use crate::planet::Planet;
+    if matches!(planet, Planet::Sun | Planet::Moon) {
+        return false;
+    }
+    let Ok(now) = compute_positions(jdn) else { return false };
+    let Ok(yesterday) = compute_positions(jdn - 1.0) else { return false };
+    let (Some(lon_now), Some(lon_prev)) = (now.get(planet), yesterday.get(planet)) else {
+        return false;
+    };
+    let mut delta = lon_now - lon_prev;
+    if delta > 180.0 { delta -= 360.0; }
+    if delta < -180.0 { delta += 360.0; }
+    delta < 0.0
+}
+
+#[cfg(test)]
+mod retrograde_tests {
+    use super::*;
+    use crate::planet::Planet;
+
+    /// Real invariant, not a model artifact: geocentric astrology never
+    /// treats the Sun or Moon as retrograde, regardless of date.
+    #[test]
+    fn sun_and_moon_are_never_retrograde() {
+        // Sample across a full year so this isn't true only by luck of one date.
+        for i in 0..365 {
+            let jdn = 2460676.5 + i as f64;
+            assert!(!is_retrograde(Planet::Sun, jdn), "Sun retrograde at jdn {jdn}");
+            assert!(!is_retrograde(Planet::Moon, jdn), "Moon retrograde at jdn {jdn}");
+        }
+    }
+
+    /// Mercury retrogrades roughly 3-4 times a year for ~3 weeks each in
+    /// reality — a well-known astrological fact independent of this app's
+    /// simplified ephemeris precision. Assert the shape of that (goes
+    /// retrograde AND direct within a year), not exact real-world dates,
+    /// since this model isn't arcsecond-precise.
+    #[test]
+    fn mercury_goes_both_retrograde_and_direct_within_a_year() {
+        let mut saw_retrograde = false;
+        let mut saw_direct = false;
+        for i in 0..365 {
+            let jdn = 2460676.5 + i as f64;
+            if is_retrograde(Planet::Mercury, jdn) { saw_retrograde = true; }
+            else { saw_direct = true; }
+        }
+        assert!(saw_retrograde, "Mercury never appeared retrograde across a full year");
+        assert!(saw_direct, "Mercury never appeared direct across a full year");
+    }
+
+    /// Outer planets spend meaningfully more of the year retrograde than
+    /// Mercury does, since Earth "laps" them annually rather than them
+    /// completing an inner orbit — a basic, well-known orbital-mechanics
+    /// fact this numeric derivative should reproduce.
+    #[test]
+    fn outer_planets_retrograde_more_of_the_year_than_mercury() {
+        let retro_days = |planet: Planet| -> u32 {
+            (0..365).filter(|&i| is_retrograde(planet, 2460676.5 + i as f64)).count() as u32
+        };
+        let mercury_days = retro_days(Planet::Mercury);
+        for &outer in &[Planet::Jupiter, Planet::Saturn, Planet::Uranus, Planet::Neptune, Planet::Pluto] {
+            assert!(
+                retro_days(outer) > mercury_days,
+                "{outer:?} retrograde {} days, expected more than Mercury's {mercury_days}",
+                retro_days(outer),
+            );
+        }
+    }
+}
