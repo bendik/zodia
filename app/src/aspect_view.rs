@@ -262,11 +262,8 @@ impl SimpleAsyncComponent for AspectView {
             // well-known "concentration of emphasis" pattern with no prior
             // home in the UI at all.
             for (sign, planets) in zodia_core::stelliums_by_sign(&chart.positions) {
-                let name = zodia_core::interp::sign_name_lower(sign);
-                let capitalized = name.chars().next().map(|c| c.to_ascii_uppercase()).into_iter()
-                    .chain(name.chars().skip(1)).collect::<String>();
                 let row = adw::ActionRow::new();
-                row.set_title(&format!("Stellium in {capitalized}"));
+                row.set_title(&format!("Stellium in {}", capitalize(zodia_core::interp::sign_name_lower(sign))));
                 row.set_subtitle(&planets.iter().map(|p| p.symbol()).collect::<Vec<_>>().join(" "));
                 row.set_activatable(false);
                 balance_group.add(&row);
@@ -280,6 +277,25 @@ impl SimpleAsyncComponent for AspectView {
             }
 
             widgets.content_box.prepend(&balance_group);
+
+            // "Big Three" — Sun/Moon/Ascendant signs together, the single
+            // most commonly asked-for at-a-glance summary in modern pop
+            // astrology. Every value already existed separately (Sun/Moon
+            // from placements, Ascendant from houses) with nowhere
+            // combining them into one headline. Placed above everything
+            // else via this second prepend.
+            if let Some(bt) = chart.big_three() {
+                let big_three_label = gtk::Label::new(Some(&format!(
+                    "☉ {}  ·  ☽ {}  ·  ASC {}",
+                    capitalize(zodia_core::interp::sign_name_lower(bt.sun_sign)),
+                    capitalize(zodia_core::interp::sign_name_lower(bt.moon_sign)),
+                    capitalize(zodia_core::interp::sign_name_lower(bt.ascendant_sign)),
+                )));
+                big_three_label.add_css_class("title-4");
+                big_three_label.set_halign(gtk::Align::Center);
+                big_three_label.set_margin_bottom(4);
+                widgets.content_box.prepend(&big_three_label);
+            }
         }
 
         AsyncComponentParts { model, widgets }
@@ -738,6 +754,16 @@ fn relative_age(unix: u64) -> String {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// "aries" → "Aries" — `sign_name_lower` is deliberately lowercase for
+/// mid-sentence use elsewhere; UI labels here want it capitalized standalone.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 /// Best interpretation text for `key`: community DB result first, baseline fallback.
 async fn resolve_top_body(store: &ZodiaStore, baseline: &BaselineStore, key: &InterpKey) -> String {

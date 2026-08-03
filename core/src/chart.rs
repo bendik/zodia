@@ -3,9 +3,24 @@ use crate::birth::BirthData;
 use crate::ephemeris::{EphemerisError, compute_positions};
 use crate::houses::{HouseKind, HouseSystem};
 use crate::interp::InterpKey;
-use crate::planet::PlanetPositions;
+use crate::planet::{Planet, PlanetPositions};
 use crate::transit::{TransitSet, build_transit_set};
 use serde::{Deserialize, Serialize};
+
+/// Sign indices (0 = Aries … 11 = Pisces) for the "Big Three" — Sun, Moon,
+/// and Ascendant — the single most commonly asked-for at-a-glance summary
+/// in modern pop astrology, despite every value it needs already being
+/// computed for placements/houses separately with nowhere combining them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BigThree {
+    pub sun_sign:       u8,
+    pub moon_sign:      u8,
+    pub ascendant_sign: u8,
+}
+
+fn sign_of(lon: f64) -> u8 {
+    (lon.rem_euclid(360.0) / 30.0).floor() as u8 % 12
+}
 
 /// A fully computed natal chart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,5 +91,51 @@ impl Chart {
             .map(|(planet, house)| crate::transit::HouseTransit { transiting: planet, house })
             .collect();
         Ok(build_transit_set(transit_jdn, sky, &self.positions, house_transits))
+    }
+
+    // ── summary ──────────────────────────────────────────────────────────────
+
+    /// Sun sign, Moon sign, and Ascendant sign — `None` only if Sun or Moon
+    /// is somehow missing from `positions` (shouldn't happen for a chart
+    /// that computed successfully; Ascendant always has a value, real or stub).
+    pub fn big_three(&self) -> Option<BigThree> {
+        let sun  = self.positions.get(Planet::Sun)?;
+        let moon = self.positions.get(Planet::Moon)?;
+        Some(BigThree {
+            sun_sign:       sign_of(sun),
+            moon_sign:      sign_of(moon),
+            ascendant_sign: sign_of(self.houses.ascendant),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn big_three_pulls_the_right_body_into_the_right_field() {
+        // The real bug class this guards against: three near-identical
+        // longitude lookups where copy-paste swaps which field gets which
+        // body. Uses three longitudes in three different, easily
+        // distinguished signs so a swap would be caught immediately.
+        let birth = crate::birth::birth_from_coords(2_451_545.0, 59.9, 10.7, 9);
+        let mut chart = Chart::compute(birth).expect("chart computes");
+        chart.positions.0.insert(Planet::Sun, 10.0);   // Aries
+        chart.positions.0.insert(Planet::Moon, 100.0); // Cancer
+        chart.houses.ascendant = 190.0;                // Libra
+
+        let bt = chart.big_three().expect("sun and moon are present");
+        assert_eq!(bt.sun_sign, 0);
+        assert_eq!(bt.moon_sign, 3);
+        assert_eq!(bt.ascendant_sign, 6);
+    }
+
+    #[test]
+    fn big_three_is_none_without_sun_or_moon() {
+        let birth = crate::birth::birth_from_coords(2_451_545.0, 59.9, 10.7, 9);
+        let mut chart = Chart::compute(birth).expect("chart computes");
+        chart.positions.0.remove(&Planet::Moon);
+        assert!(chart.big_three().is_none());
     }
 }
