@@ -75,6 +75,13 @@ impl AspectKind {
             Self::Opposition  => "opposition",
         }
     }
+
+    /// Every aspect kind this app recognizes, in the same canonical order
+    /// as detection — for UIs that need to enumerate them (e.g. a glyph
+    /// legend), rather than duplicating the variant list.
+    pub fn all() -> &'static [AspectKind] {
+        ASPECTS
+    }
 }
 
 const ASPECTS: &[AspectKind] = &[
@@ -188,4 +195,19 @@ pub fn compute_synastry(a: &PlanetPositions, b: &PlanetPositions) -> Vec<Synastr
 fn sorted_names(a: Planet, b: Planet) -> (&'static str, &'static str) {
     let (na, nb) = (a.name(), b.name());
     if na <= nb { (na, nb) } else { (nb, na) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_lists_every_aspect_kind_exactly_once_with_a_distinct_angle() {
+        let all = AspectKind::all();
+        assert_eq!(all.len(), 7, "expected all 7 classical/modern aspect kinds");
+        let mut angles: Vec<f64> = all.iter().map(|k| k.angle()).collect();
+        angles.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        angles.dedup();
+        assert_eq!(angles.len(), 7, "two aspect kinds share an angle — a real detection bug");
+    }
 }

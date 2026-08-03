@@ -3434,10 +3434,108 @@ fn make_tab_toolbar(title: &str, body: &impl IsA<gtk::Widget>) -> (adw::ToolbarV
     #[cfg(target_os = "macos")]
     header.pack_end(&sidebar_btn);
 
+    // Glyph legend — every tab shows dense astrological symbols with no
+    // explanation anywhere, a real barrier for anyone not already fluent
+    // in astrology notation. Same dialog from every tab, not duplicated
+    // per-page content.
+    relm4::view! {
+        help_btn = gtk::Button {
+            set_icon_name: "help-about-symbolic",
+            set_tooltip_text: Some("Glyph legend"),
+        }
+    }
+    {
+        let parent = header.clone();
+        help_btn.connect_clicked(move |_| present_glyph_legend(&parent));
+    }
+    header.pack_end(&help_btn);
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(body));
     (toolbar, sidebar_btn)
+}
+
+/// A dialog explaining every glyph used across the app — planet symbols,
+/// zodiac signs, aspect symbols, plus the retrograde and Moon-phase marks
+/// added alongside them. Pulls from the same `Planet`/`AspectKind`/sign
+/// enumeration helpers the rest of the UI uses, so it can't silently drift
+/// out of sync with what's actually shown (e.g. a newly added aspect kind
+/// shows up here automatically via `AspectKind::all()`).
+fn present_glyph_legend(parent: &impl IsA<gtk::Widget>) {
+    let dialog = adw::AlertDialog::new(Some("Glyph Legend"), None);
+    dialog.add_response("close", "Close");
+    dialog.set_default_response(Some("close"));
+    dialog.set_close_response("close");
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(4);
+
+    let planets_group = adw::PreferencesGroup::new();
+    planets_group.set_title("Planets");
+    for &planet in zodia_core::Planet::all() {
+        let row = adw::ActionRow::new();
+        row.set_title(planet.symbol());
+        row.set_subtitle(&capitalize_word(planet.name()));
+        planets_group.add(&row);
+    }
+    content.append(&planets_group);
+
+    let signs_group = adw::PreferencesGroup::new();
+    signs_group.set_title("Signs");
+    for sign in 0u8..12 {
+        let row = adw::ActionRow::new();
+        row.set_title(sign_glyph(sign));
+        row.set_subtitle(&capitalize_word(zodia_core::interp::sign_name_lower(sign)));
+        signs_group.add(&row);
+    }
+    content.append(&signs_group);
+
+    let aspects_group = adw::PreferencesGroup::new();
+    aspects_group.set_title("Aspects");
+    for &kind in zodia_core::AspectKind::all() {
+        let row = adw::ActionRow::new();
+        row.set_title(kind.symbol());
+        row.set_subtitle(&capitalize_word(kind.display_name()));
+        aspects_group.add(&row);
+    }
+    content.append(&aspects_group);
+
+    let other_group = adw::PreferencesGroup::new();
+    other_group.set_title("Other Marks");
+    let retro_row = adw::ActionRow::new();
+    retro_row.set_title("℞");
+    retro_row.set_subtitle("Retrograde — apparent backward motion from Earth's vantage point");
+    other_group.add(&retro_row);
+    for phase in [
+        zodia_core::MoonPhase::New, zodia_core::MoonPhase::WaxingCrescent,
+        zodia_core::MoonPhase::FirstQuarter, zodia_core::MoonPhase::WaxingGibbous,
+        zodia_core::MoonPhase::Full, zodia_core::MoonPhase::WaningGibbous,
+        zodia_core::MoonPhase::LastQuarter, zodia_core::MoonPhase::WaningCrescent,
+    ] {
+        let row = adw::ActionRow::new();
+        row.set_title(phase.symbol());
+        row.set_subtitle(phase.name());
+        other_group.add(&row);
+    }
+    content.append(&other_group);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_height(320);
+    scroll.set_max_content_height(480);
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_child(Some(&content));
+    dialog.set_extra_child(Some(&scroll));
+
+    dialog.present(Some(parent));
+}
+
+fn capitalize_word(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 #[allow(clippy::type_complexity)]
