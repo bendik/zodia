@@ -88,6 +88,13 @@
   </supports>
 
   <releases>
+    <release version="0.10.0" date="2026-08-04">
+      <description>
+        <p>Your natal chart now surfaces a lot it was quietly computing but never showing: retrograde planets (℞), your Moon phase (natal and today's live phase on the Sky tab), an elemental/modal balance summary, stelliums, Grand Trine and T-Square detection, a full house-cusps table, critical (29°) degree markers, and a "Big Three" headline at the top of the Chart tab. A new "?" button on every tab explains every glyph the app uses.</p>
+        <p>Inviting someone to a circle now actually tells them — a real in-app notification with a Join action, instead of requiring the invitee to already know the circle existed. Circles also have a proper "Share" button directly on every reading now, not just a small icon that only appeared once something showed up in the Sky feed.</p>
+        <p>Fixed a real bug where affirming (♡) someone's reading never correctly notified them for the current collaborative-doc model — the bell/feed targeting was silently broken for every edit made since the 0.9 sync rearchitecture.</p>
+      </description>
+    </release>
     <release version="0.9.3" date="2026-08-03">
       <description><p>A "Share to a circle" button now lives directly on every reading, not just as a small icon on its Sky feed card once one happened to appear there. Onboarding now asks for a display name up front. Renamed "Start discussion" to "Talk about this" to stop it reading as the same feature as private circles — they're unrelated (one's a voice room, the other's encrypted sharing). It also now tells you when nobody else is around to talk to, instead of doing nothing.</p></description>
     </release>
