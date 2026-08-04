@@ -243,6 +243,10 @@ pub enum AppMsg {
     InviteToCircle { id_hex: String, peer_id: PeerId, can_post: bool },
     /// Revoke button next to a member row in a circle page.
     RevokeFromCircle { id_hex: String, member_hex: String },
+    /// "Leave circle" button on this device's own member row, confirmed
+    /// via `present_leave_circle_confirm` — a member removing themself
+    /// rather than an owner revoking someone else's access.
+    LeaveCircle { id_hex: String },
     /// "Join" action on a circle-invite toast.
     JoinCircle { circle_id: p2panda_core::Hash, inviter: p2panda_core::VerifyingKey },
     /// User named a circle they just joined via the invite-toast flow.
@@ -311,6 +315,11 @@ pub struct AppModel {
     /// local name for it, same reasoning `self.circles` being purely local
     /// already established for the inviter's side.
     name_circle_request: RefCell<Option<String>>,
+    /// Circle ids this device just left (via `LeaveCircle`), queued for
+    /// `update_view` to drop the now-stale page from `content_stack` and
+    /// navigate away if it was the visible child — same `RefCell`-in-
+    /// `update_view` reasoning as `pending_circle_push_queue`.
+    pending_circle_leaves: RefCell<Vec<String>>,
 
     config: LocalConfig,
     /// Sender for the SetupPage child component (only used while setup is shown).
@@ -571,6 +580,7 @@ impl AsyncComponent for AppModel {
             pending_circle_invite_toasts: RefCell::new(Vec::new()),
             pending_affirm_toasts: RefCell::new(Vec::new()),
             name_circle_request: RefCell::new(None),
+            pending_circle_leaves: RefCell::new(Vec::new()),
             config: init.config,
             setup_sender: None,
             notif_sender: None,
@@ -1827,6 +1837,20 @@ impl AsyncComponent for AppModel {
                 }
                 self.refresh_circle_page(&id_hex).await;
             }
+            AppMsg::LeaveCircle { id_hex } => {
+                if let (Some(client), Ok(circle_id)) = (&self.zodia_client, decode_circle_id(&id_hex)) {
+                    let me = p2panda_core::VerifyingKey::from_bytes(&self.identity.public_key());
+                    if let Ok(me) = me {
+                        if let Err(e) = client.revoke_from_circle(circle_id, me).await {
+                            warn!("revoke_from_circle (leave): {e}");
+                        }
+                    }
+                }
+                self.circles.remove(&id_hex);
+                save_circles(self.config.data_dir(), &self.circles);
+                self.circles_changed_token += 1;
+                self.pending_circle_leaves.borrow_mut().push(id_hex);
+            }
             AppMsg::JoinCircle { circle_id, .. } => {
                 if let Some(client) = &self.zodia_client {
                     match client.open_circle(circle_id).await {
@@ -2199,10 +2223,11 @@ impl AsyncComponent for AppModel {
                     let tag = hex::encode_upper(&vk.as_bytes()[..4]);
                     let label = self.resolved_peer_name(&tag);
                     crate::circle_page::CirclePageMember {
-                        pubkey_hex, label, access: format!("{access}"),
+                        pubkey_hex, label, access: format!("{access}"), is_manage: access.is_manage(),
                     }
                 })
                 .collect();
+            let me_pubkey_hex = hex::encode(self.identity.public_key());
             let known_peers: Vec<crate::circle_page::CirclePagePeer> = self.stargazers.values()
                 .filter(|sg| matches!(sg.state, StargazerState::Connected { .. }))
                 .filter(|sg| !member_hexes.contains(&hex::encode(sg.peer_id.0)))
@@ -2217,12 +2242,25 @@ impl AsyncComponent for AppModel {
                 widgets.content_stack.remove(&old);
             }
             let page = crate::circle_page::build_circle_page(
-                &id_hex, name, &page_members, &known_peers, &sender, &widgets.split_view,
+                &id_hex, name, &page_members, &known_peers, &me_pubkey_hex, &sender, &widgets.split_view,
             );
             widgets.content_stack.add_named(&page, Some(&id_hex));
             widgets.content_stack.set_visible_child_name(&id_hex);
             if let Some(s) = &self.sidebar_sender {
                 let _ = s.send(crate::sidebar::SidebarMsg::UnselectNav);
+            }
+        }
+
+        // ── circle pages: drop the page for any circle we just left ────────────
+
+        for id_hex in self.pending_circle_leaves.borrow_mut().drain(..) {
+            if let Some(old) = widgets.content_stack.child_by_name(&id_hex) {
+                let was_visible = widgets.content_stack.visible_child_name()
+                    .is_some_and(|n| n == id_hex);
+                widgets.content_stack.remove(&old);
+                if was_visible {
+                    widgets.content_stack.set_visible_child_name("chart");
+                }
             }
         }
 

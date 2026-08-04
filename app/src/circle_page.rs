@@ -64,6 +64,7 @@ pub struct CirclePageMember {
     pub pubkey_hex: String,
     pub label:      String,
     pub access:     String,
+    pub is_manage:  bool,
 }
 
 /// A known network peer this device could invite (not already a member).
@@ -72,14 +73,49 @@ pub struct CirclePagePeer {
     pub label:   String,
 }
 
+/// Confirm before leaving — reversible in principle (the owner can
+/// re-invite) but losing access to future shares isn't obvious from a
+/// single click, so it gets the same destructive-confirm treatment as
+/// other hard-to-undo actions.
+fn present_leave_circle_confirm(
+    parent:     &adw::OverlaySplitView,
+    sender:     &AsyncComponentSender<AppModel>,
+    id_hex:     &str,
+    circle_name: &str,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some("Leave Circle?"),
+        Some(&format!(
+            "You'll stop receiving new shares in \"{circle_name}\". \
+             You can be invited back later.",
+        )),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("leave", "Leave");
+    dialog.set_response_appearance("leave", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let s = sender.clone();
+    let id_hex_owned = id_hex.to_string();
+    dialog.connect_response(None, move |_, response| {
+        if response == "leave" {
+            s.input(AppMsg::LeaveCircle { id_hex: id_hex_owned.clone() });
+        }
+    });
+
+    dialog.present(Some(parent));
+}
+
 /// Build the `adw::ToolbarView` for one circle.
 pub fn build_circle_page(
-    id_hex:      &str,
-    name:        &str,
-    members:     &[CirclePageMember],
-    known_peers: &[CirclePagePeer],
-    sender:      &AsyncComponentSender<AppModel>,
-    split_view:  &adw::OverlaySplitView,
+    id_hex:         &str,
+    name:           &str,
+    members:        &[CirclePageMember],
+    known_peers:    &[CirclePagePeer],
+    me_pubkey_hex:  &str,
+    sender:         &AsyncComponentSender<AppModel>,
+    split_view:     &adw::OverlaySplitView,
 ) -> adw::ToolbarView {
     relm4::view! {
         sidebar_btn = gtk::Button {
@@ -125,26 +161,55 @@ pub fn build_circle_page(
     members_group.set_description(Some(&format!(
         "{n} member{}", if n == 1 { "" } else { "s" }
     )));
+    // Only a manager can revoke someone ELSE's access (the backend enforces
+    // this too — see p2panda-auth's `remove()` — but hiding the button
+    // avoids a dead-end click for read/write members who can't use it).
+    let i_am_manager = members.iter()
+        .find(|m| m.pubkey_hex == me_pubkey_hex)
+        .is_some_and(|m| m.is_manage);
     for member in members {
+        let is_me = member.pubkey_hex == me_pubkey_hex;
+
         let row = adw::ActionRow::new();
-        row.set_title(&member.label);
+        row.set_title(&if is_me { format!("{} (You)", member.label) } else { member.label.clone() });
         row.set_subtitle(&member.access);
         row.set_activatable(false);
 
-        let revoke_btn = gtk::Button::from_icon_name("user-trash-symbolic");
-        revoke_btn.set_tooltip_text(Some("Revoke access"));
-        revoke_btn.add_css_class("flat");
-        revoke_btn.add_css_class("circular");
-        revoke_btn.set_valign(gtk::Align::Center);
-        let s = sender.clone();
-        let id_hex_owned = id_hex.to_string();
-        let member_hex = member.pubkey_hex.clone();
-        revoke_btn.connect_clicked(move |_| {
-            s.input(AppMsg::RevokeFromCircle {
-                id_hex: id_hex_owned.clone(), member_hex: member_hex.clone(),
+        if is_me {
+            // Leaving as the sole manager would orphan the circle (nobody
+            // left who could invite/revoke), so that path isn't offered
+            // here — only non-owner members get a self-service way out.
+            if !member.is_manage {
+                let leave_btn = gtk::Button::from_icon_name("system-log-out-symbolic");
+                leave_btn.set_tooltip_text(Some("Leave circle"));
+                leave_btn.add_css_class("flat");
+                leave_btn.add_css_class("circular");
+                leave_btn.set_valign(gtk::Align::Center);
+                let s = sender.clone();
+                let id_hex_owned = id_hex.to_string();
+                let name_owned = name.to_string();
+                let split_view_owned = split_view.clone();
+                leave_btn.connect_clicked(move |_| {
+                    present_leave_circle_confirm(&split_view_owned, &s, &id_hex_owned, &name_owned);
+                });
+                row.add_suffix(&leave_btn);
+            }
+        } else if i_am_manager {
+            let revoke_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+            revoke_btn.set_tooltip_text(Some("Revoke access"));
+            revoke_btn.add_css_class("flat");
+            revoke_btn.add_css_class("circular");
+            revoke_btn.set_valign(gtk::Align::Center);
+            let s = sender.clone();
+            let id_hex_owned = id_hex.to_string();
+            let member_hex = member.pubkey_hex.clone();
+            revoke_btn.connect_clicked(move |_| {
+                s.input(AppMsg::RevokeFromCircle {
+                    id_hex: id_hex_owned.clone(), member_hex: member_hex.clone(),
+                });
             });
-        });
-        row.add_suffix(&revoke_btn);
+            row.add_suffix(&revoke_btn);
+        }
         members_group.add(&row);
     }
     content_box.append(&members_group);
