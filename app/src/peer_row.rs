@@ -35,6 +35,7 @@ pub struct PeerRowInit {
     pub dot_rgba:     [f32; 4],
     pub unread:       usize,
     pub nickname:     String,
+    pub is_muted:     bool,
 }
 
 impl std::fmt::Debug for PeerRowInit {
@@ -55,6 +56,7 @@ pub enum PeerRowOut {
     Activate(PeerId),
     Remove(PeerId),
     SetNickname { peer_id: PeerId, name: String },
+    ToggleMute(PeerId),
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -69,6 +71,7 @@ pub struct PeerRow {
     pub dot_filled:    bool,
     pub dot_rgba:      [f32; 4],
     pub unread:        usize,
+    pub is_muted:      bool,
     /// Live gate read by the activation GestureClick closure.
     is_connected_cell: Rc<Cell<bool>>,
     /// Live nickname read by the dialog when the user opens it.
@@ -83,6 +86,7 @@ pub struct PeerRowWidgets {
     label:      gtk::Label,
     badge:      gtk::Label,
     edit_img:   gtk::Image,
+    mute_btn:   gtk::Button,
     remove_btn: gtk::Button,
 }
 
@@ -142,6 +146,7 @@ impl FactoryComponent for PeerRow {
             dot_filled:   init.dot_filled,
             dot_rgba:     init.dot_rgba,
             unread:       init.unread,
+            is_muted:     init.is_muted,
         }
     }
 
@@ -205,6 +210,20 @@ impl FactoryComponent for PeerRow {
                         set_valign: gtk::Align::Center,
                         set_tooltip_text: Some("Set nickname"),
                         set_visible: self.is_connected,
+                    },
+
+                    #[name(mute_btn)]
+                    gtk::Button {
+                        set_icon_name: "action-unavailable-symbolic",
+                        add_css_class: "flat",
+                        add_css_class: "circular",
+                        set_valign: gtk::Align::Center,
+                        set_visible: self.is_connected,
+                        set_opacity: if self.is_muted { 1.0 } else { 0.35 },
+                        set_tooltip_text: Some(if self.is_muted { "Unmute" } else { "Mute" }),
+                        connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
+                            let _ = sender.output(PeerRowOut::ToggleMute(peer_id.clone()));
+                        },
                     },
 
                     #[name(remove_btn)]
@@ -299,6 +318,7 @@ impl FactoryComponent for PeerRow {
             label,
             badge,
             edit_img,
+            mute_btn,
             remove_btn,
         }
     }
@@ -315,6 +335,7 @@ impl FactoryComponent for PeerRow {
         self.dot_filled   = init.dot_filled;
         self.dot_rgba     = init.dot_rgba;
         self.unread       = init.unread;
+        self.is_muted     = init.is_muted;
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: FactorySender<Self>) {
@@ -323,7 +344,7 @@ impl FactoryComponent for PeerRow {
         widgets.row.set_activatable(self.is_connected);
 
         widgets.label.set_text(&label_text(self.solar_month, &self.display_name));
-        if self.is_pending {
+        if self.is_pending || self.is_muted {
             widgets.label.add_css_class("dim-label");
         } else {
             widgets.label.remove_css_class("dim-label");
@@ -335,6 +356,9 @@ impl FactoryComponent for PeerRow {
         }
 
         widgets.edit_img.set_visible(self.is_connected);
+        widgets.mute_btn.set_visible(self.is_connected);
+        widgets.mute_btn.set_opacity(if self.is_muted { 1.0 } else { 0.35 });
+        widgets.mute_btn.set_tooltip_text(Some(if self.is_muted { "Unmute" } else { "Mute" }));
         widgets.remove_btn.set_visible(self.is_pending);
 
         // Re-set draw func so the closure captures fresh colour state.

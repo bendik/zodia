@@ -202,6 +202,27 @@ impl FeedItem {
     }
 }
 
+// ── muting ────────────────────────────────────────────────────────────────────
+
+/// Whether `event` should be dropped entirely — not persisted to the local
+/// store, not surfaced in the feed — because the peer responsible for it is
+/// muted.
+///
+/// Scoped deliberately to just the "social" events (new readings, replies,
+/// hearts): the ones that make a muted peer's noise show up in your feed.
+/// Collaborative-doc mechanics (`DocEdited`, `DocVetoProposed`, ...),
+/// display names, and circle invites always apply regardless of mute —
+/// silencing someone's chatter shouldn't corrupt a shared document you're
+/// both editing or hide a functional message addressed to you.
+pub fn is_muted_social_event(event: &StateEvent, muted: &std::collections::HashSet<[u8; 32]>) -> bool {
+    match event {
+        StateEvent::InterpAuthored { author, .. } => muted.contains(author.as_bytes()),
+        StateEvent::AffirmAdded { voter, .. } => muted.contains(voter.as_bytes()),
+        StateEvent::ResponseAdded { author, .. } => muted.contains(author.as_bytes()),
+        _ => false,
+    }
+}
+
 // ── conversions ───────────────────────────────────────────────────────────────
 
 /// Convert a pipeline `StateEvent` into a `FeedItem`.  The caller supplies
@@ -369,5 +390,71 @@ mod tests {
             },
         };
         assert_eq!(item.interp_key(), Some("transit:venus_trine_sun"));
+    }
+
+    fn key(byte: u8) -> VerifyingKey {
+        VerifyingKey::try_from([byte; 32].as_slice()).expect("valid key")
+    }
+
+    fn hash(byte: u8) -> p2panda_core::Hash {
+        p2panda_core::Hash::from_bytes([byte; 32])
+    }
+
+    #[test]
+    fn muted_author_suppresses_authored_reading() {
+        let bob = key(0xBB);
+        let muted = std::collections::HashSet::from([*bob.as_bytes()]);
+        let event = StateEvent::InterpAuthored {
+            op_id: hash(1), author: bob,
+            interp_key: "natal:sun_trine_moon".into(), body: "...".into(),
+        };
+        assert!(is_muted_social_event(&event, &muted));
+    }
+
+    #[test]
+    fn unmuted_author_is_not_suppressed() {
+        let alice = key(0xAA);
+        let muted = std::collections::HashSet::from([*key(0xBB).as_bytes()]);
+        let event = StateEvent::InterpAuthored {
+            op_id: hash(1), author: alice,
+            interp_key: "natal:sun_trine_moon".into(), body: "...".into(),
+        };
+        assert!(!is_muted_social_event(&event, &muted));
+    }
+
+    #[test]
+    fn muted_voter_suppresses_affirmation() {
+        let bob = key(0xBB);
+        let muted = std::collections::HashSet::from([*bob.as_bytes()]);
+        let event = StateEvent::AffirmAdded { target_log_id: hash(1), voter: bob };
+        assert!(is_muted_social_event(&event, &muted));
+    }
+
+    #[test]
+    fn muted_responder_suppresses_reply() {
+        let bob = key(0xBB);
+        let muted = std::collections::HashSet::from([*bob.as_bytes()]);
+        let event = StateEvent::ResponseAdded {
+            op_id: hash(1), author: bob, parent_log_id: hash(2), body: "...".into(),
+        };
+        assert!(is_muted_social_event(&event, &muted));
+    }
+
+    #[test]
+    fn mute_never_suppresses_display_name_or_doc_events() {
+        // Muting someone's chatter shouldn't hide a functional message
+        // (their name) or corrupt a shared document you're both editing.
+        let bob = key(0xBB);
+        let muted = std::collections::HashSet::from([*bob.as_bytes()]);
+        let name_event = StateEvent::DisplayNameSet {
+            op_id: hash(1), by: bob, name: "Bobby".into(), timestamp: 0,
+        };
+        assert!(!is_muted_social_event(&name_event, &muted));
+
+        let doc_event = StateEvent::DocEdited {
+            op_id: hash(1), by: bob, interp_key: "natal:sun_trine_moon".into(),
+            base_rev: hash(2), crdt_update: vec![], affected_blocks: vec![], timestamp: 0,
+        };
+        assert!(!is_muted_social_event(&doc_event, &muted));
     }
 }

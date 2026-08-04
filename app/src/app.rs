@@ -135,6 +135,11 @@ pub enum AppMsg {
     SendViaRelay { relay: PeerId, dest: PeerId, text: String },
     /// User set or updated a nickname for a connected peer.
     SetNickname { peer_id: PeerId, name: String },
+    /// Mute button on a connected peer's sidebar row — toggles whether
+    /// their social activity (new readings, replies, hearts) is dropped
+    /// before it reaches the local store or feed. See
+    /// `feed_item::is_muted_social_event`.
+    ToggleMutePeer(PeerId),
     /// User set (or cleared, if empty) their own broadcast display name.
     SetOwnDisplayName(String),
     /// "+" on a discovered peer — immediately enters OutgoingPending and starts connecting.
@@ -320,6 +325,12 @@ pub struct AppModel {
     /// navigate away if it was the visible child — same `RefCell`-in-
     /// `update_view` reasoning as `pending_circle_push_queue`.
     pending_circle_leaves: RefCell<Vec<String>>,
+    /// Peers whose social activity (new readings, replies, hearts) is
+    /// dropped before it ever reaches the local store or feed — loaded
+    /// once at startup and kept in sync with `muted_peers` on every
+    /// `MutePeer`/`UnmutePeer`, so the hot `SyncStateEvent` path never
+    /// awaits a DB round-trip. See `feed_item::is_muted_social_event`.
+    muted_peers: RefCell<std::collections::HashSet<[u8; 32]>>,
 
     config: LocalConfig,
     /// Sender for the SetupPage child component (only used while setup is shown).
@@ -504,6 +515,10 @@ impl AsyncComponent for AppModel {
             Err(e) => warn!("scrub_baseline failed: {e}"),
         }
         let baseline = Rc::new(init.baseline);
+        let muted_peers: std::collections::HashSet<[u8; 32]> = store.muted_peers().await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         let stargazer_nicknames = load_nicknames(init.config.data_dir());
         let stargazer_display_names: HashMap<String, String> = store.all_peer_display_names().await
@@ -558,6 +573,7 @@ impl AsyncComponent for AppModel {
                 PeerRowOut::Activate(pid)  => AppMsg::OpenStargazer(pid),
                 PeerRowOut::Remove(pid)    => AppMsg::RemoveStargazer(pid),
                 PeerRowOut::SetNickname { peer_id, name } => AppMsg::SetNickname { peer_id, name },
+                PeerRowOut::ToggleMute(pid) => AppMsg::ToggleMutePeer(pid),
             });
 
         let mut model = AppModel {
@@ -581,6 +597,7 @@ impl AsyncComponent for AppModel {
             pending_affirm_toasts: RefCell::new(Vec::new()),
             name_circle_request: RefCell::new(None),
             pending_circle_leaves: RefCell::new(Vec::new()),
+            muted_peers: RefCell::new(muted_peers),
             config: init.config,
             setup_sender: None,
             notif_sender: None,
@@ -872,6 +889,28 @@ impl AsyncComponent for AppModel {
                 sync_peers_factory(self);
             }
 
+            AppMsg::ToggleMutePeer(peer_id) => {
+                let now_muted = {
+                    let mut muted = self.muted_peers.borrow_mut();
+                    if muted.remove(&peer_id.0) {
+                        false
+                    } else {
+                        muted.insert(peer_id.0);
+                        true
+                    }
+                };
+                let result = if now_muted {
+                    self.store.mute_peer(&peer_id.0).await
+                } else {
+                    self.store.unmute_peer(&peer_id.0).await
+                };
+                if let Err(e) = result {
+                    warn!("{}mute_peer: {e}", if now_muted { "" } else { "un" });
+                }
+                self.network_changed_token += 1;
+                sync_peers_factory(self);
+            }
+
             AppMsg::SetOwnDisplayName(name) => {
                 let trimmed = name.trim().to_string();
                 if let Err(e) = self.config.save_display_name(trimmed.clone()) {
@@ -1151,6 +1190,9 @@ impl AsyncComponent for AppModel {
                 }
             }
             AppMsg::SyncStateEvent(event) => {
+                if crate::feed_item::is_muted_social_event(&event, &self.muted_peers.borrow()) {
+                    return;
+                }
                 let me: [u8; 32] = self.identity.public_key();
                 let now_ts: u64 = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2776,6 +2818,7 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
     };
     let nickname = model.stargazer_nicknames.get(&peer_hex).cloned().unwrap_or_default();
     let unread   = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
+    let is_muted = model.muted_peers.borrow().contains(&s.peer_id.0);
 
     PeerRowInit {
         peer_id: s.peer_id.clone(),
@@ -2788,6 +2831,7 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
         dot_rgba,
         unread,
         nickname,
+        is_muted,
     }
 }
 

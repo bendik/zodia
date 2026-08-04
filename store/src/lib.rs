@@ -571,6 +571,45 @@ impl ZodiaStore {
             .collect())
     }
 
+    // ── muted peers ────────────────────────────────────────────────────────────
+
+    /// Mute `peer_pk`'s social activity in the live feed. Idempotent.
+    pub async fn mute_peer(&self, peer_pk: &[u8; 32]) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO muted_peers (peer_pk, muted_at) VALUES (?, ?)
+             ON CONFLICT(peer_pk) DO NOTHING",
+        )
+        .bind(peer_pk.as_slice())
+        .bind(unix_secs() as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Unmute `peer_pk`. Idempotent — a no-op if they weren't muted.
+    pub async fn unmute_peer(&self, peer_pk: &[u8; 32]) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM muted_peers WHERE peer_pk = ?")
+            .bind(peer_pk.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every currently-muted peer, for bulk-loading into an in-memory
+    /// lookup on startup — same reasoning as `all_peer_display_names`.
+    pub async fn muted_peers(&self) -> Result<Vec<[u8; 32]>, StoreError> {
+        let rows = sqlx::query("SELECT peer_pk FROM muted_peers")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let pk: Vec<u8> = row.get(0);
+                <[u8; 32]>::try_from(pk.as_slice()).ok()
+            })
+            .collect())
+    }
+
     // ── responses (causal threads) ────────────────────────────────────────────
 
     /// Persist a response that hangs off `parent_log_id`.  Uses the same
@@ -1482,6 +1521,32 @@ mod doc_ring_tests {
 }
 
 #[cfg(test)]
+mod muted_peer_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mute_unmute_roundtrip() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let bob = [0xBBu8; 32];
+
+        assert!(store.muted_peers().await.unwrap().is_empty());
+
+        store.mute_peer(&bob).await.unwrap();
+        assert_eq!(store.muted_peers().await.unwrap(), vec![bob]);
+
+        // Muting an already-muted peer is a no-op, not an error.
+        store.mute_peer(&bob).await.unwrap();
+        assert_eq!(store.muted_peers().await.unwrap(), vec![bob]);
+
+        store.unmute_peer(&bob).await.unwrap();
+        assert!(store.muted_peers().await.unwrap().is_empty());
+
+        // Unmuting someone never muted is also a no-op, not an error.
+        store.unmute_peer(&bob).await.unwrap();
+    }
+}
+
+#[cfg(test)]
 mod feed_tests {
     use super::*;
 
@@ -1682,6 +1747,16 @@ const SCHEMA_STMTS: &[&str] = &[
         peer_pk     BLOB    NOT NULL PRIMARY KEY,
         name        TEXT    NOT NULL,
         updated_at  INTEGER NOT NULL
+    )",
+    // A muted peer's social activity (new readings, replies, hearts) is
+    // still fully synced and stored — muting only suppresses the live
+    // `StateEvent` feed notification, purely local, never synced itself
+    // (same "local-only" reasoning as `peer_display_names`' nickname
+    // override, just the opposite direction: hiding someone rather than
+    // relabeling them).
+    "CREATE TABLE IF NOT EXISTS muted_peers (
+        peer_pk  BLOB    NOT NULL PRIMARY KEY,
+        muted_at INTEGER NOT NULL
     )",
 ];
 
