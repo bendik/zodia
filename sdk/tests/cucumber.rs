@@ -451,6 +451,27 @@ async fn peer_revokes_from_circle(world: &mut ZodiaWorld, name: String, member: 
         .expect("revoke_from_circle succeeds");
 }
 
+// A member removing themself, not the owner removing them — p2panda-auth's
+// own remove() explicitly allows this without Manage access (checked
+// directly against the vendored source: `!remover_state.is_manager() &&
+// remover != removed` — self-removal bypasses the manage-access
+// requirement). This step exists separately from "revokes ... from the
+// circle" purely for readability; the underlying call is identical (a
+// peer calling revoke_from_circle targeting their own key).
+#[when(expr = "{string} leaves the circle")]
+async fn peer_leaves_circle(world: &mut ZodiaWorld, name: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before leaving it");
+    let (own_signing_key, _) = world.identities.get(&name)
+        .unwrap_or_else(|| panic!("no prior identity for peer {name}"))
+        .clone();
+    let own_verifying_key = PandaSigningKey::from_bytes(own_signing_key.as_bytes()).verifying_key();
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .revoke_from_circle(circle_id, own_verifying_key)
+        .await
+        .expect("a member can revoke_from_circle targeting themself, without Manage access");
+}
+
 #[then(expr = "{string} sees {string} as a write member of the circle")]
 async fn sees_write_member(world: &mut ZodiaWorld, name: String, member: String) {
     let circle_id = world.last_circle.expect("a circle must be created before checking its members");

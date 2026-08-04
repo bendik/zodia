@@ -170,3 +170,27 @@ Feature: Private circles let a user share an interpretation with named friends i
     When "Alice" notifies "Bob" of the circle invite
     Then "Bob" observes a circle invite notification within 15 seconds
     And "Carol" observes a circle invite notification not addressed to them within 15 seconds
+
+  Scenario: A read-only member can leave a circle themselves, without owner action
+    # Confirmed directly against the vendored p2panda-auth source before
+    # writing this: group::crdt::state::remove() bypasses the Manage-access
+    # requirement specifically when the remover is removing themself.
+    # Nobody had exercised that path in this app before — every prior
+    # revoke scenario is the owner acting on someone else.
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And 3 seconds pass
+    And "Alice" creates a circle
+    And "Alice" invites "Bob" to the circle
+    And "Bob" joins the circle
+    And 1 second passes
+    When "Bob" leaves the circle
+    Then "Bob" no longer sees themself as a member of the circle
+    # Unlike the owner-revokes-someone-else scenarios above, this assertion
+    # is cross-peer: Alice's view only converges once Bob's leave op has
+    # actually traveled the network to her, so (unlike those scenarios,
+    # which check the revoker's own local state right after their own
+    # local action) this needs a real settle window rather than an
+    # instant check.
+    And 3 seconds pass
+    And "Alice" no longer sees "Bob" as a member of the circle
