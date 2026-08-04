@@ -1138,6 +1138,28 @@ impl ZodiaStore {
     /// Read the author ring for one (interp_key, block_id).  Returns the
     /// entries in FIFO order (oldest first); the caller's `Ring` builder
     /// re-sorts as needed.
+    /// Whether `author_pk` has any block currently in `interp_key`'s doc
+    /// author-veto ring — i.e. some text they wrote is still present in
+    /// the doc's converged body. Used to decide whether an affirmation on
+    /// a doc should count as "targets me" for feed/bell purposes: the
+    /// collaborative doc model has no single "author" the way the legacy
+    /// `InterpOp::Author` model did, so "did I contribute anything still
+    /// visible in this doc" is the closest equivalent notion of ownership.
+    pub async fn doc_has_contributor(
+        &self,
+        interp_key: &str,
+        author_pk:  &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let row = sqlx::query(
+            "SELECT 1 FROM doc_block_authors WHERE interp_key = ? AND author_pk = ? LIMIT 1",
+        )
+        .bind(interp_key)
+        .bind(author_pk.as_slice())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     pub async fn block_ring_get(
         &self,
         interp_key: &str,
@@ -1423,6 +1445,41 @@ pub enum FeedRowKind {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod doc_ring_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn has_contributor_true_only_for_authors_still_in_the_ring() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let key = "natal:sun_trine_moon";
+        let block = [1u8; 16];
+        let alice = [0xAAu8; 32];
+        let bob   = [0xBBu8; 32];
+
+        assert!(!store.doc_has_contributor(key, &alice).await.unwrap());
+
+        store.block_ring_push(key, &block, &alice, &[1u8; 32], 100).await.unwrap();
+        assert!(store.doc_has_contributor(key, &alice).await.unwrap());
+        assert!(!store.doc_has_contributor(key, &bob).await.unwrap());
+
+        store.block_ring_push(key, &block, &bob, &[2u8; 32], 101).await.unwrap();
+        // Both remain: the ring holds up to RING_SIZE distinct edits, and
+        // two entries doesn't evict Alice's — a real bug this guards
+        // against would be treating the ring as single-author.
+        assert!(store.doc_has_contributor(key, &alice).await.unwrap());
+        assert!(store.doc_has_contributor(key, &bob).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn has_contributor_is_scoped_to_the_right_interp_key() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let alice = [0xAAu8; 32];
+        store.block_ring_push("natal:sun_trine_moon", &[1u8; 16], &alice, &[1u8; 32], 100).await.unwrap();
+        assert!(!store.doc_has_contributor("natal:mars_square_saturn", &alice).await.unwrap());
+    }
+}
 
 #[cfg(test)]
 mod feed_tests {

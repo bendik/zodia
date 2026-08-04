@@ -300,6 +300,11 @@ pub struct AppModel {
     /// `RefCell`-in-`update_view` reasoning as `pending_push_queue`.
     /// `(inviter, circle_id)`.
     pending_circle_invite_toasts: RefCell<Vec<(p2panda_core::VerifyingKey, p2panda_core::Hash)>>,
+    /// Doc affirmations ("hearts") that land on a reading this device
+    /// contributed to, queued for `update_view` to show as an
+    /// `adw::Toast` — same reasoning as `pending_circle_invite_toasts`.
+    /// `(voter, interp_key)`.
+    pending_affirm_toasts: RefCell<Vec<(p2panda_core::VerifyingKey, String)>>,
     /// Set right after a successful `open_circle` (from accepting an invite
     /// toast) so `update_view` can present a "name this circle for
     /// yourself" dialog — the invitee has no way to know the inviter's own
@@ -564,6 +569,7 @@ impl AsyncComponent for AppModel {
             pending_circle_push_queue: RefCell::new(Vec::new()),
             share_picker_request: RefCell::new(None),
             pending_circle_invite_toasts: RefCell::new(Vec::new()),
+            pending_affirm_toasts: RefCell::new(Vec::new()),
             name_circle_request: RefCell::new(None),
             config: init.config,
             setup_sender: None,
@@ -1295,8 +1301,21 @@ impl AsyncComponent for AppModel {
                         let _ = self.store.doc_affirm_rev(
                             interp_key, target_rev, voter,
                         ).await;
+                        // The collaborative doc model has no single
+                        // "author" the legacy Affirm targeting relied on —
+                        // "did I contribute a block still in the ring" is
+                        // the closest equivalent. This was previously
+                        // hardcoded false, meaning the bell/feed never
+                        // actually detected a heart on your own writing
+                        // for the model every current edit actually uses.
+                        let targets_me = *voter != me
+                            && self.store.doc_has_contributor(interp_key, &me).await.unwrap_or(false);
+                        if targets_me {
+                            self.pending_affirm_toasts.borrow_mut()
+                                .push((*by, interp_key.clone()));
+                        }
                         feed_item = crate::feed_item::state_event_to_feed_item(
-                            &event, now_ts, interp_key.clone(), false,
+                            &event, now_ts, interp_key.clone(), targets_me,
                         );
                     }
                     StateEvent::EditorPresenceChanged { interp_key, by, joined, timestamp, .. } => {
@@ -2233,6 +2252,27 @@ impl AsyncComponent for AppModel {
 
         if let Some(id_hex) = self.name_circle_request.borrow_mut().take() {
             present_name_circle_dialog(&widgets.split_view, &sender, id_hex);
+        }
+
+        // ── "someone hearted your reading" toasts ─────────────────────────────
+
+        for (voter, interp_key) in self.pending_affirm_toasts.borrow_mut().drain(..) {
+            let voter_hex = hex::encode_upper(&voter.as_bytes()[..4]);
+            let toast = adw::Toast::builder()
+                .title(format!(
+                    "{} affirmed your reading on {}",
+                    self.resolved_peer_name(&voter_hex), zodia_core::humanize_key(&interp_key),
+                ))
+                .button_label("View")
+                .build();
+            let s = sender.clone();
+            toast.connect_button_clicked(move |_| {
+                s.input(AppMsg::FeedActivated {
+                    event_id: [0u8; 32],
+                    payload:  crate::feed_view::ActivatedPayload::OpenInterpKey(interp_key.clone()),
+                });
+            });
+            widgets.toast_overlay.add_toast(toast);
         }
 
         // ── rebuild network view and sync page titles when content changes ────
