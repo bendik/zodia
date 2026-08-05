@@ -12,7 +12,9 @@
 //! `ViewSwitcherTitle` is deprecated in ADW 1.4 but the TabBar alternative
 //! exposes close buttons that cannot be hidden without fragile CSS hacks.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use libadwaita as adw;
 use libadwaita::gtk;
@@ -30,10 +32,11 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected stargazer.
 ///
-/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, switcher_title)`.
 /// `call_btn` and `send_btn` should be set insensitive when the stargazer is offline.
-/// `switcher_title` is retained by the caller so the title can be updated when
-/// the nickname changes.
+/// `typing_label` is shown/hidden by the caller when a `TypingIndicatorChanged`
+/// event arrives for this peer. `switcher_title` is retained by the caller so
+/// the title can be updated when the nickname changes.
 #[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_stargazer_page(
     peer_id: &PeerId,
@@ -45,7 +48,7 @@ pub fn build_stargazer_page(
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
     split_view: &adw::OverlaySplitView,
-) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, adw::ViewSwitcherTitle) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, adw::ViewSwitcherTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -113,7 +116,8 @@ pub fn build_stargazer_page(
     syn_page.set_icon_name(Some("synastry-symbolic"));
 
     // Messages tab
-    let (messages_widget, msg_list, call_btn, send_btn, entry) = build_messages_tab(peer_id, sender);
+    let (messages_widget, msg_list, call_btn, send_btn, entry, typing_label) =
+        build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
     let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
     msg_page.set_icon_name(Some("chat-message-new-symbolic"));
@@ -188,19 +192,19 @@ pub fn build_stargazer_page(
         .build();
     toolbar_view.add_bottom_bar(&switcher_bar);
 
-    (toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title)
+    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, switcher_title)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
 
 /// Build the Messages tab content.
 ///
-/// Returns `(container_widget, msg_list, call_btn, send_btn, entry)`.
+/// Returns `(container_widget, msg_list, call_btn, send_btn, entry, typing_label)`.
 /// Both action buttons live in the input row so they are always accessible.
 fn build_messages_tab(
     peer_id: &PeerId,
     sender: &AsyncComponentSender<AppModel>,
-) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry) {
+) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label) {
     relm4::view! {
         outer = gtk::Box {
             set_orientation: gtk::Orientation::Vertical,
@@ -230,12 +234,22 @@ fn build_messages_tab(
                 },
             },
 
+            #[name(typing_label)]
+            gtk::Label {
+                set_text: "Typing…",
+                set_halign: gtk::Align::Start,
+                set_margin_start: 16,
+                add_css_class: "dim-label",
+                add_css_class: "caption",
+                set_visible: false,
+            },
+
             gtk::Box {
                 set_orientation: gtk::Orientation::Horizontal,
                 set_spacing: 8,
                 set_margin_start: 12,
                 set_margin_end: 12,
-                set_margin_top: 8,
+                set_margin_top: 4,
                 set_margin_bottom: 12,
 
                 #[name(call_btn)]
@@ -296,7 +310,44 @@ fn build_messages_tab(
     send_btn.connect_clicked(move |_| send_c());
     entry.connect_activate(move |_| send());
 
-    (outer, msg_list, call_btn, send_btn, entry)
+    // Debounced typing indicator: the first keystroke after an idle period
+    // sends `active: true` immediately; a 3s-idle timer (reset on every
+    // further keystroke) sends `active: false`. Clearing the entry (typing
+    // it all away, or `send()`'s own `set_text("")`) fires `changed` too and
+    // takes the empty-text branch, so a sent message clears the remote's
+    // indicator right away rather than waiting out the idle timer.
+    {
+        let is_typing: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let idle_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+        let s   = sender.clone();
+        let pid = peer_id.clone();
+        entry.connect_changed(move |e| {
+            if let Some(id) = idle_timer.borrow_mut().take() {
+                id.remove();
+            }
+            if e.text().is_empty() {
+                if is_typing.replace(false) {
+                    s.input(AppMsg::SetTyping { peer_id: pid.clone(), active: false });
+                }
+                return;
+            }
+            if !is_typing.replace(true) {
+                s.input(AppMsg::SetTyping { peer_id: pid.clone(), active: true });
+            }
+            let s2   = s.clone();
+            let pid2 = pid.clone();
+            let is_typing2 = Rc::clone(&is_typing);
+            let idle_timer2 = Rc::clone(&idle_timer);
+            let id = glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                is_typing2.set(false);
+                idle_timer2.borrow_mut().take();
+                s2.input(AppMsg::SetTyping { peer_id: pid2.clone(), active: false });
+            });
+            *idle_timer.borrow_mut() = Some(id);
+        });
+    }
+
+    (outer, msg_list, call_btn, send_btn, entry, typing_label)
 }
 
 /// Append a single chat row to a message list.

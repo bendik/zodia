@@ -79,6 +79,12 @@ pub enum ChannelMsg {
     CallHangup { session_id: [u8; 32] },
     /// Plain-text chat message from the remote peer.
     ChatMsg { text: String },
+    /// The remote peer started (`true`) or stopped (`false`) composing a
+    /// message. Purely ephemeral — never persisted, never re-sent on
+    /// reconnect — so a dropped one only costs a stale "typing…" label the
+    /// receiver's own timeout clears (see `AppModel::pending_typing_updates`'
+    /// doc comment).
+    TypingIndicator { active: bool },
     /// Blind-relay envelope: forward `payload` (ECIES-encrypted) to `dest`.
     ///
     /// The relay can see `dest` (needed to route) but cannot decrypt `payload`.

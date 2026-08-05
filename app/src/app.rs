@@ -128,6 +128,10 @@ pub enum AppMsg {
     HangUp,
     /// User sent a chat message to a connected peer.
     SendChat { peer_id: PeerId, text: String },
+    /// The local user started or stopped composing a message to `peer_id`
+    /// (their message entry's `changed` signal, debounced) — tells the
+    /// remote side to show/hide a "typing…" indicator.
+    SetTyping { peer_id: PeerId, active: bool },
     /// Send a message to `dest` via `relay` (blind relay path).
     ///
     /// The relay peer will forward the ECIES-encrypted payload to `dest` without
@@ -331,6 +335,13 @@ pub struct AppModel {
     /// `MutePeer`/`UnmutePeer`, so the hot `SyncStateEvent` path never
     /// awaits a DB round-trip. See `feed_item::is_muted_social_event`.
     muted_peers: RefCell<std::collections::HashSet<[u8; 32]>>,
+    /// `(peer_id, active)` pairs from `ZodiaNetEvent::TypingIndicatorChanged`
+    /// (plus a synthetic `false` on `PeerChannelClosed`, so a dropped
+    /// connection mid-compose can't leave the indicator stuck forever),
+    /// queued for `update_view` to reflect on that peer's message page — it
+    /// has the widget handles, `update_cmd` doesn't. Same `RefCell`-in-
+    /// `update_view` reasoning as `pending_push_queue`.
+    pending_typing_updates: RefCell<Vec<(PeerId, bool)>>,
 
     config: LocalConfig,
     /// Sender for the SetupPage child component (only used while setup is shown).
@@ -469,6 +480,9 @@ pub struct AppWidgets {
     /// ViewSwitcherTitle per stargazer — updated when the nickname changes.
     #[allow(deprecated)]
     stargazer_titles: HashMap<String, adw::ViewSwitcherTitle>,
+    /// "{name} is typing…" label per stargazer, shown/hidden by
+    /// `pending_typing_updates`.
+    stargazer_typing_labels: HashMap<String, gtk::Label>,
 
     call_bar: gtk::Box,
     call_status: gtk::Label,
@@ -598,6 +612,7 @@ impl AsyncComponent for AppModel {
             name_circle_request: RefCell::new(None),
             pending_circle_leaves: RefCell::new(Vec::new()),
             muted_peers: RefCell::new(muted_peers),
+            pending_typing_updates: RefCell::new(Vec::new()),
             config: init.config,
             setup_sender: None,
             notif_sender: None,
@@ -1168,6 +1183,12 @@ impl AsyncComponent for AppModel {
                         let _ = self.store.insert_message(&peer_id.0, true, &text).await;
                         self.chat_logs.entry(peer_id).or_default().push((true, text));
                     }
+                }
+            }
+
+            AppMsg::SetTyping { peer_id, active } => {
+                if let Some(channel) = self.connected_channels.get(&peer_id) {
+                    let _ = channel.send_msg(&ChannelMsg::TypingIndicator { active }).await;
                 }
             }
 
@@ -2103,6 +2124,9 @@ impl AsyncComponent for AppModel {
                 self.network_changed_token += 1;
                 sync_peers_factory(self);
             }
+            ZodiaNetEvent::TypingIndicatorChanged { peer_id, active } => {
+                self.pending_typing_updates.borrow_mut().push((peer_id, active));
+            }
             ZodiaNetEvent::RelayReceived { via: _, dest, payload } => {
                 let our_id = self.network.as_ref().map(|n| n.node_id()).unwrap_or(PeerId([0u8; 32]));
                 if dest == our_id {
@@ -2143,6 +2167,10 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::PeerChannelClosed { peer_id } => {
                 self.stargazer_status.remove(&peer_id);
                 self.connected_channels.remove(&peer_id);
+                // A dropped connection is the one way a "stopped typing"
+                // send can legitimately never arrive — clear any indicator
+                // left showing rather than have it stick forever.
+                self.pending_typing_updates.borrow_mut().push((peer_id.clone(), false));
                 self.network_changed_token += 1;
                 sync_peers_factory(self);
                 // Schedule a reconnect attempt for Connected peers after 10 s.
@@ -2397,7 +2425,7 @@ impl AsyncComponent for AppModel {
                         // Page already built — switch to it directly.
                         widgets.content_stack.set_visible_child_name(&tag);
                     } else {
-                        let (toolbar_view, msg_list, call_btn, send_btn, entry, switcher_title) =
+                        let (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, switcher_title) =
                             stargazer_page::build_stargazer_page(
                                 &peer_id, their_blob, chart,
                                 self.store.clone(),
@@ -2415,6 +2443,7 @@ impl AsyncComponent for AppModel {
                         widgets.content_stack.set_visible_child_name(&tag);
                         widgets.stargazer_msg_lists.insert(tag.clone(), msg_list);
                         widgets.stargazer_actions.insert(tag.clone(), (call_btn, send_btn, entry));
+                        widgets.stargazer_typing_labels.insert(tag.clone(), typing_label);
                         widgets.stargazer_titles.insert(tag, switcher_title);
                     }
                     // On narrow windows, hide the sidebar so the peer page
@@ -2443,6 +2472,15 @@ impl AsyncComponent for AppModel {
                     }
                     widgets.stargazer_chat_shown.insert(tag, messages.len());
                 }
+            }
+        }
+
+        // ── typing indicators on peer message pages ───────────────────────────
+
+        for (peer_id, active) in self.pending_typing_updates.borrow_mut().drain(..) {
+            let tag = hex::encode_upper(&peer_id.0[..4]);
+            if let Some(label) = widgets.stargazer_typing_labels.get(&tag) {
+                label.set_visible(active);
             }
         }
 
@@ -3311,6 +3349,7 @@ fn build_widgets(
         stargazer_chat_shown: HashMap::new(),
         stargazer_actions: HashMap::new(),
         stargazer_titles: HashMap::new(),
+        stargazer_typing_labels: HashMap::new(),
         consent_bar,
         consent_status,
         consent_accept_btn,

@@ -7,7 +7,7 @@
 use iroh::endpoint::presets::Minimal;
 use iroh::{Endpoint, RelayMode};
 use zodia_core::BirthData;
-use zodia_net::{ConsentBlob, DirectChannel};
+use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel};
 use zodia_net::network::CONSENT_PROTOCOL;
 
 fn make_blob(seed: u8, jdn: f64, geohash: &str) -> ConsentBlob {
@@ -139,4 +139,45 @@ async fn exchange_consent_is_reusable_on_same_channel() {
     assert_eq!(r2.prekey, server_blob.prekey);
     assert_eq!(sr1.prekey, client_blob.prekey);
     assert_eq!(sr2.prekey, client_blob.prekey);
+}
+
+/// A typing indicator sent on one real QUIC connection must arrive intact
+/// on the other side — the same reliable `send_msg`/`recv_msg` path chat
+/// and presence updates already use, just a new variant.
+#[tokio::test]
+async fn typing_indicator_round_trips_over_a_real_channel() {
+    let server = Endpoint::builder(Minimal)
+        .alpns(vec![CONSENT_PROTOCOL.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("server bind failed");
+
+    let client = Endpoint::builder(Minimal)
+        .alpns(vec![CONSENT_PROTOCOL.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("client bind failed");
+
+    let server_addr = server.addr();
+
+    let server_handle = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let ch = DirectChannel::from_connection(conn);
+        // Two consecutive sends — started typing, then stopped — must
+        // arrive in order and each decode to the right `active` value.
+        let first = ch.recv_msg().await.unwrap();
+        let second = ch.recv_msg().await.unwrap();
+        (first, second)
+    });
+
+    let conn = client.connect(server_addr, CONSENT_PROTOCOL).await.unwrap();
+    let ch = DirectChannel::from_connection(conn);
+    ch.send_msg(&ChannelMsg::TypingIndicator { active: true }).await.unwrap();
+    ch.send_msg(&ChannelMsg::TypingIndicator { active: false }).await.unwrap();
+
+    let (first, second) = server_handle.await.expect("server task panicked");
+    assert!(matches!(first, ChannelMsg::TypingIndicator { active: true }));
+    assert!(matches!(second, ChannelMsg::TypingIndicator { active: false }));
 }
