@@ -32,11 +32,12 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected stargazer.
 ///
-/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, switcher_title)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, switcher_title)`.
 /// `call_btn` and `send_btn` should be set insensitive when the stargazer is offline.
 /// `typing_label` is shown/hidden by the caller when a `TypingIndicatorChanged`
-/// event arrives for this peer. `switcher_title` is retained by the caller so
-/// the title can be updated when the nickname changes.
+/// event arrives for this peer; `seen_label` when a `ChatSeen` event arrives
+/// and the most recent message is ours. `switcher_title` is retained by the
+/// caller so the title can be updated when the nickname changes.
 #[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_stargazer_page(
     peer_id: &PeerId,
@@ -48,7 +49,7 @@ pub fn build_stargazer_page(
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
     split_view: &adw::OverlaySplitView,
-) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, adw::ViewSwitcherTitle) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label, adw::ViewSwitcherTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -116,7 +117,7 @@ pub fn build_stargazer_page(
     syn_page.set_icon_name(Some("synastry-symbolic"));
 
     // Messages tab
-    let (messages_widget, msg_list, call_btn, send_btn, entry, typing_label) =
+    let (messages_widget, msg_list, call_btn, send_btn, entry, typing_label, seen_label) =
         build_messages_tab(peer_id, sender);
     messages_widget.set_vexpand(true);
     let msg_page = view_stack.add_titled(&messages_widget, Some("messages"), "Messages");
@@ -192,19 +193,19 @@ pub fn build_stargazer_page(
         .build();
     toolbar_view.add_bottom_bar(&switcher_bar);
 
-    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, switcher_title)
+    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, switcher_title)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
 
 /// Build the Messages tab content.
 ///
-/// Returns `(container_widget, msg_list, call_btn, send_btn, entry, typing_label)`.
+/// Returns `(container_widget, msg_list, call_btn, send_btn, entry, typing_label, seen_label)`.
 /// Both action buttons live in the input row so they are always accessible.
 fn build_messages_tab(
     peer_id: &PeerId,
     sender: &AsyncComponentSender<AppModel>,
-) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label) {
+) -> (gtk::Box, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label) {
     relm4::view! {
         outer = gtk::Box {
             set_orientation: gtk::Orientation::Vertical,
@@ -232,6 +233,16 @@ fn build_messages_tab(
                         set_vexpand: true,
                     },
                 },
+            },
+
+            #[name(seen_label)]
+            gtk::Label {
+                set_text: "Seen",
+                set_halign: gtk::Align::End,
+                set_margin_end: 16,
+                add_css_class: "dim-label",
+                add_css_class: "caption",
+                set_visible: false,
             },
 
             #[name(typing_label)]
@@ -347,7 +358,7 @@ fn build_messages_tab(
         });
     }
 
-    (outer, msg_list, call_btn, send_btn, entry, typing_label)
+    (outer, msg_list, call_btn, send_btn, entry, typing_label, seen_label)
 }
 
 /// Append a single chat row to a message list.

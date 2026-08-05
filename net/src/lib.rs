@@ -96,6 +96,8 @@ pub enum ZodiaNetEvent {
     PeerStatusChanged { peer_id: PeerId, status: PeerStatus },
     /// The peer started (`true`) or stopped (`false`) composing a message.
     TypingIndicatorChanged { peer_id: PeerId, active: bool },
+    /// The peer has opened our conversation and seen everything sent so far.
+    ChatSeen { peer_id: PeerId },
     /// The direct channel to a connected peer has closed (peer went offline).
     PeerChannelClosed { peer_id: PeerId },
     /// A relay message arrived — `dest` is the intended final recipient.

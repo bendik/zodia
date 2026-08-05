@@ -322,6 +322,9 @@ pub(crate) fn spawn_channel_listener(
                 Ok(ChannelMsg::TypingIndicator { active }) => {
                     let _ = tx.send(ZodiaNetEvent::TypingIndicatorChanged { peer_id: peer_id.clone(), active }).await;
                 }
+                Ok(ChannelMsg::ChatRead) => {
+                    let _ = tx.send(ZodiaNetEvent::ChatSeen { peer_id: peer_id.clone() }).await;
+                }
                 Ok(ChannelMsg::RelayMsg { dest, payload }) => {
                     let _ = tx.send(ZodiaNetEvent::RelayReceived {
                         via: peer_id.clone(),

@@ -372,6 +372,12 @@ pub struct AppModel {
     stargazer_display_names: HashMap<String, String>,
     /// Unread message counts per peer (cleared when their page is opened).
     unread_messages: HashMap<String, usize>,
+    /// Whether the peer has seen the most recent message *we* sent them.
+    /// Reset to `false` on every `SendChat`, set `true` on `ChatSeen`
+    /// (received when they open their side of the conversation). Purely a
+    /// "Seen" caption under our latest bubble — doesn't track per-message
+    /// state, since chat here is a simple ordered 1:1 log.
+    chat_seen: HashMap<PeerId, bool>,
 
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
@@ -483,6 +489,9 @@ pub struct AppWidgets {
     /// "{name} is typing…" label per stargazer, shown/hidden by
     /// `pending_typing_updates`.
     stargazer_typing_labels: HashMap<String, gtk::Label>,
+    /// "Seen" label per stargazer, shown when they've read our latest
+    /// message — see `chat_seen`.
+    stargazer_seen_labels: HashMap<String, gtk::Label>,
 
     call_bar: gtk::Box,
     call_status: gtk::Label,
@@ -625,6 +634,7 @@ impl AsyncComponent for AppModel {
             stargazer_nicknames,
             stargazer_display_names,
             unread_messages: HashMap::new(),
+            chat_seen: HashMap::new(),
             zodia_client: None,
             recent_interps: Vec::new(),
             sync_peer_status: HashMap::new(),
@@ -1046,6 +1056,11 @@ impl AsyncComponent for AppModel {
                 // not activatable so this should only be called for Connected peers.
                 let tag = hex::encode_upper(&peer_id.0[..4]);
                 self.unread_messages.remove(&tag);
+                // Tell them we've now seen everything they've sent — opening
+                // the page is the clearest signal of intent available here.
+                if let Some(channel) = self.connected_channels.get(&peer_id) {
+                    let _ = channel.send_msg(&ChannelMsg::ChatRead).await;
+                }
                 self.pending_push_queue.borrow_mut().push(peer_id);
             }
 
@@ -1181,7 +1196,8 @@ impl AsyncComponent for AppModel {
                 if let Some(channel) = self.connected_channels.get(&peer_id) {
                     if channel.send_msg(&ChannelMsg::ChatMsg { text: text.clone() }).await.is_ok() {
                         let _ = self.store.insert_message(&peer_id.0, true, &text).await;
-                        self.chat_logs.entry(peer_id).or_default().push((true, text));
+                        self.chat_logs.entry(peer_id.clone()).or_default().push((true, text));
+                        self.chat_seen.insert(peer_id, false);
                     }
                 }
             }
@@ -2127,6 +2143,9 @@ impl AsyncComponent for AppModel {
             ZodiaNetEvent::TypingIndicatorChanged { peer_id, active } => {
                 self.pending_typing_updates.borrow_mut().push((peer_id, active));
             }
+            ZodiaNetEvent::ChatSeen { peer_id } => {
+                self.chat_seen.insert(peer_id, true);
+            }
             ZodiaNetEvent::RelayReceived { via: _, dest, payload } => {
                 let our_id = self.network.as_ref().map(|n| n.node_id()).unwrap_or(PeerId([0u8; 32]));
                 if dest == our_id {
@@ -2425,7 +2444,7 @@ impl AsyncComponent for AppModel {
                         // Page already built — switch to it directly.
                         widgets.content_stack.set_visible_child_name(&tag);
                     } else {
-                        let (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, switcher_title) =
+                        let (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, switcher_title) =
                             stargazer_page::build_stargazer_page(
                                 &peer_id, their_blob, chart,
                                 self.store.clone(),
@@ -2444,6 +2463,7 @@ impl AsyncComponent for AppModel {
                         widgets.stargazer_msg_lists.insert(tag.clone(), msg_list);
                         widgets.stargazer_actions.insert(tag.clone(), (call_btn, send_btn, entry));
                         widgets.stargazer_typing_labels.insert(tag.clone(), typing_label);
+                        widgets.stargazer_seen_labels.insert(tag.clone(), seen_label);
                         widgets.stargazer_titles.insert(tag, switcher_title);
                     }
                     // On narrow windows, hide the sidebar so the peer page
@@ -2470,8 +2490,13 @@ impl AsyncComponent for AppModel {
                     for (from_us, text) in &messages[shown..] {
                         append_chat_row(list, text, *from_us);
                     }
-                    widgets.stargazer_chat_shown.insert(tag, messages.len());
+                    widgets.stargazer_chat_shown.insert(tag.clone(), messages.len());
                 }
+            }
+            if let Some(label) = widgets.stargazer_seen_labels.get(&tag) {
+                let last_is_ours = messages.last().is_some_and(|(from_us, _)| *from_us);
+                let seen = self.chat_seen.get(peer_id).copied().unwrap_or(false);
+                label.set_visible(last_is_ours && seen);
             }
         }
 
@@ -3350,6 +3375,7 @@ fn build_widgets(
         stargazer_actions: HashMap::new(),
         stargazer_titles: HashMap::new(),
         stargazer_typing_labels: HashMap::new(),
+        stargazer_seen_labels: HashMap::new(),
         consent_bar,
         consent_status,
         consent_accept_btn,

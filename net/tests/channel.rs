@@ -181,3 +181,38 @@ async fn typing_indicator_round_trips_over_a_real_channel() {
     assert!(matches!(first, ChannelMsg::TypingIndicator { active: true }));
     assert!(matches!(second, ChannelMsg::TypingIndicator { active: false }));
 }
+
+/// A read receipt sent on one real QUIC connection must arrive intact on
+/// the other side — same reliable path as chat/presence/typing, just a
+/// payload-less variant meaning "I've caught up."
+#[tokio::test]
+async fn chat_read_round_trips_over_a_real_channel() {
+    let server = Endpoint::builder(Minimal)
+        .alpns(vec![CONSENT_PROTOCOL.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("server bind failed");
+
+    let client = Endpoint::builder(Minimal)
+        .alpns(vec![CONSENT_PROTOCOL.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("client bind failed");
+
+    let server_addr = server.addr();
+
+    let server_handle = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let ch = DirectChannel::from_connection(conn);
+        ch.recv_msg().await
+    });
+
+    let conn = client.connect(server_addr, CONSENT_PROTOCOL).await.unwrap();
+    let ch = DirectChannel::from_connection(conn);
+    ch.send_msg(&ChannelMsg::ChatRead).await.unwrap();
+
+    let received = server_handle.await.expect("server task panicked").unwrap();
+    assert!(matches!(received, ChannelMsg::ChatRead));
+}

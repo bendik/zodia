@@ -81,10 +81,17 @@ pub enum ChannelMsg {
     ChatMsg { text: String },
     /// The remote peer started (`true`) or stopped (`false`) composing a
     /// message. Purely ephemeral — never persisted, never re-sent on
-    /// reconnect — so a dropped one only costs a stale "typing…" label the
-    /// receiver's own timeout clears (see `AppModel::pending_typing_updates`'
-    /// doc comment).
+    /// reconnect — so a dropped one only costs a stale "typing…" label; the
+    /// one case a "stopped" send can legitimately never arrive (the
+    /// connection drops mid-compose) is cleared via `PeerChannelClosed`
+    /// instead of a timeout, since a fixed timer would falsely clear a
+    /// message that just takes longer than it to type.
     TypingIndicator { active: bool },
+    /// Sent when the local user opens a peer's message page: "I've now
+    /// seen everything you've sent me." No payload — chat is a simple
+    /// ordered 1:1 log, so "seen" just means "caught up," not a per-message
+    /// cursor.
+    ChatRead,
     /// Blind-relay envelope: forward `payload` (ECIES-encrypted) to `dest`.
     ///
     /// The relay can see `dest` (needed to route) but cannot decrypt `payload`.
