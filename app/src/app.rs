@@ -378,6 +378,10 @@ pub struct AppModel {
     /// "Seen" caption under our latest bubble — doesn't track per-message
     /// state, since chat here is a simple ordered 1:1 log.
     chat_seen: HashMap<PeerId, bool>,
+    /// Unix timestamp of when each peer's direct channel last closed —
+    /// loaded once at startup, updated on every `PeerChannelClosed`. Drives
+    /// "Last seen Xm ago" in an offline peer's page title.
+    last_seen: HashMap<[u8; 32], u64>,
 
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
@@ -542,6 +546,10 @@ impl AsyncComponent for AppModel {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let last_seen: HashMap<[u8; 32], u64> = store.all_last_seen().await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         let stargazer_nicknames = load_nicknames(init.config.data_dir());
         let stargazer_display_names: HashMap<String, String> = store.all_peer_display_names().await
@@ -635,6 +643,7 @@ impl AsyncComponent for AppModel {
             stargazer_display_names,
             unread_messages: HashMap::new(),
             chat_seen: HashMap::new(),
+            last_seen,
             zodia_client: None,
             recent_interps: Vec::new(),
             sync_peer_status: HashMap::new(),
@@ -2190,6 +2199,12 @@ impl AsyncComponent for AppModel {
                 // send can legitimately never arrive — clear any indicator
                 // left showing rather than have it stick forever.
                 self.pending_typing_updates.borrow_mut().push((peer_id.clone(), false));
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.last_seen.insert(peer_id.0, now);
+                let _ = self.store.record_last_seen(&peer_id.0, now).await;
                 self.network_changed_token += 1;
                 sync_peers_factory(self);
                 // Schedule a reconnect attempt for Connected peers after 10 s.
@@ -2414,7 +2429,16 @@ impl AsyncComponent for AppModel {
                 let glyph    = if s.solar_month > 0 { sign_glyph(s.solar_month) } else { "" };
                 #[allow(deprecated)]
                 if let Some(tw) = widgets.stargazer_titles.get(&peer_hex) {
-                    let title = format!("{glyph}  {}", self.resolved_peer_name(&peer_hex));
+                    let mut title = format!("{glyph}  {}", self.resolved_peer_name(&peer_hex));
+                    if !self.connected_channels.contains_key(&s.peer_id) {
+                        if let Some(&seen_at) = self.last_seen.get(&s.peer_id.0) {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            title.push_str(&format!(" · Last seen {}", crate::util::format_last_seen(now, seen_at)));
+                        }
+                    }
                     tw.set_title(&title);
                 }
             }

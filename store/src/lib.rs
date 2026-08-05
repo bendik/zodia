@@ -571,6 +571,39 @@ impl ZodiaStore {
             .collect())
     }
 
+    // ── last seen ──────────────────────────────────────────────────────────────
+
+    /// Record that `peer_pk`'s direct channel just closed, at `seen_at`.
+    /// Upsert — a later close always overwrites an earlier one.
+    pub async fn record_last_seen(&self, peer_pk: &[u8; 32], seen_at: u64) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO peer_last_seen (peer_pk, seen_at) VALUES (?, ?)
+             ON CONFLICT(peer_pk) DO UPDATE SET seen_at = excluded.seen_at",
+        )
+        .bind(peer_pk.as_slice())
+        .bind(seen_at as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every known "last seen" timestamp, keyed by pubkey — for bulk-loading
+    /// into an in-memory lookup on startup, same reasoning as
+    /// `all_peer_display_names`.
+    pub async fn all_last_seen(&self) -> Result<Vec<([u8; 32], u64)>, StoreError> {
+        let rows = sqlx::query("SELECT peer_pk, seen_at FROM peer_last_seen")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let pk: Vec<u8> = row.get(0);
+                let seen_at: i64 = row.get(1);
+                <[u8; 32]>::try_from(pk.as_slice()).ok().map(|pk| (pk, seen_at as u64))
+            })
+            .collect())
+    }
+
     // ── muted peers ────────────────────────────────────────────────────────────
 
     /// Mute `peer_pk`'s social activity in the live feed. Idempotent.
@@ -1547,6 +1580,27 @@ mod muted_peer_tests {
 }
 
 #[cfg(test)]
+mod last_seen_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn records_and_overwrites_last_seen() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let bob = [0xBBu8; 32];
+
+        assert!(store.all_last_seen().await.unwrap().is_empty());
+
+        store.record_last_seen(&bob, 1000).await.unwrap();
+        assert_eq!(store.all_last_seen().await.unwrap(), vec![(bob, 1000)]);
+
+        // A later disconnect overwrites the earlier timestamp rather than
+        // adding a second row.
+        store.record_last_seen(&bob, 2000).await.unwrap();
+        assert_eq!(store.all_last_seen().await.unwrap(), vec![(bob, 2000)]);
+    }
+}
+
+#[cfg(test)]
 mod feed_tests {
     use super::*;
 
@@ -1757,6 +1811,13 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS muted_peers (
         peer_pk  BLOB    NOT NULL PRIMARY KEY,
         muted_at INTEGER NOT NULL
+    )",
+    // When a peer's direct channel last closed — lets the UI show "Last
+    // seen 5m ago" instead of just a gray dot. Purely local, one row per
+    // peer, replaced wholesale on each disconnect.
+    "CREATE TABLE IF NOT EXISTS peer_last_seen (
+        peer_pk BLOB    NOT NULL PRIMARY KEY,
+        seen_at INTEGER NOT NULL
     )",
 ];
 
