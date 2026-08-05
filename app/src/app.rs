@@ -23,8 +23,8 @@ use tracing::{debug, error, info, warn};
 use zodia_av::AudioSession;
 use zodia_config::LocalConfig;
 use chrono::{NaiveDateTime, TimeZone as _, Timelike as _};
-use zodia_core::{birth_from_coords, compute_synastry, gregorian_to_jdn,
-                 Chart, InterpKey};
+use zodia_core::{birth_from_coords, compute_positions, compute_synastry, synastry_tone,
+                 gregorian_to_jdn, Chart, InterpKey};
 use zodia_crypto::IdentityKeypair;
 use zodia_crypto::{ecies_decrypt, ecies_encrypt};
 use zodia_net::{ChannelMsg, ConsentBlob, DirectChannel, InterpEntry,
@@ -2883,6 +2883,18 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
     let unread   = model.unread_messages.get(&peer_hex).copied().unwrap_or(0);
     let is_muted = model.muted_peers.borrow().contains(&s.peer_id.0);
 
+    // Full synastry (unlike `approximate_aspects`, which only has a
+    // discovered peer's rough sun sign to go on) is only meaningful once
+    // consent has exchanged exact birth data — i.e. once connected.
+    let compat_tone = match &s.state {
+        StargazerState::Connected { birth } => model.chart.as_ref()
+            .and_then(|c| compute_positions(birth.birth.jdn).ok()
+                .map(|their_pos| synastry_tone(&compute_synastry(&c.positions, &their_pos)))),
+        _ => None,
+    };
+    let compat_glyph = compat_tone.map(|t| t.glyph());
+    let compat_tooltip = compat_tone.map(|t| t.label());
+
     PeerRowInit {
         peer_id: s.peer_id.clone(),
         solar_month: s.solar_month,
@@ -2895,6 +2907,8 @@ fn make_peer_row_init(s: &Stargazer, model: &AppModel) -> PeerRowInit {
         unread,
         nickname,
         is_muted,
+        compat_glyph,
+        compat_tooltip,
     }
 }
 

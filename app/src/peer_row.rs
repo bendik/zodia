@@ -36,6 +36,13 @@ pub struct PeerRowInit {
     pub unread:       usize,
     pub nickname:     String,
     pub is_muted:     bool,
+    /// At-a-glance synastry tone glyph (✨ / • / ⚡) for connected peers —
+    /// `None` while pending, since full synastry needs exact birth data
+    /// from an already-exchanged consent. See `zodia_core::synastry_tone`.
+    pub compat_glyph:   Option<&'static str>,
+    /// Human label for `compat_glyph` (e.g. "Harmonious"), shown as the
+    /// row's tooltip.
+    pub compat_tooltip: Option<&'static str>,
 }
 
 impl std::fmt::Debug for PeerRowInit {
@@ -72,6 +79,8 @@ pub struct PeerRow {
     pub dot_rgba:      [f32; 4],
     pub unread:        usize,
     pub is_muted:      bool,
+    pub compat_glyph:   Option<&'static str>,
+    pub compat_tooltip: Option<&'static str>,
     /// Live gate read by the activation GestureClick closure.
     is_connected_cell: Rc<Cell<bool>>,
     /// Live nickname read by the dialog when the user opens it.
@@ -96,9 +105,12 @@ fn row_widget_name(bucket: u8, peer_id: &PeerId) -> String {
     format!("{:02}_{}", bucket, hex::encode(&peer_id.0))
 }
 
-fn label_text(solar_month: u8, display_name: &str) -> String {
+fn label_text(solar_month: u8, display_name: &str, compat_glyph: Option<&str>) -> String {
     let glyph = if solar_month > 0 { sign_glyph(solar_month) } else { "" };
-    format!("{glyph}  {display_name}")
+    match compat_glyph {
+        Some(c) => format!("{glyph}  {display_name}  {c}"),
+        None => format!("{glyph}  {display_name}"),
+    }
 }
 
 fn paint_dot(filled: bool, rgba: [f32; 4]) -> impl Fn(&gtk::DrawingArea, &gtk::cairo::Context, i32, i32) + 'static {
@@ -147,6 +159,8 @@ impl FactoryComponent for PeerRow {
             dot_rgba:     init.dot_rgba,
             unread:       init.unread,
             is_muted:     init.is_muted,
+            compat_glyph:   init.compat_glyph,
+            compat_tooltip: init.compat_tooltip,
         }
     }
 
@@ -188,9 +202,10 @@ impl FactoryComponent for PeerRow {
 
                     #[name(label)]
                     gtk::Label {
-                        set_text: &label_text(self.solar_month, &self.display_name),
+                        set_text: &label_text(self.solar_month, &self.display_name, self.compat_glyph),
                         set_halign: gtk::Align::Start,
                         set_hexpand: true,
+                        set_tooltip_text: self.compat_tooltip.map(|t| format!("Synastry: {t}")).as_deref(),
                     },
 
                     #[name(badge)]
@@ -336,6 +351,8 @@ impl FactoryComponent for PeerRow {
         self.dot_rgba     = init.dot_rgba;
         self.unread       = init.unread;
         self.is_muted     = init.is_muted;
+        self.compat_glyph   = init.compat_glyph;
+        self.compat_tooltip = init.compat_tooltip;
     }
 
     fn update_view(&self, widgets: &mut Self::Widgets, _sender: FactorySender<Self>) {
@@ -343,7 +360,8 @@ impl FactoryComponent for PeerRow {
         widgets.row.set_widget_name(&row_widget_name(self.sort_bucket, &self.peer_id));
         widgets.row.set_activatable(self.is_connected);
 
-        widgets.label.set_text(&label_text(self.solar_month, &self.display_name));
+        widgets.label.set_text(&label_text(self.solar_month, &self.display_name, self.compat_glyph));
+        widgets.label.set_tooltip_text(self.compat_tooltip.map(|t| format!("Synastry: {t}")).as_deref());
         if self.is_pending || self.is_muted {
             widgets.label.add_css_class("dim-label");
         } else {

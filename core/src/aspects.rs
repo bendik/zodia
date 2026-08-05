@@ -189,6 +189,61 @@ pub fn compute_synastry(a: &PlanetPositions, b: &PlanetPositions) -> Vec<Synastr
     aspects
 }
 
+/// Coarse "how does this cross-chart relationship read at a glance" summary
+/// — for UI surfaces (a sidebar row, a peer list) that want a single
+/// glyph/label without making the user open the full Synastry tab.
+///
+/// Deliberately rough: a real synastry reading weighs which specific
+/// bodies and houses are involved far more than a raw aspect-kind tally
+/// ever could. This is a lightweight signal, not a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynastryTone {
+    Harmonious,
+    Balanced,
+    Challenging,
+}
+
+impl SynastryTone {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Harmonious  => "✨",
+            Self::Balanced    => "•",
+            Self::Challenging => "⚡",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Harmonious  => "Harmonious",
+            Self::Balanced    => "Balanced",
+            Self::Challenging => "Challenging",
+        }
+    }
+}
+
+fn aspect_weight(kind: AspectKind) -> i32 {
+    match kind {
+        AspectKind::Trine | AspectKind::Sextile => 1,
+        AspectKind::Square | AspectKind::Opposition => -1,
+        AspectKind::Conjunction | AspectKind::SemiSextile | AspectKind::Quincunx => 0,
+    }
+}
+
+/// Classify a set of synastry aspects into a rough at-a-glance tone. A
+/// generous middle band (score within ±2) reads as `Balanced` rather than
+/// tipping to an extreme on a thin margin — see `SynastryTone`'s own doc
+/// comment for what this deliberately does not claim to be.
+pub fn synastry_tone(aspects: &[SynastryAspect]) -> SynastryTone {
+    let score: i32 = aspects.iter().map(|a| aspect_weight(a.kind)).sum();
+    if score >= 3 {
+        SynastryTone::Harmonious
+    } else if score <= -3 {
+        SynastryTone::Challenging
+    } else {
+        SynastryTone::Balanced
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Sort two planet names lexicographically so aspect sigs are canonical.
@@ -209,5 +264,62 @@ mod tests {
         angles.sort_by(|a, b| a.partial_cmp(b).unwrap());
         angles.dedup();
         assert_eq!(angles.len(), 7, "two aspect kinds share an angle — a real detection bug");
+    }
+
+    fn syn(kind: AspectKind) -> SynastryAspect {
+        SynastryAspect { body_a: Planet::Sun, body_b: Planet::Moon, kind, orb: 1.0 }
+    }
+
+    #[test]
+    fn no_aspects_reads_as_balanced() {
+        assert_eq!(synastry_tone(&[]), SynastryTone::Balanced);
+    }
+
+    #[test]
+    fn mostly_trines_and_sextiles_reads_as_harmonious() {
+        let aspects = vec![
+            syn(AspectKind::Trine), syn(AspectKind::Trine),
+            syn(AspectKind::Sextile), syn(AspectKind::Sextile),
+        ];
+        assert_eq!(synastry_tone(&aspects), SynastryTone::Harmonious);
+    }
+
+    #[test]
+    fn mostly_squares_and_oppositions_reads_as_challenging() {
+        let aspects = vec![
+            syn(AspectKind::Square), syn(AspectKind::Square),
+            syn(AspectKind::Opposition), syn(AspectKind::Opposition),
+        ];
+        assert_eq!(synastry_tone(&aspects), SynastryTone::Challenging);
+    }
+
+    #[test]
+    fn an_even_mix_reads_as_balanced_not_cancelled_to_a_false_extreme() {
+        let aspects = vec![
+            syn(AspectKind::Trine), syn(AspectKind::Trine),
+            syn(AspectKind::Square), syn(AspectKind::Square),
+        ];
+        assert_eq!(synastry_tone(&aspects), SynastryTone::Balanced);
+    }
+
+    #[test]
+    fn minor_aspects_alone_never_tip_the_reading_either_way() {
+        let aspects = vec![
+            syn(AspectKind::Conjunction), syn(AspectKind::SemiSextile),
+            syn(AspectKind::Quincunx), syn(AspectKind::Conjunction),
+        ];
+        assert_eq!(synastry_tone(&aspects), SynastryTone::Balanced);
+    }
+
+    #[test]
+    fn threshold_is_a_real_boundary_not_off_by_one() {
+        // Score 2 (just under the Harmonious cutoff) stays Balanced;
+        // score 3 crosses it.
+        let two = vec![syn(AspectKind::Trine), syn(AspectKind::Sextile)];
+        assert_eq!(synastry_tone(&two), SynastryTone::Balanced);
+        let three = vec![
+            syn(AspectKind::Trine), syn(AspectKind::Sextile), syn(AspectKind::Trine),
+        ];
+        assert_eq!(synastry_tone(&three), SynastryTone::Harmonious);
     }
 }
