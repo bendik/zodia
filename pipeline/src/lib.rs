@@ -95,6 +95,15 @@ pub enum StateEvent {
         circle_id: Hash,
         recipient: VerifyingKey,
     },
+    /// `member` (the op's author) just opened a circle they were invited
+    /// to. Same "everyone technically receives this" reasoning as
+    /// `CircleInviteReceived` — only a device that already recognizes
+    /// `circle_id` as one of its own circles has a reason to act on it.
+    CircleMemberJoined {
+        op_id:     Hash,
+        circle_id: Hash,
+        member:    VerifyingKey,
+    },
     /// Phase F-collab: a CRDT edit landed against `interp_key`.  The
     /// materialiser persists the update into the local Loro doc and updates
     /// per-block author rings.
@@ -264,6 +273,9 @@ fn materialize_interp(op_id: Hash, author: VerifyingKey, timestamp: Timestamp, i
         },
         InterpOp::CircleInviteNotify { circle_id, recipient } => StateEvent::CircleInviteReceived {
             op_id, inviter: author, circle_id, recipient,
+        },
+        InterpOp::CircleJoinNotify { circle_id } => StateEvent::CircleMemberJoined {
+            op_id, circle_id, member: author,
         },
     }
 }

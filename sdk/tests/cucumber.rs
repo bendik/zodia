@@ -399,6 +399,28 @@ async fn observes_circle_invite_not_for_them(world: &mut ZodiaWorld, name: Strin
     );
 }
 
+#[when(expr = "{string} notifies the circle of joining")]
+async fn peer_notifies_circle_join(world: &mut ZodiaWorld, name: String) {
+    let circle_id = world.last_circle.expect("a circle must be created before notifying about joining it");
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .notify_circle_join(circle_id)
+        .await
+        .expect("notify_circle_join succeeds");
+}
+
+#[then(expr = "{string} observes {string} joining the circle within {int} seconds")]
+async fn observes_circle_member_joined(world: &mut ZodiaWorld, name: String, joiner: String, secs: u64) {
+    let (joiner_signing_key, _) = world.identities.get(&joiner)
+        .unwrap_or_else(|| panic!("no prior identity for peer {joiner}"))
+        .clone();
+    let joiner_verifying_key = PandaSigningKey::from_bytes(joiner_signing_key.as_bytes()).verifying_key();
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::CircleMemberJoined { member, .. } if *member == joiner_verifying_key)
+    }).await;
+    assert!(seen, "{name} did not observe {joiner} joining the circle within {secs}s");
+}
+
 // Labelled variant — see `peer_creates_named_circle`'s doc comment.
 #[given(expr = "{string} invites {string} to circle {string}")]
 #[when(expr = "{string} invites {string} to circle {string}")]

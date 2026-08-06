@@ -172,6 +172,20 @@ pub enum InterpOp {
         circle_id: Hash,
         recipient: p2panda_core::VerifyingKey,
     },
+
+    /// A member just opened a circle they were invited to — lets existing
+    /// members' UIs show "X joined" instead of only finding out passively
+    /// the next time they happen to check `circle_members()`. Same
+    /// plaintext-global-topic privacy reasoning as `CircleInviteNotify`: no
+    /// circle name, and every connected peer technically receives this,
+    /// but only a device that already recognizes `circle_id` as one of its
+    /// own circles has any reason to act on it — everyone else's client
+    /// silently ignores it, same as `CircleInviteNotify`'s "not addressed
+    /// to them" case. The joiner is `author`, already carried by every
+    /// `InterpOp`'s envelope, so this variant itself needs no member field.
+    CircleJoinNotify {
+        circle_id: Hash,
+    },
 }
 
 // ── DocOp (Phase F-collab) ────────────────────────────────────────────────────
@@ -395,6 +409,13 @@ mod tests {
     fn circle_invite_notify_roundtrip() {
         let recipient = p2panda_core::SigningKey::from_bytes(&[0x42u8; 32]).verifying_key();
         let op = InterpOp::CircleInviteNotify { circle_id: sample_hash(), recipient };
+        let bytes = op.encode();
+        assert_eq!(op, InterpOp::decode(&bytes).unwrap());
+    }
+
+    #[test]
+    fn circle_join_notify_roundtrip() {
+        let op = InterpOp::CircleJoinNotify { circle_id: sample_hash() };
         let bytes = op.encode();
         assert_eq!(op, InterpOp::decode(&bytes).unwrap());
     }

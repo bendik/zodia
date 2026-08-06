@@ -194,3 +194,23 @@ Feature: Private circles let a user share an interpretation with named friends i
     # instant check.
     And 3 seconds pass
     And "Alice" no longer sees "Bob" as a member of the circle
+
+  Scenario: The inviter learns when an invited member actually joins
+    # The invite flow already tells the invitee a circle exists
+    # (CircleInviteNotify, see the scenario above). The other half of
+    # that gap was never closed until now: once Bob accepts, Alice had
+    # no in-app way to learn he actually showed up — only a passive
+    # circle_members() check would eventually reveal it. Carol's half
+    # proves this rides the same always-on global topic as every other
+    # InterpOp (everyone technically receives it), but only a client
+    # that already recognizes the circle_id has any reason to act on it.
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And a peer named "Carol" connected to the network
+    And 3 seconds pass
+    And "Alice" creates a circle
+    And "Alice" invites "Bob" to the circle
+    And "Bob" joins the circle
+    When "Bob" notifies the circle of joining
+    Then "Alice" observes "Bob" joining the circle within 15 seconds
+    And "Carol" observes "Bob" joining the circle within 15 seconds

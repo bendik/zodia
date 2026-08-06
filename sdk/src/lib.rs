@@ -300,6 +300,16 @@ impl ZodiaClient {
         self.call(|reply| Command::NotifyCircleInvite { circle_id, recipient, reply }).await
     }
 
+    /// Broadcast a join notification (`InterpOp::CircleJoinNotify`, log 0)
+    /// — call this right after a successful `open_circle` so existing
+    /// members' clients can show "X joined" instead of only finding out
+    /// passively the next time they happen to call `circle_members()`.
+    /// Same "everyone technically receives this" reasoning as
+    /// `notify_circle_invite`.
+    pub async fn notify_circle_join(&self, circle_id: CircleId) -> Result<(), ClientError> {
+        self.call(|reply| Command::NotifyCircleJoin { circle_id, reply }).await
+    }
+
     /// Share an interpretation privately with `circle_id`'s current
     /// members instead of the public network — encodes the same
     /// `InterpOp::Author` the public path (`Self::author`) uses, so once
@@ -440,6 +450,7 @@ enum Command {
     InviteToCircle { circle_id: SpaceId, member: VerifyingKey, access: Access<()>, reply: Reply },
     RevokeFromCircle { circle_id: SpaceId, member: VerifyingKey, reply: Reply },
     NotifyCircleInvite { circle_id: SpaceId, recipient: VerifyingKey, reply: Reply },
+    NotifyCircleJoin { circle_id: SpaceId, reply: Reply },
     ShareToCircle { circle_id: SpaceId, plaintext: Vec<u8>, reply: Reply },
     CircleMembers {
         circle_id: SpaceId,
@@ -639,6 +650,10 @@ async fn handle_command(
         }
         Command::NotifyCircleInvite { circle_id, recipient, reply } => {
             let res = node.publish(InterpOp::CircleInviteNotify { circle_id, recipient }).await.map_err(sync_err);
+            let _ = reply.send(res);
+        }
+        Command::NotifyCircleJoin { circle_id, reply } => {
+            let res = node.publish(InterpOp::CircleJoinNotify { circle_id }).await.map_err(sync_err);
             let _ = reply.send(res);
         }
         Command::ShareToCircle { circle_id, plaintext, reply } => {

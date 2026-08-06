@@ -313,6 +313,10 @@ pub struct AppModel {
     /// `RefCell`-in-`update_view` reasoning as `pending_push_queue`.
     /// `(inviter, circle_id)`.
     pending_circle_invite_toasts: RefCell<Vec<(p2panda_core::VerifyingKey, p2panda_core::Hash)>>,
+    /// Circle joins for a circle this device already recognizes as its
+    /// own, queued for `update_view` to show as an `adw::Toast` — same
+    /// reasoning as `pending_circle_invite_toasts`. `(member, circle_id)`.
+    pending_circle_join_toasts: RefCell<Vec<(p2panda_core::VerifyingKey, p2panda_core::Hash)>>,
     /// Doc affirmations ("hearts") that land on a reading this device
     /// contributed to, queued for `update_view` to show as an
     /// `adw::Toast` — same reasoning as `pending_circle_invite_toasts`.
@@ -625,6 +629,7 @@ impl AsyncComponent for AppModel {
             pending_circle_push_queue: RefCell::new(Vec::new()),
             share_picker_request: RefCell::new(None),
             pending_circle_invite_toasts: RefCell::new(Vec::new()),
+            pending_circle_join_toasts: RefCell::new(Vec::new()),
             pending_affirm_toasts: RefCell::new(Vec::new()),
             name_circle_request: RefCell::new(None),
             pending_circle_leaves: RefCell::new(Vec::new()),
@@ -1493,6 +1498,18 @@ impl AsyncComponent for AppModel {
                         // comment on why every connected peer technically
                         // receives this at all.
                     }
+                    StateEvent::CircleMemberJoined { circle_id, member, .. } => {
+                        let id_hex = hex::encode(circle_id.as_bytes());
+                        // Only meaningful to a client that already
+                        // recognizes this circle as its own — everyone
+                        // else's client technically receives this too (see
+                        // the op's own doc comment) but has no local name
+                        // or membership to react against.
+                        if self.circles.contains_key(&id_hex) {
+                            self.pending_circle_join_toasts.borrow_mut()
+                                .push((*member, *circle_id));
+                        }
+                    }
                 }
                 if let Some(item) = feed_item {
                     if let Some(s) = &self.feed_view_sender {
@@ -1950,6 +1967,13 @@ impl AsyncComponent for AppModel {
                             // InterpOp::CircleInviteNotify's doc comment),
                             // so we ask; update_view presents the dialog.
                             *self.name_circle_request.borrow_mut() = Some(id_hex);
+                            // Separate from open_circle itself, which only
+                            // updates our own subscription — this is what
+                            // lets existing members' own clients learn we
+                            // actually showed up.
+                            if let Err(e) = client.notify_circle_join(circle_id).await {
+                                warn!("notify_circle_join: {e}");
+                            }
                         }
                         Err(e) => warn!("open_circle (from invite toast): {e}"),
                     }
@@ -2386,6 +2410,25 @@ impl AsyncComponent for AppModel {
             let s = sender.clone();
             toast.connect_button_clicked(move |_| {
                 s.input(AppMsg::JoinCircle { circle_id, inviter });
+            });
+            widgets.toast_overlay.add_toast(toast);
+        }
+
+        // ── "someone joined your circle" toasts ───────────────────────────────
+
+        for (member, circle_id) in self.pending_circle_join_toasts.borrow_mut().drain(..) {
+            let member_hex = hex::encode_upper(&member.as_bytes()[..4]);
+            let id_hex = hex::encode(circle_id.as_bytes());
+            let circle_name = self.circles.get(&id_hex).cloned().unwrap_or_default();
+            let toast = adw::Toast::builder()
+                .title(format!(
+                    "{} joined \"{}\"", self.resolved_peer_name(&member_hex), circle_name,
+                ))
+                .button_label("Open")
+                .build();
+            let s = sender.clone();
+            toast.connect_button_clicked(move |_| {
+                s.input(AppMsg::OpenCirclePage(id_hex.clone()));
             });
             widgets.toast_overlay.add_toast(toast);
         }
@@ -3506,7 +3549,8 @@ fn op_id_for(ev: &StateEvent) -> [u8; 32] {
         | StateEvent::ResponseAdded { op_id, .. }
         | StateEvent::InterpRevoked { op_id, .. }
         | StateEvent::DisplayNameSet { op_id, .. }
-        | StateEvent::CircleInviteReceived { op_id, .. } => *op_id.as_bytes(),
+        | StateEvent::CircleInviteReceived { op_id, .. }
+        | StateEvent::CircleMemberJoined { op_id, .. } => *op_id.as_bytes(),
         StateEvent::AffirmAdded { .. } | StateEvent::Skipped { .. } => [0u8; 32],
     }
 }

@@ -293,6 +293,9 @@ pub fn state_event_to_feed_item(
         // Handled directly in app.rs's dispatch (toast queue); not a
         // feed-worthy event, same reasoning as DisplayNameSet.
         StateEvent::CircleInviteReceived { .. } => return None,
+        // Handled directly in app.rs's dispatch (toast queue); not a
+        // feed-worthy event, same reasoning as CircleInviteReceived.
+        StateEvent::CircleMemberJoined { .. } => return None,
         StateEvent::DocEdited { by, interp_key: key, .. } => FeedItem {
             event_id:   match event {
                 StateEvent::DocEdited { op_id, .. } => *op_id.as_bytes(),
