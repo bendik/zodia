@@ -5,6 +5,17 @@ name: Sync Flathub
 # mechanism (only pre-release-hook — confirmed against its own docs), so
 # scripts/flatpak-sync.sh was never actually invoked anywhere before this
 # workflow existed; Flathub silently sat 5 releases stale as a result.
+#
+# Auth: FLATHUB_PAT, a classic PAT (repo scope) on the maintainer's own
+# account — NOT a deploy key. Flathub's app repos require updates via PR
+# (branch protection on master), and adding a deploy key requires *admin*
+# on the repo; a maintainer who's only a push-access collaborator (the
+# normal case — confirmed via `gh api repos/flathub/... --jq .permissions`
+# returning admin:false, push:true) can't create one. A fine-grained PAT
+# hits the same wall (repos outside your own account need the resource-
+# owning org to pre-approve fine-grained token access, which Flathub
+# hasn't opted into). A classic `repo`-scoped PAT has neither restriction:
+# it simply inherits whatever access the account already has.
 
 on:
   push:
@@ -28,35 +39,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # Deploy key with write access to flathub/io.github.bendik.Zodia —
-      # the default GITHUB_TOKEN only has permissions on this repo, not
-      # that separate one. One-time setup, see README.
-      #
-      # Uses webfactory/ssh-agent instead of hand-writing the key file
-      # (previously `echo "${{ secrets... }}" > ~/.ssh/id_ed25519`, which
-      # failed on v0.9.2/v0.9.3 with "error in libcrypto" — libcrypto
-      # couldn't parse the key at all. Most likely cause: a multi-line
-      # secret losing its trailing newline (or otherwise getting mangled)
-      # when pasted into GitHub's secret textarea; `echo` then wrote
-      # whatever came through verbatim, malformed or not, with nothing to
-      # catch it. ssh-agent loads the key via its own argument passing
-      # instead of a shell-redirected file, sidestepping that whole class
-      # of mangling, and fails loudly with a clear error if the secret
-      # itself is genuinely missing or invalid.
-      - name: Set up SSH agent for Flathub push
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.FLATHUB_DEPLOY_KEY }}
-
-      - name: Trust github.com host key
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-
-      # .gitmodules already points at the SSH URL — do this after the key
-      # is in place so the submodule fetch/push both use it.
       - name: Init flathub submodule
         run: git submodule update --init flatpak/flathub
+
+      # .gitmodules points at the SSH URL (git@github.com:...) so local/
+      # manual syncs "just work" off the maintainer's own SSH key; CI has
+      # no SSH key, so rewrite this one remote to HTTPS + the PAT instead.
+      - name: Point flathub submodule remote at HTTPS + PAT
+        run: |
+          git -C flatpak/flathub remote set-url origin \
+            "https://x-access-token:${FLATHUB_PAT}@github.com/flathub/io.github.bendik.Zodia.git"
+        env:
+          FLATHUB_PAT: ${{ secrets.FLATHUB_PAT }}
 
       - uses: actions/setup-python@v5
         with:
@@ -69,3 +63,18 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           bash scripts/flatpak-sync.sh "$VERSION"
+
+      # flatpak-sync.sh only pushes the branch — Flathub requires an actual
+      # PR (protected master, auto test-build on open). `|| true`: a re-run
+      # of the same tag would otherwise fail here with "already exists",
+      # which isn't a real failure.
+      - name: Open Flathub PR
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh pr create --repo flathub/io.github.bendik.Zodia \
+            --base master --head "update/v${VERSION}" \
+            --title "bump to v${VERSION}" \
+            --body "Updates Zodia to v${VERSION}. See release notes: https://github.com/bendik/zodia/releases/tag/v${VERSION}" \
+            || true
+        env:
+          GH_TOKEN: ${{ secrets.FLATHUB_PAT }}
