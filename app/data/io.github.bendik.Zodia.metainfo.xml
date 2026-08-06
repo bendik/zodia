@@ -88,6 +88,13 @@
   </supports>
 
   <releases>
+    <release version="0.11.0" date="2026-08-05">
+      <description>
+        <p>Circles get a round of social polish: a member can now leave a circle on their own instead of asking the owner, and everyone already in a circle is notified the moment someone new actually joins — closing the other half of the invite flow, which previously only ever told the invitee.</p>
+        <p>Direct chats feel more like a real conversation now: a "Typing…" indicator shows when the other person is composing a reply, and a "Seen" receipt appears once they've opened your message. Connected peers also show an at-a-glance synastry tone (✨ harmonious, • balanced, ⚡ challenging) right in the sidebar, and an offline peer's page shows "Last seen 5m ago" instead of just a gray dot.</p>
+        <p>You can also mute a specific peer's activity in your own feed — their readings, replies, and hearts stop showing up for you, without disconnecting or losing anything if you unmute later.</p>
+      </description>
+    </release>
     <release version="0.10.0" date="2026-08-04">
       <description>
         <p>Your natal chart now surfaces a lot it was quietly computing but never showing: retrograde planets (℞), your Moon phase (natal and today's live phase on the Sky tab), an elemental/modal balance summary, stelliums, Grand Trine and T-Square detection, a full house-cusps table, critical (29°) degree markers, and a "Big Three" headline at the top of the Chart tab. A new "?" button on every tab explains every glyph the app uses.</p>
