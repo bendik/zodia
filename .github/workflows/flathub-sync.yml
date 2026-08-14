@@ -39,12 +39,23 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # .gitmodules points at the SSH URL (git@github.com:...) so local/
+      # manual syncs "just work" off the maintainer's own SSH key. CI has
+      # no SSH key at all, so `git submodule update --init` itself fails
+      # ("Permission denied (publickey)") if run against that URL — this
+      # has to happen *before* init, not after: the initial clone needs
+      # an unauthenticated-but-working transport (HTTPS works anonymously
+      # for a public repo's read access), then the PAT gets layered on
+      # top afterward for the push step.
+      - name: Use HTTPS for submodule clone (CI has no SSH key)
+        run: |
+          git config submodule.flatpak/flathub.url \
+            https://github.com/flathub/io.github.bendik.Zodia.git
+          git submodule sync flatpak/flathub
+
       - name: Init flathub submodule
         run: git submodule update --init flatpak/flathub
 
-      # .gitmodules points at the SSH URL (git@github.com:...) so local/
-      # manual syncs "just work" off the maintainer's own SSH key; CI has
-      # no SSH key, so rewrite this one remote to HTTPS + the PAT instead.
       - name: Point flathub submodule remote at HTTPS + PAT
         run: |
           git -C flatpak/flathub remote set-url origin \
