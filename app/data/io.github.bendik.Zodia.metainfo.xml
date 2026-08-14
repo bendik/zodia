@@ -88,6 +88,12 @@
   </supports>
 
   <releases>
+    <release version="0.12.0" date="2026-08-14">
+      <description>
+        <p>If you have Ollama running locally, Zodia now offers a "Generate with AI" button on any reading you're contributing to — drafts a starting point using our own astrology-focused prompt, which you can then edit before submitting like any other contribution. Entirely optional and never required: nothing changes if you don't have Ollama installed.</p>
+        <p>Every AI-drafted contribution carries that disclosure with it over the network, not just on your own device — anyone who reads it sees a "🤖 Includes AI-drafted content" note and can see exactly which edits used it.</p>
+      </description>
+    </release>
     <release version="0.11.0" date="2026-08-05">
       <description>
         <p>Circles get a round of social polish: a member can now leave a circle on their own instead of asking the owner, and everyone already in a circle is notified the moment someone new actually joins — closing the other half of the invite flow, which previously only ever told the invitee.</p>
