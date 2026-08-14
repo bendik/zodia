@@ -88,6 +88,13 @@
   </supports>
 
   <releases>
+    <release version="0.13.0" date="2026-08-14">
+      <description>
+        <p>The sidebar and window chrome got a pass toward more current GNOME design: circles and the Chart/Sky/Network navigation now live in adaptive sidebar sections, icons are bundled so Zodia looks the same on macOS and Windows as it does on Linux, and a few lingering deprecated widgets are gone.</p>
+        <p>Affirming a reading (♡) is now a real toggle — tap again to take it back if you change your mind, instead of it being permanent once sent.</p>
+        <p>The natal chart's aspect list can run dozens of rows; a search field above it now lets you narrow it down by name.</p>
+      </description>
+    </release>
     <release version="0.12.0" date="2026-08-14">
       <description>
         <p>If you have Ollama running locally, Zodia now offers a "Generate with AI" button on any reading you're contributing to — drafts a starting point using our own astrology-focused prompt, which you can then edit before submitting like any other contribution. Entirely optional and never required: nothing changes if you don't have Ollama installed.</p>
