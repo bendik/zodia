@@ -130,6 +130,10 @@ impl ZodiaStore {
         ] {
             let _ = sqlx::query(stmt).execute(&self.pool).await;
         }
+        // AI-assisted-draft disclosure: ai_generated column on doc_block_authors.
+        let _ = sqlx::query("ALTER TABLE doc_block_authors ADD COLUMN ai_generated INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -1236,9 +1240,9 @@ impl ZodiaStore {
         &self,
         interp_key: &str,
         block_id:   &[u8; 16],
-    ) -> Result<Vec<(/*author*/[u8; 32], /*edit_op_id*/[u8; 32], /*edited_at*/u64)>, StoreError> {
+    ) -> Result<Vec<(/*author*/[u8; 32], /*edit_op_id*/[u8; 32], /*edited_at*/u64, /*ai_generated*/bool)>, StoreError> {
         let rows = sqlx::query(
-            "SELECT author_pk, edit_op_id, edited_at
+            "SELECT author_pk, edit_op_id, edited_at, ai_generated
                FROM doc_block_authors
               WHERE interp_key = ? AND block_id = ?
               ORDER BY position ASC",
@@ -1254,7 +1258,8 @@ impl ZodiaStore {
             if a.len() != 32 || e.len() != 32 { continue; }
             let mut author = [0u8; 32]; author.copy_from_slice(&a);
             let mut op_id  = [0u8; 32]; op_id .copy_from_slice(&e);
-            out.push((author, op_id, row.get::<i64, _>(2) as u64));
+            let ai_generated: i64 = row.get(3);
+            out.push((author, op_id, row.get::<i64, _>(2) as u64, ai_generated != 0));
         }
         Ok(out)
     }
@@ -1265,16 +1270,17 @@ impl ZodiaStore {
     /// `now_unix` keeps the call deterministic in tests.
     pub async fn block_ring_push(
         &self,
-        interp_key: &str,
-        block_id:   &[u8; 16],
-        author:     &[u8; 32],
-        edit_op_id: &[u8; 32],
-        now_unix:   u64,
+        interp_key:   &str,
+        block_id:     &[u8; 16],
+        author:       &[u8; 32],
+        edit_op_id:   &[u8; 32],
+        now_unix:     u64,
+        ai_generated: bool,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         // Load current entries.
         let rows = sqlx::query(
-            "SELECT author_pk, edit_op_id, edited_at
+            "SELECT author_pk, edit_op_id, edited_at, ai_generated
                FROM doc_block_authors
               WHERE interp_key = ? AND block_id = ?
               ORDER BY position ASC",
@@ -1283,11 +1289,11 @@ impl ZodiaStore {
         .bind(block_id.as_slice())
         .fetch_all(&mut *tx)
         .await?;
-        let mut entries: Vec<(Vec<u8>, Vec<u8>, i64)> = rows
+        let mut entries: Vec<(Vec<u8>, Vec<u8>, i64, i64)> = rows
             .into_iter()
-            .map(|r| (r.get(0), r.get(1), r.get::<i64, _>(2)))
+            .map(|r| (r.get(0), r.get(1), r.get::<i64, _>(2), r.get::<i64, _>(3)))
             .collect();
-        entries.push((author.to_vec(), edit_op_id.to_vec(), now_unix as i64));
+        entries.push((author.to_vec(), edit_op_id.to_vec(), now_unix as i64, ai_generated as i64));
         while entries.len() > zodia_doc::RING_SIZE {
             entries.remove(0);
         }
@@ -1297,11 +1303,11 @@ impl ZodiaStore {
             .bind(block_id.as_slice())
             .execute(&mut *tx)
             .await?;
-        for (pos, (a, e, t)) in entries.iter().enumerate() {
+        for (pos, (a, e, t, ai)) in entries.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO doc_block_authors
-                    (interp_key, block_id, position, author_pk, edit_op_id, edited_at)
-                  VALUES (?, ?, ?, ?, ?, ?)",
+                    (interp_key, block_id, position, author_pk, edit_op_id, edited_at, ai_generated)
+                  VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(interp_key)
             .bind(block_id.as_slice())
@@ -1309,11 +1315,27 @@ impl ZodiaStore {
             .bind(a)
             .bind(e)
             .bind(*t)
+            .bind(*ai)
             .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Whether `interp_key`'s doc currently has any block whose ring
+    /// includes an AI-drafted edit — used to show a disclosure caption on
+    /// the reading. Deliberately "any block, any ring position" rather
+    /// than just the newest: even an older-but-still-present block's text
+    /// was AI-drafted and may still be part of the converged body.
+    pub async fn doc_has_ai_generated_content(&self, interp_key: &str) -> Result<bool, StoreError> {
+        let row = sqlx::query(
+            "SELECT 1 FROM doc_block_authors WHERE interp_key = ? AND ai_generated = 1 LIMIT 1",
+        )
+        .bind(interp_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
     }
 
     /// Record one affirmation against a (interp_key, revision) pair.
@@ -1532,11 +1554,11 @@ mod doc_ring_tests {
 
         assert!(!store.doc_has_contributor(key, &alice).await.unwrap());
 
-        store.block_ring_push(key, &block, &alice, &[1u8; 32], 100).await.unwrap();
+        store.block_ring_push(key, &block, &alice, &[1u8; 32], 100, false).await.unwrap();
         assert!(store.doc_has_contributor(key, &alice).await.unwrap());
         assert!(!store.doc_has_contributor(key, &bob).await.unwrap());
 
-        store.block_ring_push(key, &block, &bob, &[2u8; 32], 101).await.unwrap();
+        store.block_ring_push(key, &block, &bob, &[2u8; 32], 101, false).await.unwrap();
         // Both remain: the ring holds up to RING_SIZE distinct edits, and
         // two entries doesn't evict Alice's — a real bug this guards
         // against would be treating the ring as single-author.
@@ -1548,8 +1570,38 @@ mod doc_ring_tests {
     async fn has_contributor_is_scoped_to_the_right_interp_key() {
         let store = ZodiaStore::open_in_memory().await.unwrap();
         let alice = [0xAAu8; 32];
-        store.block_ring_push("natal:sun_trine_moon", &[1u8; 16], &alice, &[1u8; 32], 100).await.unwrap();
+        store.block_ring_push("natal:sun_trine_moon", &[1u8; 16], &alice, &[1u8; 32], 100, false).await.unwrap();
         assert!(!store.doc_has_contributor("natal:mars_square_saturn", &alice).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ai_generated_flag_round_trips_through_the_ring() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let key = "natal:sun_trine_moon";
+        let block = [1u8; 16];
+        let alice = [0xAAu8; 32];
+
+        store.block_ring_push(key, &block, &alice, &[1u8; 32], 100, true).await.unwrap();
+        let ring = store.block_ring_get(key, &block).await.unwrap();
+        assert_eq!(ring.len(), 1);
+        assert!(ring[0].3, "ai_generated should round-trip as true");
+        assert!(store.doc_has_ai_generated_content(key).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn doc_has_ai_generated_content_is_false_for_ordinary_edits() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        let key = "natal:sun_trine_moon";
+        store.block_ring_push(key, &[1u8; 16], &[0xAAu8; 32], &[1u8; 32], 100, false).await.unwrap();
+        assert!(!store.doc_has_ai_generated_content(key).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn doc_has_ai_generated_content_is_scoped_to_the_right_interp_key() {
+        let store = ZodiaStore::open_in_memory().await.unwrap();
+        store.block_ring_push("natal:sun_trine_moon", &[1u8; 16], &[0xAAu8; 32], &[1u8; 32], 100, true)
+            .await.unwrap();
+        assert!(!store.doc_has_ai_generated_content("natal:mars_square_saturn").await.unwrap());
     }
 }
 
@@ -1658,7 +1710,7 @@ mod feed_tests {
             &edit_op, 1234, &author, &blocks,
         ).await.unwrap();
         // Ring push so rollback's ring pop has something to drop.
-        store.block_ring_push(key, &[0u8; 16], &author, &edit_op, 1234)
+        store.block_ring_push(key, &[0u8; 16], &author, &edit_op, 1234, false)
             .await.unwrap();
         assert_eq!(store.doc_load(key).await.unwrap().unwrap(), snap_v2);
         let meta = store.doc_load_meta(key).await.unwrap().unwrap();
@@ -1778,6 +1830,7 @@ const SCHEMA_STMTS: &[&str] = &[
         author_pk    BLOB NOT NULL,
         edit_op_id   BLOB NOT NULL,
         edited_at    INTEGER NOT NULL,
+        ai_generated INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (interp_key, block_id, position)
     )",
     "CREATE INDEX IF NOT EXISTS idx_doc_block_authors_by_author

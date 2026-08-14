@@ -211,6 +211,15 @@ pub enum DocOp {
         base_rev:        Hash,
         crdt_update:     Vec<u8>,
         affected_blocks: Vec<[u8; 16]>,
+        /// Whether this edit's text was drafted by a local LLM (via
+        /// `zodia-llm`) before the author reviewed/submitted it. Part of
+        /// the wire format deliberately — every peer who ever sees this
+        /// content should see the disclosure, not just the author's own
+        /// client. `#[serde(default)]` so older encoded ops (before this
+        /// field existed) still decode, defaulting to `false` — the
+        /// honest reading, since they predate the feature entirely.
+        #[serde(default)]
+        ai_generated: bool,
     },
     /// Veto a specific `Edit` op.  Honoured by receivers iff:
     ///   1. the revoker's pubkey sits in the ring of at least one of the
@@ -274,7 +283,7 @@ mod doc_op_tests {
     fn interp_key_accessor_covers_every_variant() {
         assert_eq!(DocOp::Edit {
             interp_key: "natal:sun_trine_moon".into(), base_rev: sample_hash(),
-            crdt_update: vec![], affected_blocks: vec![],
+            crdt_update: vec![], affected_blocks: vec![], ai_generated: false,
         }.interp_key(), "natal:sun_trine_moon");
         assert_eq!(DocOp::Veto {
             interp_key: "natal:x".into(), target_edit_op_id: sample_hash(),
@@ -294,9 +303,55 @@ mod doc_op_tests {
             base_rev:        sample_hash(),
             crdt_update:     vec![1, 2, 3, 4, 5],
             affected_blocks: vec![[0u8; 16], [1u8; 16]],
+            ai_generated:    false,
         };
         let bytes = op.encode();
         assert_eq!(op, DocOp::decode(&bytes).unwrap());
+    }
+
+    #[test]
+    fn edit_roundtrip_ai_generated() {
+        let op = DocOp::Edit {
+            interp_key:      "natal:sun_trine_moon".into(),
+            base_rev:        sample_hash(),
+            crdt_update:     vec![1, 2, 3, 4, 5],
+            affected_blocks: vec![[0u8; 16]],
+            ai_generated:    true,
+        };
+        let bytes = op.encode();
+        assert_eq!(op, DocOp::decode(&bytes).unwrap());
+    }
+
+    /// An `Edit` encoded before `ai_generated` existed (no such field in the
+    /// CBOR map) must still decode — as `ai_generated: false`, the honest
+    /// reading since the field genuinely didn't exist yet.
+    #[test]
+    fn edit_decodes_missing_ai_generated_field_as_false() {
+        #[derive(Serialize)]
+        enum OldDocOp {
+            Edit {
+                interp_key:      String,
+                base_rev:        Hash,
+                crdt_update:     Vec<u8>,
+                affected_blocks: Vec<[u8; 16]>,
+            },
+        }
+        let old = OldDocOp::Edit {
+            interp_key:      "natal:sun_trine_moon".into(),
+            base_rev:        sample_hash(),
+            crdt_update:     vec![9, 9, 9],
+            affected_blocks: vec![[2u8; 16]],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&old, &mut buf).unwrap();
+        let decoded = DocOp::decode(&buf).unwrap();
+        match decoded {
+            DocOp::Edit { ai_generated, interp_key, .. } => {
+                assert!(!ai_generated);
+                assert_eq!(interp_key, "natal:sun_trine_moon");
+            }
+            other => panic!("expected Edit, got {other:?}"),
+        }
     }
 
     #[test]

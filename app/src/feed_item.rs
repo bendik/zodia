@@ -457,6 +457,7 @@ mod tests {
         let doc_event = StateEvent::DocEdited {
             op_id: hash(1), by: bob, interp_key: "natal:sun_trine_moon".into(),
             base_rev: hash(2), crdt_update: vec![], affected_blocks: vec![], timestamp: 0,
+            ai_generated: false,
         };
         assert!(!is_muted_social_event(&doc_event, &muted));
     }

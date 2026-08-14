@@ -156,7 +156,16 @@ async fn time_passes(_world: &mut ZodiaWorld, secs: u64) {
 async fn peer_edits(world: &mut ZodiaWorld, name: String, key: String) {
     world.clients.get(&name)
         .unwrap_or_else(|| panic!("no peer named {name}"))
-        .edit(&key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]])
+        .edit(&key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]], false)
+        .await
+        .expect("edit succeeds");
+}
+
+#[when(expr = "{string} edits {string} with AI assistance")]
+async fn peer_edits_ai_generated(world: &mut ZodiaWorld, name: String, key: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .edit(&key, Hash::from_bytes([0u8; 32]), vec![4, 5, 6], vec![[8u8; 16]], true)
         .await
         .expect("edit succeeds");
 }
@@ -635,6 +644,17 @@ async fn observes_doc_edit(world: &mut ZodiaWorld, name: String, key: String, se
         matches!(event, StateEvent::DocEdited { interp_key, .. } if *interp_key == key)
     }).await;
     assert!(seen, "{name} did not observe a doc edit on {key} within {secs}s");
+}
+
+#[then(expr = "{string} observes an AI-assisted doc edit on {string} within {int} seconds")]
+async fn observes_ai_generated_doc_edit(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(
+            event,
+            StateEvent::DocEdited { interp_key, ai_generated: true, .. } if *interp_key == key
+        )
+    }).await;
+    assert!(seen, "{name} did not observe an AI-assisted doc edit on {key} within {secs}s");
 }
 
 #[then(expr = "{string} observes no doc edit on {string} within {int} seconds")]

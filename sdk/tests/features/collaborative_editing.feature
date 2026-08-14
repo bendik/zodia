@@ -17,3 +17,14 @@ Feature: Collaborative interpretation editing converges across peers
     And "Bob" is subscribed to "natal:venus_square_pluto"
     When "Bob" edits "natal:venus_square_pluto"
     Then "Alice" observes a doc edit on "natal:venus_square_pluto" within 15 seconds
+
+  Scenario: An AI-assisted edit's disclosure travels with it, not just locally
+    # The whole point of making this a protocol field instead of a local-
+    # only UI note: every peer who receives the edit sees the disclosure,
+    # not just the device that generated the draft.
+    Given a peer named "Alice" connected to the network
+    And a peer named "Bob" connected to the network
+    And "Alice" is subscribed to "natal:mercury_trine_uranus"
+    And "Bob" is subscribed to "natal:mercury_trine_uranus"
+    When "Bob" edits "natal:mercury_trine_uranus" with AI assistance
+    Then "Alice" observes an AI-assisted doc edit on "natal:mercury_trine_uranus" within 15 seconds

@@ -49,6 +49,7 @@ pub fn build_stargazer_page(
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
     split_view: &adw::OverlaySplitView,
+    ollama_models: &[String],
 ) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label, adw::ViewSwitcherTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
@@ -80,6 +81,7 @@ pub fn build_stargazer_page(
             baseline:         Rc::clone(&baseline),
             identity:         Rc::clone(&identity),
             parent_sender:    sender.clone(),
+            ollama_models:    ollama_models.to_vec(),
         }),
         None => crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
             kind:             crate::aspect_view::AspectViewKind::Synastry,
@@ -90,6 +92,7 @@ pub fn build_stargazer_page(
             baseline:         Rc::clone(&baseline),
             identity:         Rc::clone(&identity),
             parent_sender:    sender.clone(),
+            ollama_models:    ollama_models.to_vec(),
         }),
     };
     their_av.set_vexpand(true);
@@ -111,6 +114,7 @@ pub fn build_stargazer_page(
         baseline:         Rc::clone(&baseline),
         identity:         Rc::clone(&identity),
         parent_sender:    sender.clone(),
+        ollama_models:    ollama_models.to_vec(),
     });
     syn_av.set_vexpand(true);
     let syn_page = view_stack.add_titled(&syn_av, Some("synastry"), "Synastry");

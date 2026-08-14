@@ -8,10 +8,11 @@
 //! a synthetic "Combined" page when there are 2+ keys.  Aspects (single key)
 //! get no switcher; placements (sign + house) get [Sign] [House] [Combined].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use libadwaita as adw;
+use libadwaita::glib;
 use libadwaita::gtk;
 use libadwaita::prelude::*;
 use relm4::component::{
@@ -72,6 +73,7 @@ pub struct AspectViewInit {
     pub baseline:         Rc<BaselineStore>,
     pub identity:         Rc<IdentityKeypair>,
     pub parent_sender:    AsyncComponentSender<AppModel>,
+    pub ollama_models:    Vec<String>,
 }
 
 /// Spawn the component and return its root widget; runtime detached so the
@@ -91,6 +93,11 @@ pub struct AspectView {
     baseline:         Rc<BaselineStore>,
     identity:         Rc<IdentityKeypair>,
     parent_sender:    AsyncComponentSender<AppModel>,
+    /// Locally-installed Ollama model names, if Ollama was detected at
+    /// app startup — empty means "not available," and no
+    /// "Generate with AI" button is offered. See `AppModel`'s own
+    /// `ollama_models` field for how this gets populated.
+    ollama_models:    Vec<String>,
     #[allow(dead_code)]
     rows:             FactoryVecDeque<InterpRow>,
     #[allow(dead_code)]
@@ -222,6 +229,7 @@ impl SimpleAsyncComponent for AspectView {
             baseline:      init.baseline,
             identity:      init.identity,
             parent_sender: init.parent_sender,
+            ollama_models: init.ollama_models,
             rows,
             placements_rows,
         };
@@ -356,6 +364,7 @@ impl SimpleAsyncComponent for AspectView {
                     &self.baseline,
                     Rc::clone(&self.identity),
                     self.parent_sender.clone(),
+                    &self.ollama_models,
                 ).await;
                 self.nav.push(&page);
             }
@@ -382,6 +391,7 @@ pub async fn detail_page(
     baseline: &BaselineStore,
     identity: Rc<IdentityKeypair>,
     sender: AsyncComponentSender<AppModel>,
+    ollama_models: &[String],
 ) -> adw::NavigationPage {
     let toolbar = adw::ToolbarView::new();
     let header  = adw::HeaderBar::new();
@@ -428,6 +438,7 @@ pub async fn detail_page(
             baseline,
             Rc::clone(&identity),
             sender.clone(),
+            ollama_models,
         ).await;
         if keys.len() > 1 {
             doc_group.set_title(&format!("{} — Community reading", entry.label));
@@ -468,20 +479,33 @@ pub async fn detail_page(
 /// edit op; a Revisions section surfaces the current revision hash and
 /// recent-editor attribution.
 async fn build_doc_reading_group(
-    key:      &InterpKey,
-    store:    &ZodiaStore,
-    baseline: &BaselineStore,
-    identity: Rc<IdentityKeypair>,
-    sender:   AsyncComponentSender<AppModel>,
+    key:           &InterpKey,
+    store:         &ZodiaStore,
+    baseline:      &BaselineStore,
+    identity:      Rc<IdentityKeypair>,
+    sender:        AsyncComponentSender<AppModel>,
+    ollama_models: &[String],
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title("Community reading");
-    group.set_description(Some(
-        "Local-first document the whole community refines together.  \
-         Recent editors may veto changes within 7 days.",
-    ));
 
     let key_sig = key.to_sig();
+
+    // Disclosure banner — deliberately part of the group description (the
+    // most prominent, always-visible spot) rather than only in the
+    // "Recent editors" popover, since a casual reader shouldn't have to
+    // dig into history to learn part of what they're reading was
+    // AI-drafted. See `zodia_store::doc_has_ai_generated_content`'s doc
+    // comment for the "any block, any ring position" scoping.
+    let has_ai_content = store.doc_has_ai_generated_content(&key_sig).await.unwrap_or(false);
+    group.set_description(Some(if has_ai_content {
+        "Local-first document the whole community refines together.  \
+         Recent editors may veto changes within 7 days.  \
+         🤖 Includes AI-drafted content — see Recent editors for who."
+    } else {
+        "Local-first document the whole community refines together.  \
+         Recent editors may veto changes within 7 days."
+    }));
     let me_bytes: [u8; 32] = identity.public_key();
 
     // Resolve current body + revision from persisted Loro doc, else
@@ -550,22 +574,69 @@ async fn build_doc_reading_group(
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
 
+    // Set once by the "Generate with AI" button below (if used) and read
+    // by Publish at submit time. Deliberately sticky across further manual
+    // edits to the same draft — "I used AI assistance for this
+    // submission" is the honest disclosure, not "this exact byte range is
+    // unedited AI output," which no UI could track meaningfully anyway.
+    let ai_generated_flag: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
     let publish_btn = gtk::Button::with_label("Publish edit");
     publish_btn.add_css_class("suggested-action");
     let buf_for_btn = buffer.clone();
     let key_for_btn = key_sig.clone();
     let sender_for_btn = sender.clone();
+    let ai_flag_for_publish = Rc::clone(&ai_generated_flag);
     publish_btn.connect_clicked(move |_| {
         let (s, e) = buf_for_btn.bounds();
         let text = buf_for_btn.text(&s, &e, false).to_string();
         let trimmed = text.trim().to_string();
         if !trimmed.is_empty() {
             sender_for_btn.input(AppMsg::PublishDocEdit {
-                interp_key: key_for_btn.clone(),
-                new_body:   trimmed,
+                interp_key:   key_for_btn.clone(),
+                new_body:     trimmed,
+                ai_generated: ai_flag_for_publish.get(),
             });
+            ai_flag_for_publish.set(false);
         }
     });
+
+    // "✨ Generate with AI" — only offered when a local Ollama instance was
+    // actually detected at startup (see `AppModel::ollama_models`'s doc
+    // comment). Drafts into the same buffer Publish reads from; the user
+    // can edit before submitting exactly as with a hand-written draft.
+    let generate_btn = gtk::Button::with_label("✨ Generate with AI");
+    if let Some(model) = ollama_models.first() {
+        let buf_for_gen = buffer.clone();
+        let model = model.clone();
+        let prompt = zodia_core::build_interp_prompt(key);
+        let ai_flag_for_gen = Rc::clone(&ai_generated_flag);
+        let btn_for_gen = generate_btn.clone();
+        generate_btn.connect_clicked(move |_| {
+            let buf = buf_for_gen.clone();
+            let model = model.clone();
+            let prompt = prompt.clone();
+            let flag = Rc::clone(&ai_flag_for_gen);
+            let btn = btn_for_gen.clone();
+            btn.set_sensitive(false);
+            btn.set_label("Generating…");
+            glib::spawn_future_local(async move {
+                match zodia_llm::OllamaClient::new().generate(&model, &prompt).await {
+                    Ok(text) => {
+                        buf.set_text(text.trim());
+                        flag.set(true);
+                    }
+                    Err(e) => {
+                        tracing::warn!("ollama generate failed: {e}");
+                    }
+                }
+                btn.set_sensitive(true);
+                btn.set_label("✨ Generate with AI");
+            });
+        });
+    } else {
+        generate_btn.set_visible(false);
+    }
 
     // Named to avoid colliding with the unrelated "Circles" privacy feature
     // (private encrypted sharing, see zodia-circles) — this is a live voice
@@ -604,6 +675,7 @@ async fn build_doc_reading_group(
 
     actions.append(&share_btn);
     actions.append(&audio_btn);
+    actions.append(&generate_btn);
     actions.append(&publish_btn);
     editor_box.append(&actions);
 
@@ -712,21 +784,22 @@ async fn build_doc_reading_group(
         // Local user is "in the ring" if their pubkey appears as one of the
         // last RING_SIZE editors.  Veto authority targets only the newest
         // entry and only within the 7-day window.
-        let me_in_ring = ring.iter().any(|(pk, _, _)| pk == &me_bytes);
+        let me_in_ring = ring.iter().any(|(pk, _, _, _)| pk == &me_bytes);
         let newest_idx = ring.len() - 1;  // ring is FIFO oldest→newest
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs()).unwrap_or(0);
         let window_secs = zodia_doc::VETO_WINDOW_DAYS * 86_400;
-        for (i, (pk, op_id, ts)) in ring.iter().enumerate().rev() {
+        for (i, (pk, op_id, ts, ai_generated)) in ring.iter().enumerate().rev() {
             let r = adw::ActionRow::new();
             r.set_title(&format!("···{}", hex::encode_upper(&pk[..4])));
             let mine_marker = if pk == &me_bytes { "  (you)" } else { "" };
+            let ai_marker = if *ai_generated { "  🤖 AI-assisted" } else { "" };
             r.set_subtitle(&format!(
-                "edit {}  ·  {}{}",
+                "edit {}  ·  {}{}{}",
                 hex::encode(&op_id[..4]),
                 relative_age(*ts),
-                mine_marker,
+                mine_marker, ai_marker,
             ));
             let is_newest = i == newest_idx;
             let in_window = now.saturating_sub(*ts) <= window_secs;

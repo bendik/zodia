@@ -1,0 +1,15 @@
+[package]
+name = "zodia-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal client for a locally-running Ollama instance — optional AI-assisted interpretation drafts"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util"] }

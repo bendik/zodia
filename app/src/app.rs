@@ -132,6 +132,9 @@ pub enum AppMsg {
     /// (their message entry's `changed` signal, debounced) — tells the
     /// remote side to show/hide a "typing…" indicator.
     SetTyping { peer_id: PeerId, active: bool },
+    /// Startup Ollama probe found a running instance with at least one
+    /// model installed — see `AppModel::ollama_models`.
+    OllamaDetected(Vec<String>),
     /// Send a message to `dest` via `relay` (blind relay path).
     ///
     /// The relay peer will forward the ECIES-encrypted payload to `dest` without
@@ -184,7 +187,7 @@ pub enum AppMsg {
     /// Phase F-collab: user submitted an edit on the collaborative
     /// community doc for `interp_key`.  Applies locally, persists snapshot,
     /// broadcasts as `DocOp::Edit`.
-    PublishDocEdit { interp_key: String, new_body: String },
+    PublishDocEdit { interp_key: String, new_body: String, ai_generated: bool },
     /// Phase F-collab: user affirmed the current revision of a doc.
     AffirmDocRev { interp_key: String, target_rev: [u8; 32] },
     /// Phase F-collab: user proposed a veto on the newest edit of a doc.
@@ -386,6 +389,15 @@ pub struct AppModel {
     /// loaded once at startup, updated on every `PeerChannelClosed`. Drives
     /// "Last seen Xm ago" in an offline peer's page title.
     last_seen: HashMap<[u8; 32], u64>,
+    /// Locally-installed Ollama model names, populated by a one-shot
+    /// background probe fired from `init()` (see `zodia_llm::OllamaClient::
+    /// detect_models`). Empty until the probe completes, and stays empty
+    /// forever if Ollama isn't installed/running — that's the normal case,
+    /// not an error: the "Generate with AI" button simply isn't offered.
+    /// A snapshot clone of this is threaded into each `AspectViewInit`,
+    /// so a page opened before the probe finishes just won't have the
+    /// button yet; opening it again after does.
+    ollama_models: Rc<RefCell<Vec<String>>>,
 
     /// Channel to the background LogSync task for publishing new interpretations.
     /// `None` until the network is up.
@@ -649,6 +661,7 @@ impl AsyncComponent for AppModel {
             unread_messages: HashMap::new(),
             chat_seen: HashMap::new(),
             last_seen,
+            ollama_models: Rc::new(RefCell::new(Vec::new())),
             zodia_client: None,
             recent_interps: Vec::new(),
             sync_peer_status: HashMap::new(),
@@ -746,6 +759,20 @@ impl AsyncComponent for AppModel {
                     s2.input(AppMsg::ReAnnounce);
                 });
             }
+        }
+
+        // Opportunistic one-shot Ollama probe — see `ollama_models`'s doc
+        // comment. Never blocks startup; most users don't have Ollama
+        // running and this quietly resolves to nothing for them.
+        {
+            let s = sender.clone();
+            tokio::spawn(async move {
+                if let Some(models) = zodia_llm::OllamaClient::new().detect_models().await {
+                    if !models.is_empty() {
+                        s.input(AppMsg::OllamaDetected(models));
+                    }
+                }
+            });
         }
 
         AsyncComponentParts { model, widgets }
@@ -1222,6 +1249,10 @@ impl AsyncComponent for AppModel {
                 }
             }
 
+            AppMsg::OllamaDetected(models) => {
+                *self.ollama_models.borrow_mut() = models;
+            }
+
             AppMsg::SendViaRelay { relay, dest, text } => {
                 let Some(relay_channel) = self.connected_channels.get(&relay) else { return };
                 let Some(their_blob) = self.stargazers.get(&dest).and_then(|s| match &s.state {
@@ -1332,7 +1363,7 @@ impl AsyncComponent for AppModel {
                         debug!(?reason, "sync op skipped");
                     }
                     StateEvent::DocEdited {
-                        interp_key, by, crdt_update, affected_blocks, timestamp, ..
+                        interp_key, by, crdt_update, affected_blocks, timestamp, ai_generated, ..
                     } => {
                         let me: [u8; 32] = self.identity.public_key();
                         let pk_vec = by.as_bytes().to_vec();
@@ -1346,7 +1377,7 @@ impl AsyncComponent for AppModel {
                                 let entries = self.store
                                     .block_ring_get(interp_key, block_id)
                                     .await.unwrap_or_default();
-                                if entries.iter().any(|(a, _, _)| a == &me) {
+                                if entries.iter().any(|(a, _, _, _)| a == &me) {
                                     you_were_in_ring = true;
                                     break;
                                 }
@@ -1354,7 +1385,7 @@ impl AsyncComponent for AppModel {
                         }
                         if let Err(e) = apply_doc_edit(
                             &self.store, interp_key, crdt_update, &pk_vec,
-                            &op_id_for(&event), *timestamp, affected_blocks, &me,
+                            &op_id_for(&event), *timestamp, affected_blocks, &me, *ai_generated,
                         ).await {
                             warn!("doc edit apply failed: {e}");
                         }
@@ -1539,7 +1570,7 @@ impl AsyncComponent for AppModel {
                 self.sync_peer_status.insert(remote_pk, status);
                 self.network_changed_token += 1;
             }
-            AppMsg::PublishDocEdit { interp_key, new_body } => {
+            AppMsg::PublishDocEdit { interp_key, new_body, ai_generated } => {
                 let me: [u8; 32] = self.identity.public_key();
                 let me_vk = match zodia_doc::VerifyingKey::from_bytes(&me) {
                     Ok(vk) => vk,
@@ -1592,7 +1623,7 @@ impl AsyncComponent for AppModel {
                 if let Some(client) = &self.zodia_client {
                     let base_rev = p2panda_core::Hash::from_bytes(base_rev);
                     if let Err(e) = client.edit(
-                        &interp_key, base_rev, edit.update_bytes, edit.affected_blocks,
+                        &interp_key, base_rev, edit.update_bytes, edit.affected_blocks, ai_generated,
                     ).await {
                         warn!("edit publish: {e}");
                     }
@@ -1808,6 +1839,7 @@ impl AsyncComponent for AppModel {
                     &self.baseline,
                     Rc::clone(&self.identity),
                     sender.clone(),
+                    &self.ollama_models.borrow(),
                 ).await;
                 if let Some(nav) = self.sky_nav.borrow().as_ref() {
                     nav.push(&page);
@@ -2283,6 +2315,7 @@ impl AsyncComponent for AppModel {
                     baseline:         Rc::clone(&self.baseline),
                     identity:         Rc::clone(&self.identity),
                     parent_sender:    sender.clone(),
+                    ollama_models:    self.ollama_models.borrow().clone(),
                 });
                 nav.set_vexpand(true);
                 widgets.chart_container.append(&nav);
@@ -2520,6 +2553,7 @@ impl AsyncComponent for AppModel {
                                 &sender,
                                 nickname,
                                 &widgets.split_view,
+                                &self.ollama_models.borrow(),
                             );
                         let online = self.connected_channels.contains_key(&peer_id);
                         call_btn.set_sensitive(online);
@@ -3404,6 +3438,7 @@ fn build_widgets(
             baseline:         Rc::clone(&model.baseline),
             identity:         Rc::clone(&model.identity),
             parent_sender:    sender.clone(),
+            ollama_models:    model.ollama_models.borrow().clone(),
         });
         nav.set_vexpand(true);
         chart_container.append(&nav);
@@ -3527,7 +3562,7 @@ async fn migrate_interps_to_docs(
             h.update(text.as_bytes());
             let synthetic_op_id = *h.finalize().as_bytes();
             store.block_ring_push(
-                &key, &zodia_doc::BODY_BLOCK_ID, author, &synthetic_op_id, *ts,
+                &key, &zodia_doc::BODY_BLOCK_ID, author, &synthetic_op_id, *ts, false,
             ).await?;
         }
     }
@@ -3569,6 +3604,7 @@ async fn apply_doc_edit(
     edit_ts:         u64,
     affected_blocks: &[[u8; 16]],
     me:              &[u8; 32],
+    ai_generated:    bool,
 ) -> Result<(), StoreError> {
     let mut bytes = [0u8; 32];
     if editor_pk.len() != 32 { return Ok(()); }
@@ -3618,7 +3654,7 @@ async fn apply_doc_edit(
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         for block_id in affected_blocks {
             store.block_ring_push(
-                interp_key, block_id, &editor_arr, edit_op_id, now,
+                interp_key, block_id, &editor_arr, edit_op_id, now, ai_generated,
             ).await?;
         }
     }
@@ -3654,7 +3690,7 @@ async fn apply_doc_veto(
         let entries = store.block_ring_get(&key, block_id).await.ok()
             .unwrap_or_default();
         let ring_entries: Vec<zodia_doc::RingEntry> = entries.into_iter()
-            .map(|(a, e, t)| zodia_doc::RingEntry {
+            .map(|(a, e, t, _ai_generated)| zodia_doc::RingEntry {
                 author: a, edit_op_id: e, edited_at: t,
             })
             .collect();
@@ -3905,6 +3941,10 @@ fn present_glyph_legend(parent: &impl IsA<gtk::Widget>) {
     critical_row.set_title("Critical degree");
     critical_row.set_subtitle("A placement in the last degree (29°) of its sign");
     other_group.add(&critical_row);
+    let ai_row = adw::ActionRow::new();
+    ai_row.set_title("🤖");
+    ai_row.set_subtitle("Includes text drafted by a local AI (Ollama) before a person reviewed and submitted it");
+    other_group.add(&ai_row);
     for phase in [
         zodia_core::MoonPhase::New, zodia_core::MoonPhase::WaxingCrescent,
         zodia_core::MoonPhase::FirstQuarter, zodia_core::MoonPhase::WaxingGibbous,

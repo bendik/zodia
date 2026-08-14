@@ -20,6 +20,7 @@ zodia-ops.workspace = true
 zodia-pipeline.workspace = true
 zodia-doc.workspace = true
 zodia-sdk.workspace = true
+zodia-llm.workspace = true
 p2panda-core = "0.7"
 ciborium.workspace = true
 blake3.workspace = true

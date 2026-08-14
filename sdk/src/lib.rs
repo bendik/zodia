@@ -365,9 +365,11 @@ impl ZodiaClient {
         base_rev:        Hash,
         crdt_update:     Vec<u8>,
         affected_blocks: Vec<[u8; 16]>,
+        ai_generated:    bool,
     ) -> Result<(), ClientError> {
         self.call(|reply| Command::Edit {
-            interp_key: interp_key.to_string(), base_rev, crdt_update, affected_blocks, reply,
+            interp_key: interp_key.to_string(), base_rev, crdt_update, affected_blocks,
+            ai_generated, reply,
         }).await
     }
 
@@ -464,6 +466,7 @@ enum Command {
         base_rev:        Hash,
         crdt_update:     Vec<u8>,
         affected_blocks: Vec<[u8; 16]>,
+        ai_generated:    bool,
         reply:           Reply,
     },
     Veto { interp_key: String, target_edit_op_id: Hash, reply: Reply },
@@ -676,8 +679,8 @@ async fn handle_command(
             let res = node.publish(InterpOp::SetDisplayName { name }).await.map_err(sync_err);
             let _ = reply.send(res);
         }
-        Command::Edit { interp_key, base_rev, crdt_update, affected_blocks, reply } => {
-            let op = DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks };
+        Command::Edit { interp_key, base_rev, crdt_update, affected_blocks, ai_generated, reply } => {
+            let op = DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks, ai_generated };
             let _ = reply.send(node.publish_doc(op).await.map_err(sync_err));
         }
         Command::Veto { interp_key, target_edit_op_id, reply } => {
@@ -801,7 +804,7 @@ mod tests {
         let mut a_events = a.events();
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        b.edit(key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]]).await
+        b.edit(key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]], false).await
             .expect("b edit");
 
         let event = timeout(Duration::from_secs(15), async {
@@ -847,7 +850,7 @@ mod tests {
         // net/tests/channel.rs pattern of a short settle window.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        b.edit(key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]]).await
+        b.edit(key, Hash::from_bytes([0u8; 32]), vec![1, 2, 3], vec![[9u8; 16]], false).await
             .expect("b edit");
 
         let event = timeout(Duration::from_secs(15), async {

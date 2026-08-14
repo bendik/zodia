@@ -115,6 +115,9 @@ pub enum StateEvent {
         crdt_update:     Vec<u8>,
         affected_blocks: Vec<[u8; 16]>,
         timestamp:       u64,
+        /// See `zodia_ops::DocOp::Edit`'s own doc comment — carried
+        /// through unchanged so every peer sees the same disclosure.
+        ai_generated:    bool,
     },
     /// Phase F-collab: a peer proposed a veto.  Downstream authority check
     /// (ring + window + newest-edit) lives in the app handler since it
@@ -288,10 +291,10 @@ fn materialize_interp(op_id: Hash, author: VerifyingKey, timestamp: Timestamp, i
 fn materialize_doc(op_id: Hash, by: VerifyingKey, timestamp: Timestamp, doc: DocOp) -> StateEvent {
     let ts: u64 = u64::from(timestamp);
     match doc {
-        DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks } =>
+        DocOp::Edit { interp_key, base_rev, crdt_update, affected_blocks, ai_generated } =>
             StateEvent::DocEdited {
                 op_id, by, interp_key, base_rev, crdt_update,
-                affected_blocks, timestamp: ts,
+                affected_blocks, timestamp: ts, ai_generated,
             },
         DocOp::Veto { interp_key, target_edit_op_id } => StateEvent::DocVetoProposed {
             op_id, by, interp_key, target_edit_op_id, timestamp: ts,
