@@ -34,10 +34,14 @@ jobs:
           submodules: false
           fetch-depth: 0
 
+      # --global, not repo-local: flatpak-sync.sh commits inside the
+      # flatpak/flathub submodule, whose own .git/config never sees a
+      # repo-local identity set in the parent checkout (the v0.13.1 run
+      # got all the way to that commit and died on "empty ident name").
       - name: Configure git identity
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       # .gitmodules points at the SSH URL (git@github.com:...) so local/
       # manual syncs "just work" off the maintainer's own SSH key. CI has
