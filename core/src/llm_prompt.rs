@@ -36,10 +36,8 @@ fn kind_context(kind: InterpKind) -> &'static str {
             "an aspect between two planets in today's sky, not tied to any one person's chart",
         InterpKind::HouseTransit =>
             "a transiting planet currently moving through a natal house",
-        InterpKind::PlacementSign =>
-            "a planet's placement by zodiac sign in someone's natal chart",
-        InterpKind::PlacementHouse =>
-            "a planet's placement by house in someone's natal chart",
+        InterpKind::Placement =>
+            "a planet's placement by zodiac sign and house together in someone's natal chart",
         InterpKind::PlacementAngle =>
             "a chart angle's (Ascendant/Midheaven) sign placement",
     }
@@ -78,8 +76,7 @@ mod tests {
             },
             InterpKey::SkyAspect { aspect_sig: "mars_conjunction_venus".into() },
             InterpKey::HouseTransit { transiting: crate::planet::Planet::Jupiter, house: 7 },
-            InterpKey::PlacementSign { planet: crate::planet::Planet::Mercury, sign: 2 },
-            InterpKey::PlacementHouse { planet: crate::planet::Planet::Mercury, house: 3 },
+            InterpKey::Placement { planet: crate::planet::Planet::Mercury, sign: 2, house: Some(3) },
             InterpKey::PlacementAngle { angle: crate::interp::Angle::Ascendant, sign: 0 },
         ];
         let contexts: HashSet<&'static str> = keys.iter().map(|k| kind_context(k.kind())).collect();

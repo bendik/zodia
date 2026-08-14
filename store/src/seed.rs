@@ -21,15 +21,16 @@ use crate::StoreError;
 /// [house_transit]
 /// "saturn:7" = "Relationships are being held to account…"
 ///
-/// [placement_sign]
-/// "jupiter:virgo" = "Practical optimism — abundance through diligent care…"
-///
-/// [placement_house]
-/// "jupiter:9" = "Belief expands through travel, study, and far horizons…"
+/// [placement]
+/// "jupiter:virgo:9" = "Abundance through diligent, patient care — belief \
+///   expands by tending what's already at hand, then testing it against \
+///   travel, study, and far horizons…"
 /// ```
 ///
 /// Keys within each section are the *discriminator* portion of the sig
-/// (without the leading prefix that `InterpKey::to_sig()` adds).
+/// (without the leading prefix that `InterpKey::to_sig()` adds). `[placement]`
+/// entries are keyed `"planet:sign:house"` — sign and house together, one
+/// entry per planet, matching `InterpKey::Placement`'s merged key.
 #[derive(Debug, Deserialize)]
 pub struct BaselineData {
     #[serde(default)]
@@ -41,9 +42,7 @@ pub struct BaselineData {
     #[serde(default)]
     pub house_transit:   HashMap<String, String>,
     #[serde(default)]
-    pub placement_sign:  HashMap<String, String>,
-    #[serde(default)]
-    pub placement_house: HashMap<String, String>,
+    pub placement:       HashMap<String, String>,
     #[serde(default)]
     pub placement_angle: HashMap<String, String>,
 }
@@ -75,8 +74,7 @@ impl BaselineStore {
         for (k, v) in &data.synastry        { map.insert(format!("synastry:{k}"),        v.clone()); }
         for (k, v) in &data.transit         { map.insert(format!("transit:{k}"),         v.clone()); }
         for (k, v) in &data.house_transit   { map.insert(format!("house_transit:{k}"),   v.clone()); }
-        for (k, v) in &data.placement_sign  { map.insert(format!("placement_sign:{k}"),  v.clone()); }
-        for (k, v) in &data.placement_house { map.insert(format!("placement_house:{k}"), v.clone()); }
+        for (k, v) in &data.placement        { map.insert(format!("placement:{k}"),        v.clone()); }
         for (k, v) in &data.placement_angle { map.insert(format!("placement_angle:{k}"), v.clone()); }
         Self { map }
     }

@@ -15,6 +15,7 @@ mod network_tab;
 mod notif_bell;
 mod notify;
 mod peer_row;
+mod screenshot_script;
 mod setup_page;
 mod sidebar;
 mod stargazer_list;
@@ -45,10 +46,47 @@ fn main() {
         .init();
 
     // ── local config ─────────────────────────────────────────────────────────
-    let config = match LocalConfig::load_or_create() {
+    let mut config = match LocalConfig::load_or_create() {
         Ok(c) => c,
         Err(e) => { eprintln!("fatal: could not load config: {e}"); std::process::exit(1); }
     };
+
+    // Screenshot-script mode: seed a demo identity into a fresh data dir so
+    // the app boots straight past the setup page. `name;jdn;lat;lon` — e.g.
+    // "Luna;2451545.0;60.39;5.32". Only fills a profile that has no birth
+    // data yet; a real profile is never overwritten.
+    if let Ok(spec) = std::env::var("ZODIA_SEED_DEMO") {
+        if config.birth.is_none() {
+            let parts: Vec<&str> = spec.split(';').collect();
+            match parts.as_slice() {
+                [name, jdn, lat, lon] => {
+                    match (jdn.parse(), lat.parse(), lon.parse()) {
+                        (Ok(jdn), Ok(lat), Ok(lon)) => {
+                            let birth = zodia_core::birth_from_coords(jdn, lat, lon, 9);
+                            if let Err(e) = config.save_birth(birth) {
+                                eprintln!("fatal: ZODIA_SEED_DEMO save_birth: {e}");
+                                std::process::exit(1);
+                            }
+                            if !name.is_empty() {
+                                if let Err(e) = config.save_display_name(name.to_string()) {
+                                    eprintln!("fatal: ZODIA_SEED_DEMO save_display_name: {e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        _ => {
+                            eprintln!("fatal: ZODIA_SEED_DEMO expects name;jdn;lat;lon");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("fatal: ZODIA_SEED_DEMO expects name;jdn;lat;lon");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 
     // ── store path ────────────────────────────────────────────────────────────
     // The database is opened inside `AppModel::init` (which runs on the relm4

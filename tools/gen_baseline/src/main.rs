@@ -17,7 +17,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use zodia_core::{AspectKind, Planet};
+use zodia_core::{AspectKind, Planet, sign_name_lower};
 
 // ── all aspect kinds ──────────────────────────────────────────────────────────
 
@@ -43,6 +43,10 @@ struct Baseline {
     transit:       HashMap<String, String>,
     #[serde(default)]
     house_transit: HashMap<String, String>,
+    /// Sign + house together — `InterpKey::Placement`'s merged key, one
+    /// reading per planet×sign×house combination.
+    #[serde(default)]
+    placement:     HashMap<String, String>,
 }
 
 // ── key enumeration ───────────────────────────────────────────────────────────
@@ -95,6 +99,25 @@ fn all_keys() -> Vec<(&'static str, String, String, &'static str)> {
             let sig = format!("{}:{}", planet.name(), house);
             let name = format!("{} in house {}", cap(planet.name()), house);
             keys.push(("house_transit", sig, name, "planet transiting a natal house — the area of life being activated"));
+        }
+    }
+
+    // Placements: every planet × every sign × every house — merged key
+    // (`InterpKey::Placement`), sign and house read together as one
+    // reading rather than two. 10 planets × 12 signs × 12 houses = 1440
+    // entries, a real jump from the old per-axis 240 (120 sign + 120
+    // house) — this is the accepted tradeoff of merging the two keys:
+    // full coverage now needs the full cross product, not just each axis.
+    for &planet in planets {
+        for sign in 0u8..12 {
+            for house in 1u8..=12 {
+                let sig = format!("{}:{}:{house}", planet.name(), sign_name_lower(sign));
+                let name = format!(
+                    "{} in {}, house {house}", cap(planet.name()), cap(sign_name_lower(sign)),
+                );
+                keys.push(("placement", sig, name,
+                    "natal placement — a planet's sign and house together, the style and the arena"));
+            }
         }
     }
 
@@ -235,6 +258,7 @@ fn main() {
             "synastry"      => baseline.synastry     .contains_key(key.as_str()),
             "transit"       => baseline.transit      .contains_key(key.as_str()),
             "house_transit" => baseline.house_transit.contains_key(key.as_str()),
+            "placement"     => baseline.placement    .contains_key(key.as_str()),
             _               => false,
         };
         if already_has {
@@ -271,6 +295,7 @@ fn main() {
             "synastry"      => { baseline.synastry     .insert(key.clone(), t); }
             "transit"       => { baseline.transit      .insert(key.clone(), t); }
             "house_transit" => { baseline.house_transit.insert(key.clone(), t); }
+            "placement"     => { baseline.placement    .insert(key.clone(), t); }
             _ => {}
         }
 

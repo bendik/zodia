@@ -25,7 +25,10 @@ pub use calendar::{gregorian_to_jdn, current_jdn, jdn_to_gregorian, jdn_to_displ
 pub use chart::{BigThree, Chart, is_critical_degree};
 pub use ephemeris::{EphemerisError, compute_positions, is_retrograde};
 pub use houses::{HouseError, HouseKind, HouseSystem};
-pub use interp::{Angle, InterpKey, InterpKind, humanize_key, parse_interp_sig};
+pub use interp::{
+    Angle, InterpKey, InterpKind, humanize_key, kind_label_for_sig, parse_interp_sig,
+    sign_name_lower,
+};
 pub use llm_prompt::build_interp_prompt;
 pub use moon_phase::{MoonPhase, phase_at as moon_phase_at, phase_from_longitudes as moon_phase_from_longitudes};
 pub use patterns::{ChartPattern, detect_patterns};

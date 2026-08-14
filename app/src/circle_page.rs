@@ -172,6 +172,10 @@ pub fn build_circle_page(
         header = adw::HeaderBar {
             set_show_start_title_buttons: false,
             set_show_end_title_buttons: false,
+            // We already show our own sidebar-toggle button for "go back
+            // to the sidebar" on narrow windows; AdwHeaderBar's automatic
+            // back button would otherwise duplicate it.
+            set_show_back_button: false,
 
             #[wrap(Some)]
             set_title_widget = &title_box.clone() {},

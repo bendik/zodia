@@ -5,7 +5,6 @@
 //! The previous set persists in `feed_meta` so a restart doesn't re-emit
 //! every active transit.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +14,7 @@ use tracing::{trace, warn};
 use zodia_core::Chart;
 use zodia_store::{BaselineStore, ZodiaStore};
 
+use crate::aspect_view::resolve_top_body;
 use crate::feed_item::{FeedItem, FeedPayload};
 
 /// Default tick interval — 10 minutes per the PRD.  Matches the cadence
@@ -31,12 +31,12 @@ const TICK_INTERVAL: Duration = Duration::from_secs(600);
 pub fn spawn(
     chart:    Arc<Chart>,
     baseline: Arc<BaselineStore>,
-    _store:   ZodiaStore,
+    store:    ZodiaStore,
     out:      mpsc::Sender<FeedItem>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tick(&chart, &baseline, &out).await;
+            tick(&chart, &store, &baseline, &out).await;
             tokio::time::sleep(TICK_INTERVAL).await;
         }
     })
@@ -48,9 +48,27 @@ pub fn spawn(
 /// respective `prev` sets, and emits the appropriate `FeedItem` variants.
 async fn tick(
     chart:    &Chart,
+    store:    &ZodiaStore,
     baseline: &BaselineStore,
     out:      &mpsc::Sender<FeedItem>,
 ) {
+    let items = active_items(chart, store, baseline).await;
+    trace!(count = items.len(), "transit_ticker tick");
+    for item in items {
+        let _ = out.send(item).await;
+    }
+}
+
+/// Compute every currently in-orb transit/sky-aspect/house-transit as a
+/// `FeedItem`, each with its reading body resolved DB-first (community
+/// reading), baseline-fallback — via the same `resolve_top_body` the aspect
+/// list/detail views use, so the Sky feed never shows stale "no reading
+/// yet" text for a key someone has actually written about.
+async fn active_items(
+    chart:    &Chart,
+    store:    &ZodiaStore,
+    baseline: &BaselineStore,
+) -> Vec<FeedItem> {
     use zodia_core::transit_window;
 
     let now_jdn = current_jdn();
@@ -58,7 +76,7 @@ async fn tick(
         Ok(t)  => t,
         Err(e) => {
             warn!("transit_ticker: compute failed: {e}");
-            return;
+            return Vec::new();
         }
     };
 
@@ -69,68 +87,57 @@ async fn tick(
     // already "seen" transits had them suppressed forever by the prev-set
     // gate — meaning Sky stayed empty for returning users.
 
-    // ── personal (transit→natal aspects with computed window) ───────────────
-    let cur_personal: HashSet<String> = transit_set
-        .transit_aspects
-        .iter()
-        .map(|ta| ta.interp_key().to_sig())
-        .collect();
+    let mut items = Vec::new();
 
+    // ── personal (transit→natal aspects with computed window) ───────────────
     for ta in &transit_set.transit_aspects {
         let key = ta.interp_key().to_sig();
         let Some(natal_lon) = chart.positions.get(ta.natal_body) else { continue };
         let (start_jdn, end_jdn) = transit_window(
             ta.transiting, natal_lon, ta.kind, now_jdn,
         );
-        let baseline_body = baseline.lookup(&ta.interp_key()).map(|s| s.to_string());
-        let _ = out.send(build_personal_active(
-            key, start_jdn, end_jdn, ta.orb, baseline_body,
-        )).await;
+        let baseline_body = Some(resolve_top_body(store, baseline, &ta.interp_key()).await);
+        items.push(build_personal_active(key, start_jdn, end_jdn, ta.orb, baseline_body));
     }
 
     // ── global sky aspects ──────────────────────────────────────────────────
-    let cur_global: HashSet<String> = transit_set
-        .sky_aspects
-        .iter()
-        .map(|a| format!("sky:{}", a.sig()))
-        .collect();
-
     for a in &transit_set.sky_aspects {
         let key = format!("sky:{}", a.sig());
         let Some(b_lon) = transit_set.sky.get(a.body_b) else { continue };
         let (start_jdn, end_jdn) = transit_window(
             a.body_a, b_lon, a.kind, now_jdn,
         );
-        let baseline_body = baseline
-            .lookup(&zodia_core::InterpKey::SkyAspect { aspect_sig: a.sig() })
-            .map(|s| s.to_string());
-        let _ = out.send(build_global_active(
-            key, start_jdn, end_jdn, a.orb, baseline_body,
-        )).await;
+        let sky_key = zodia_core::InterpKey::SkyAspect { aspect_sig: a.sig() };
+        let baseline_body = Some(resolve_top_body(store, baseline, &sky_key).await);
+        items.push(build_global_active(key, start_jdn, end_jdn, a.orb, baseline_body));
     }
 
     // ── house transits ──────────────────────────────────────────────────────
-    let cur_house: HashSet<String> = transit_set
-        .house_transits
-        .iter()
-        .map(|ht| ht.interp_key().to_sig())
-        .collect();
-
     for ht in &transit_set.house_transits {
         let key = ht.interp_key().to_sig();
         let (start_jdn, end_jdn) = zodia_core::house_transit_window(
             ht.transiting, &chart.houses, now_jdn,
         );
-        let baseline_body = baseline.lookup(&ht.interp_key()).map(|s| s.to_string());
-        let _ = out.send(build_house_active(key, start_jdn, end_jdn, baseline_body)).await;
+        let baseline_body = Some(resolve_top_body(store, baseline, &ht.interp_key()).await);
+        items.push(build_house_active(key, start_jdn, end_jdn, baseline_body));
     }
 
-    trace!(
-        personal = cur_personal.len(),
-        global   = cur_global.len(),
-        house    = cur_house.len(),
-        "transit_ticker tick"
-    );
+    items
+}
+
+/// The currently-active `FeedItem` (if any) whose canonical key signature
+/// matches `target_sig` — used to push an immediate Sky-feed refresh right
+/// after a reading is published, rather than waiting up to `TICK_INTERVAL`
+/// for the next scheduled tick to pick it up.
+pub(crate) async fn active_item_for_key(
+    chart:      &Chart,
+    store:      &ZodiaStore,
+    baseline:   &BaselineStore,
+    target_sig: &str,
+) -> Option<FeedItem> {
+    active_items(chart, store, baseline).await
+        .into_iter()
+        .find(|item| item.interp_key() == Some(target_sig))
 }
 
 fn build_personal_active(

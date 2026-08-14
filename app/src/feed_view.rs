@@ -34,6 +34,16 @@ pub struct FeedViewInit {
     /// Local identity's verifying key.  Cards whose author matches show a
     /// "Revoke" affordance; non-self cards don't.
     pub me:         [u8; 32],
+    /// Used to build this page's own self-contained header (sidebar
+    /// toggle + the category filter as the title widget + glyph-legend
+    /// help), via `crate::app::build_list_header` — the same pattern
+    /// `AspectView`'s top-level Chart tab uses, and `stargazer_page.rs` /
+    /// `network_tab.rs` already use for their own single tab. Owning the
+    /// header on this root page (rather than externally, above the whole
+    /// `NavigationView` `mount_sky_feed` wraps it in) means it naturally
+    /// disappears once a detail page is pushed on top — no separate
+    /// visibility bookkeeping needed.
+    pub split_view: libadwaita::NavigationSplitView,
 }
 
 #[derive(Debug)]
@@ -105,7 +115,7 @@ pub fn launch<F, M>(
     init:         FeedViewInit,
     parent_input: &relm4::Sender<M>,
     map:          F,
-) -> (gtk::ScrolledWindow, relm4::Sender<FeedViewMsg>)
+) -> (libadwaita::ToolbarView, relm4::Sender<FeedViewMsg>)
 where
     F: Fn(FeedViewOut) -> M + Send + 'static,
     M: Send + 'static,
@@ -159,11 +169,11 @@ impl SimpleComponent for FeedView {
     type Init    = FeedViewInit;
     type Input   = FeedViewMsg;
     type Output  = FeedViewOut;
-    type Root    = gtk::ScrolledWindow;
+    type Root    = libadwaita::ToolbarView;
     type Widgets = FeedViewWidgets;
 
     fn init_root() -> Self::Root {
-        gtk::ScrolledWindow::new()
+        libadwaita::ToolbarView::new()
     }
 
     fn init(
@@ -201,12 +211,13 @@ impl SimpleComponent for FeedView {
             container.append(&moon_label);
         }
 
-        // Category filter bar — segmented ToggleButtons (linked style).
+        // Category filter bar — segmented ToggleButtons (linked style),
+        // used as this page's own header title widget (see below) rather
+        // than inline in the scrolling content, so the filter stays put
+        // while the feed scrolls and doesn't duplicate the sidebar's own
+        // "Sky" label.
         let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         filter_bar.add_css_class("linked");
-        filter_bar.set_halign(gtk::Align::Center);
-        filter_bar.set_margin_top(4);
-        filter_bar.set_margin_bottom(4);
         let btn_all       = labeled_toggle("☰",  "All");
         let btn_personal  = labeled_toggle("◐", "Personal");
         let btn_sky       = labeled_toggle("✦", "Sky");
@@ -239,7 +250,6 @@ impl SimpleComponent for FeedView {
             if b.is_active() { let _ = s.send(FeedViewMsg::SetCategory(FeedCategory::Community)); }
         });
 
-        container.append(&filter_bar);
         container.append(&list);
         let empty_label = gtk::Label::new(Some("No activity yet"));
         empty_label.add_css_class("dimmed");
@@ -248,9 +258,14 @@ impl SimpleComponent for FeedView {
         container.append(&empty_label);
 
         clamp.set_child(Some(&container));
-        root.set_child(Some(&clamp));
-        root.set_hscrollbar_policy(gtk::PolicyType::Never);
-        root.set_vexpand(true);
+        let scrolled = gtk::ScrolledWindow::new();
+        scrolled.set_child(Some(&clamp));
+        scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+        scrolled.set_vexpand(true);
+
+        let header = crate::app::build_list_header(&init.split_view, &filter_bar);
+        root.add_top_bar(&header);
+        root.set_content(Some(&scrolled));
 
         let cards: FactoryVecDeque<FeedCard> = FactoryVecDeque::builder()
             .launch(list.clone())
@@ -279,7 +294,7 @@ impl SimpleComponent for FeedView {
         // overlap for each card and emits CardSetRead { read: true } for
         // cards whose continuous viewport dwell crosses the threshold.
         spawn_dwell_timer(
-            root.clone(),
+            scrolled.clone(),
             list.clone(),
             sender.input_sender().clone(),
         );
@@ -351,8 +366,11 @@ impl FeedView {
         // Maintain the full backlog regardless of active category so a
         // later category switch can rebuild without re-fetching.
         if !match_key(&self.filter_key, &item) { return; }
-        if self.all_items.iter().any(|i| i.event_id == item.event_id) {
-            // Backlog already has it; visible-list dedup handled below.
+        if let Some(existing) = self.all_items.iter_mut().find(|i| i.event_id == item.event_id) {
+            // Backlog already has this event — a later payload for the same
+            // id (e.g. a Sky card's reading text resolved fresh after a
+            // publish) replaces the stale one rather than being dropped.
+            *existing = item.clone();
         } else {
             // Insert newest-first into all_items.
             let mut at = self.all_items.len();
@@ -362,7 +380,20 @@ impl FeedView {
             self.all_items.insert(at, item.clone());
         }
         if !match_category(self.category, &item) { return; }
-        if !self.known.insert(item.event_id) { return; }
+        if !self.known.insert(item.event_id) {
+            // Already rendered as a card — update its content in place
+            // instead of silently dropping the fresher payload.
+            let g = self.cards.guard();
+            for i in 0..g.len() {
+                if let Some(card) = g.get(i) {
+                    if card.item.event_id == item.event_id {
+                        g.send(i, FeedCardMsg::UpdateItem(item));
+                        break;
+                    }
+                }
+            }
+            return;
+        }
         let mut g = self.cards.guard();
         let mut insert_at = g.len();
         for i in 0..g.len() {
@@ -556,6 +587,10 @@ pub struct FeedCard {
 #[derive(Debug)]
 pub enum FeedCardMsg {
     SetRead(bool),
+    /// A fresher payload arrived for this card's `event_id` — replace the
+    /// rendered item in place (e.g. a Sky card's baseline text resolved
+    /// fresh after a reading was published) rather than re-inserting.
+    UpdateItem(FeedItem),
 }
 
 #[derive(Debug)]
@@ -830,6 +865,7 @@ impl FactoryComponent for FeedCard {
     fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
         match msg {
             FeedCardMsg::SetRead(r) => self.read = r,
+            FeedCardMsg::UpdateItem(item) => self.item = item,
         }
     }
 
@@ -877,25 +913,33 @@ struct CardText {
 }
 
 fn card_text(item: &FeedItem) -> CardText {
-    use zodia_core::humanize_key;
+    use zodia_core::{humanize_key, kind_label_for_sig};
+    // Community cards (unlike Personal/Sky transit cards, which already
+    // carry a distinguishing glyph and live in their own category) mix
+    // natal/synastry/transit/sky/house-transit content together, so the
+    // kind isn't otherwise inferable from the card alone — prefix it.
+    let community_title = |key: &str, body: String| format!("{} · {body}", kind_label_for_sig(key));
     match &item.payload {
         FeedPayload::InterpAuthored { author, interp_key, body } => CardText {
             glyph:    "✎",
-            title:    humanize_key(interp_key),
+            title:    community_title(interp_key, humanize_key(interp_key)),
             subtitle: truncate(body, 240),
             footer:   relative_ts(item.timestamp),
             sub_meta: format!("by {}", pubkey_tag(author.as_bytes())),
         },
-        FeedPayload::AffirmAdded { voter, .. } => CardText {
-            glyph:    "♡",
-            title:    humanize_key(item.interp_key().unwrap_or_default()),
-            subtitle: String::new(),
-            footer:   relative_ts(item.timestamp),
-            sub_meta: format!("from {}", pubkey_tag(voter.as_bytes())),
-        },
+        FeedPayload::AffirmAdded { voter, .. } => {
+            let key = item.interp_key().unwrap_or_default();
+            CardText {
+                glyph:    "♡",
+                title:    community_title(key, humanize_key(key)),
+                subtitle: String::new(),
+                footer:   relative_ts(item.timestamp),
+                sub_meta: format!("from {}", pubkey_tag(voter.as_bytes())),
+            }
+        }
         FeedPayload::ResponseAdded { author, interp_key, body, .. } => CardText {
             glyph:    "↳",
-            title:    format!("response to {}", humanize_key(interp_key)),
+            title:    community_title(interp_key, format!("response to {}", humanize_key(interp_key))),
             subtitle: truncate(body, 240),
             footer:   relative_ts(item.timestamp),
             sub_meta: format!("by {}", pubkey_tag(author.as_bytes())),
@@ -924,35 +968,35 @@ fn card_text(item: &FeedItem) -> CardText {
 
         FeedPayload::DocEdited { editor, interp_key } => CardText {
             glyph:    "✏",
-            title:    humanize_key(interp_key),
+            title:    community_title(interp_key, humanize_key(interp_key)),
             subtitle: "community reading edited".into(),
             footer:   relative_ts(item.timestamp),
             sub_meta: format!("by {}", pubkey_tag(editor.as_bytes())),
         },
         FeedPayload::BlockYouAuthoredWasEdited { editor, interp_key, .. } => CardText {
             glyph:    "⚠",
-            title:    humanize_key(interp_key),
+            title:    community_title(interp_key, humanize_key(interp_key)),
             subtitle: "your edit was modified — tap to review".into(),
             footer:   relative_ts(item.timestamp),
             sub_meta: format!("by {}", pubkey_tag(editor.as_bytes())),
         },
         FeedPayload::DocRolledBack { revoker, interp_key } => CardText {
             glyph:    "↶",
-            title:    humanize_key(interp_key),
+            title:    community_title(interp_key, humanize_key(interp_key)),
             subtitle: "edit vetoed and rolled back".into(),
             footer:   relative_ts(item.timestamp),
             sub_meta: format!("by {}", pubkey_tag(revoker.as_bytes())),
         },
         FeedPayload::DocAffirmed { voter, interp_key } => CardText {
             glyph:    "♡",
-            title:    humanize_key(interp_key),
+            title:    community_title(interp_key, humanize_key(interp_key)),
             subtitle: "revision affirmed".into(),
             footer:   relative_ts(item.timestamp),
             sub_meta: format!("by {}", pubkey_tag(voter.as_bytes())),
         },
         FeedPayload::EditorPresenceChanged { peer, interp_key, joined } => CardText {
             glyph:    if *joined { "○" } else { "●" },
-            title:    humanize_key(interp_key),
+            title:    community_title(interp_key, humanize_key(interp_key)),
             subtitle: if *joined {
                 "stargazer entered the editor — join them".into()
             } else {

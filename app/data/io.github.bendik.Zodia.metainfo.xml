@@ -88,6 +88,15 @@
   </supports>
 
   <releases>
+    <release version="0.13.2" date="2026-08-14">
+      <description>
+        <p>Fixed the Sky feed showing "No reading yet" for a transit or sky aspect even after someone had actually published a reading for it — the card was reading from a static bundled file instead of the real community database, both right after publishing and after restarting the app.</p>
+        <p>Redesigned the reading editor: a full-width writer's layout instead of a boxed form, with Share/Talk/Generate/Publish/Revisions moved to icon buttons in the title bar. The "Talk about this" call button is now properly disabled with an explanation when no one else is currently viewing the same reading.</p>
+        <p>A planet's sign and house placement (e.g. "Sun in Aquarius, House 5") are now one combined reading instead of two separate ones.</p>
+        <p>Chart and Sky's category filters moved into the title bar as pill buttons; peer pages no longer leave a stray tab switcher showing while you're reading something.</p>
+        <p>Refreshed app screenshots at a sharper resolution.</p>
+      </description>
+    </release>
     <release version="0.13.1" date="2026-08-14">
       <description>
         <p>Fresh app screenshots showing the redesigned sidebar, plus build fixes so the 0.13 release actually ships on every platform (the aarch64 Linux build and the Flathub update both failed for 0.13.0).</p>

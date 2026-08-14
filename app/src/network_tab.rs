@@ -137,6 +137,10 @@ impl SimpleComponent for NetworkTab {
             header = adw::HeaderBar {
                 set_show_start_title_buttons: false,
                 set_show_end_title_buttons: false,
+                // We already show our own sidebar-toggle button for "go
+                // back to the sidebar" on narrow windows; AdwHeaderBar's
+                // automatic back button would otherwise duplicate it.
+                set_show_back_button: false,
 
                 #[wrap(Some)]
                 set_title_widget = &gtk::Label {
@@ -396,8 +400,7 @@ fn format_interp_key(key: &str) -> (String, String) {
         "synastry"        => "Synastry",
         "transit"         => "Transit",
         "house_transit"   => "House transit",
-        "placement_sign"  => "Placement (sign)",
-        "placement_house" => "Placement (house)",
+        "placement"       => "Placement",
         "placement_angle" => "Placement (angle)",
         other             => other,
     };

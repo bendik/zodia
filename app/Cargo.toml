@@ -37,5 +37,17 @@ tzf-rs = "0.4"
 chrono = "0.4"
 chrono-tz = "0.10"
 
+[dev-dependencies]
+cucumber = "0.23.0"
+tempfile = "3"
+
+[[test]]
+name = "screenshots"
+harness = false
+
+[[test]]
+name = "sky_reading_persistence"
+harness = false
+
 [build-dependencies]
 glib-build-tools = "0.21"

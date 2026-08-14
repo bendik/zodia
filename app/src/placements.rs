@@ -1,18 +1,17 @@
 //! Chart placement items — sign + house placements as aggregate rows.
 //!
-//! Each planet emits one `AspectItem` whose keys carry both the sign and (for
-//! non-stub charts) the house InterpKeys.  Angles (Ascendant + Midheaven) emit
-//! one `AspectItem` each carrying a single sign key.
-//!
-//! The detail page synthesizes a "Combined" tab when 2+ keys are present.
+//! Each planet emits one `AspectItem` with a single `InterpKey::Placement`
+//! key carrying both sign and (for non-stub charts) house together — one
+//! reading per planet, not two. Angles (Ascendant + Midheaven) emit one
+//! `AspectItem` each carrying a single sign key (angles have no house).
 
 use zodia_core::{Angle, Chart, InterpKey, Planet};
 
 use crate::aspect_list::{AspectItem, KeyEntry};
 use crate::util::{lon_to_sign_deg, sign_glyph};
 
-/// One row per planet (sign + house keys when houses are real) and one row per
-/// angle (sign key only).  Returned in this order: planets first, then ASC, MC.
+/// One row per planet (sign + house together) and one row per angle (sign
+/// only).  Returned in this order: planets first, then ASC, MC.
 pub fn placement_items(chart: &Chart) -> Vec<AspectItem> {
     let is_stub = chart.houses.cusps.iter().all(|&c| c == 0.0);
     let mut items = Vec::new();
@@ -21,26 +20,31 @@ pub fn placement_items(chart: &Chart) -> Vec<AspectItem> {
     for &planet in Planet::all() {
         let Some(lon) = chart.positions.get(planet) else { continue };
         let (sign_idx, deg_str) = lon_to_sign_deg(lon);
-        let sign_key = InterpKey::PlacementSign { planet, sign: sign_idx };
         // ℞ is the classical astrological retrograde glyph — shown next to
         // any planet whose apparent motion is currently backward from
         // Earth's vantage point (never Sun/Moon, see is_retrograde's doc).
         let retro_suffix = if zodia_core::is_retrograde(planet, chart.birth.jdn) { " ℞" } else { "" };
 
-        let mut keys = vec![KeyEntry { label: "Sign".to_string(), key: sign_key.clone() }];
-        let (title, symbol_line) = if is_stub {
-            (format!("{}{retro_suffix}", sign_key.plain_name()),
-             format!("{} {}{retro_suffix}", planet.symbol(), sign_glyph(sign_idx)))
-        } else {
-            let house = chart.houses.house_of(lon);
-            let house_key = InterpKey::PlacementHouse { planet, house };
-            keys.push(KeyEntry { label: "House".to_string(), key: house_key });
-            (format!("{} · House {house}{retro_suffix}", sign_key.plain_name()),
-             format!("{} {} ⌂{}{retro_suffix}", planet.symbol(), sign_glyph(sign_idx), house))
+        let house = if is_stub { None } else { Some(chart.houses.house_of(lon)) };
+        let key = InterpKey::Placement { planet, sign: sign_idx, house };
+        // "{Planet} in {Sign}" without the house, for the row title's
+        // leading segment — built from a house-less twin key rather than
+        // `key.plain_name()` since that inlines house as "…, House N",
+        // not this row's own "… · House N{retro}" formatting.
+        let sign_only_name = InterpKey::Placement { planet, sign: sign_idx, house: None }.plain_name();
+        let (title, symbol_line) = match house {
+            Some(house) => (
+                format!("{sign_only_name} · House {house}{retro_suffix}"),
+                format!("{} {} ⌂{}{retro_suffix}", planet.symbol(), sign_glyph(sign_idx), house),
+            ),
+            None => (
+                format!("{sign_only_name}{retro_suffix}"),
+                format!("{} {}{retro_suffix}", planet.symbol(), sign_glyph(sign_idx)),
+            ),
         };
 
         items.push(AspectItem {
-            keys,
+            keys: vec![KeyEntry { label: "Placement".to_string(), key }],
             title,
             symbol_line,
             meta_line: Some(critical_degree_meta(lon, deg_str)),

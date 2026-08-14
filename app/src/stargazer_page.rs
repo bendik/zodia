@@ -9,12 +9,11 @@
 //! Returns `(ToolbarView, gtk::ListBox, call_btn, send_btn)` — the caller
 //! appends chat rows to the `ListBox` whenever new messages arrive.
 //!
-//! Two top bars instead of one: the header carries the peer's name (via
-//! `AdwWindowTitle`, always visible, never competing for space), and a
-//! second bar below it carries the tab switcher (`AdwViewSwitcher`,
-//! always visible too). Avoids `AdwViewSwitcherTitle` (deprecated in ADW
-//! 1.4) without needing to hand-tune a width breakpoint for when title
-//! and switcher would collide in a single row — they just never share one.
+//! Single header: the sidebar toggle plus the tab switcher
+//! (`AdwViewSwitcher`) as the title widget. No separate nickname/status
+//! title — the peer's row in the sidebar already carries their name and
+//! online status, so repeating it here would just be a second copy of the
+//! same fact competing for the same bar.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -32,16 +31,14 @@ use zodia_store::{ZodiaStore, BaselineStore};
 
 use crate::app::{AppModel, AppMsg};
 use crate::aspect_list::{natal_items, synastry_items};
-use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected stargazer.
 ///
-/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, window_title)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label)`.
 /// `call_btn` and `send_btn` should be set insensitive when the stargazer is offline.
 /// `typing_label` is shown/hidden by the caller when a `TypingIndicatorChanged`
 /// event arrives for this peer; `seen_label` when a `ChatSeen` event arrives
-/// and the most recent message is ours. `window_title` is retained by the
-/// caller so the title can be updated when the nickname changes.
+/// and the most recent message is ours.
 pub fn build_stargazer_page(
     peer_id: &PeerId,
     their_blob: &ConsentBlob,
@@ -50,10 +47,9 @@ pub fn build_stargazer_page(
     baseline: Rc<BaselineStore>,
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
-    nickname: Option<&str>,
     split_view: &adw::NavigationSplitView,
     ollama_models: &[String],
-) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label, adw::WindowTitle) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -85,6 +81,7 @@ pub fn build_stargazer_page(
             identity:         Rc::clone(&identity),
             parent_sender:    sender.clone(),
             ollama_models:    ollama_models.to_vec(),
+            split_view:       None,
         }),
         None => crate::aspect_view::launch(crate::aspect_view::AspectViewInit {
             kind:             crate::aspect_view::AspectViewKind::Synastry,
@@ -96,6 +93,7 @@ pub fn build_stargazer_page(
             identity:         Rc::clone(&identity),
             parent_sender:    sender.clone(),
             ollama_models:    ollama_models.to_vec(),
+            split_view:       None,
         }),
     };
     their_av.set_vexpand(true);
@@ -118,6 +116,7 @@ pub fn build_stargazer_page(
         identity:         Rc::clone(&identity),
         parent_sender:    sender.clone(),
         ollama_models:    ollama_models.to_vec(),
+        split_view:       None,
     });
     syn_av.set_vexpand(true);
     let syn_page = view_stack.add_titled(&syn_av, Some("synastry"), "Synastry");
@@ -153,9 +152,23 @@ pub fn build_stargazer_page(
 
     let toolbar_view = adw::ToolbarView::new();
 
+    // Single header: sidebar toggle + the tab switcher as the title widget.
+    // No separate nickname/status title — the switcher's three tabs are
+    // the only thing this page needs to say, and the peer's row in the
+    // sidebar already carries their name and online status.
     let header = adw::HeaderBar::new();
     header.set_show_start_title_buttons(false);
     header.set_show_end_title_buttons(false);
+    // We already show our own sidebar-toggle button for "go back to the
+    // sidebar" on narrow windows; AdwHeaderBar's automatic back button
+    // (shown by default for a non-root page in a navigation view) would
+    // otherwise duplicate that exact action.
+    header.set_show_back_button(false);
+
+    let view_switcher = adw::ViewSwitcher::new();
+    view_switcher.set_stack(Some(&view_stack));
+    view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+    header.set_title_widget(Some(&view_switcher));
 
     // Sidebar toggle — visible only when the split view is collapsed.
     // On non-macOS: placed on the left (start).
@@ -166,33 +179,56 @@ pub fn build_stargazer_page(
     #[cfg(target_os = "macos")]
     header.pack_end(&sidebar_btn);
 
-    let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
-    let glyph = sign_glyph(their_solar_month);
-
-    let title_text = nickname
-        .filter(|n| !n.is_empty())
-        .map(|n| format!("{glyph}  {n}"))
-        .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
-    let window_title = adw::WindowTitle::new(&title_text, "");
-    header.set_title_widget(Some(&window_title));
-
     toolbar_view.add_top_bar(&header);
-
-    // Second top bar: the tab switcher, always visible — see this file's
-    // module doc comment for why this replaces AdwViewSwitcherTitle
-    // instead of hand-tuning a breakpoint.
-    let switcher_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    switcher_row.add_css_class("toolbar");
-    switcher_row.set_halign(gtk::Align::Center);
-    let view_switcher = adw::ViewSwitcher::new();
-    view_switcher.set_stack(Some(&view_stack));
-    view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
-    switcher_row.append(&view_switcher);
-    toolbar_view.add_top_bar(&switcher_row);
-
     toolbar_view.set_content(Some(&view_stack));
 
-    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, window_title)
+    // Hide the tab switcher while a reading's editor is pushed on top of
+    // whichever chart tab is active — it has nothing to do with switching
+    // Their Chart/Synastry/Messages once you're inside one specific
+    // reading, and leaving it up otherwise means every editor screen in
+    // the app looks different depending on how you got there (this one
+    // used to keep the switcher floating above it, unlike the same editor
+    // reached from Chart/Sky). Each `AspectView` owns its own
+    // `AdwNavigationView` (that's `their_av`/`syn_av` themselves — the
+    // component's root widget), so we just watch both for a push/pop and
+    // re-evaluate against whichever tab is actually visible.
+    {
+        let sync = {
+            let header = header.clone();
+            let view_stack = view_stack.clone();
+            let their_av = their_av.clone();
+            let syn_av = syn_av.clone();
+            move || sync_editor_header_visibility(&header, &view_stack, &their_av, &syn_av)
+        };
+        let s = sync.clone();
+        view_stack.connect_notify_local(Some("visible-child-name"), move |_, _| s());
+        let s = sync.clone();
+        their_av.connect_navigation_stack_notify(move |_| s());
+        syn_av.connect_navigation_stack_notify(move |_| sync());
+    }
+
+    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label)
+}
+
+/// Show the tab-switcher header only when the currently-visible chart tab
+/// isn't showing a pushed reading editor (`navigation_stack().n_items() >
+/// 1` means something is pushed above that `AspectView`'s own root page).
+/// The Messages tab has no push nav at all, so it always keeps the header.
+fn sync_editor_header_visibility(
+    header:     &adw::HeaderBar,
+    view_stack: &adw::ViewStack,
+    their_av:   &adw::NavigationView,
+    syn_av:     &adw::NavigationView,
+) {
+    let active_nav = match view_stack.visible_child_name().as_deref() {
+        Some("their")    => Some(their_av),
+        Some("synastry") => Some(syn_av),
+        _                => None,
+    };
+    let showing_editor = active_nav
+        .map(|nav| nav.navigation_stack().n_items() > 1)
+        .unwrap_or(false);
+    header.set_visible(!showing_editor);
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────

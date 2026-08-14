@@ -267,6 +267,15 @@ pub enum AppMsg {
     JoinCircle { circle_id: p2panda_core::Hash, inviter: p2panda_core::VerifyingKey },
     /// User named a circle they just joined via the invite-toast flow.
     NameJoinedCircle { id_hex: String, name: String },
+
+    /// Screenshot-script mode only (see `screenshot_script.rs`) — state
+    /// snapshot request from the driver thread.
+    ScriptQuery(crate::screenshot_script::ScriptQueryTx),
+    /// Screenshot-script mode only — widget-level command; `update()`
+    /// stashes it, `update_view` (the only place with widget access) runs it.
+    ScriptUi(crate::screenshot_script::ScriptUiCmd),
+    /// Screenshot-script mode only — graceful shutdown after the last shot.
+    ScriptQuit,
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -315,6 +324,10 @@ pub struct AppModel {
     /// Set by `OpenShareToCirclePicker`; `update_view` builds + presents the
     /// dialog (it has window access, `update()` doesn't) then clears this.
     share_picker_request: RefCell<Option<(String, String)>>,
+    /// Screenshot-script mode: widget-level commands queued by `update()`
+    /// for `update_view` to execute — same pattern as
+    /// `pending_circle_push_queue`. Always empty in normal runs.
+    pending_script_ui: RefCell<Vec<crate::screenshot_script::ScriptUiCmd>>,
     /// Circle invites this device is the intended recipient of, queued for
     /// `update_view` to show as an `adw::Toast` with a "Join" action — same
     /// `RefCell`-in-`update_view` reasoning as `pending_push_queue`.
@@ -512,8 +525,6 @@ pub struct AppWidgets {
     stargazer_chat_shown: HashMap<String, usize>,
     /// Call and send buttons per stargazer — disabled when stargazer is offline.
     stargazer_actions: HashMap<String, (gtk::Button, gtk::Button, gtk::Entry)>,
-    /// Window title per stargazer — updated when the nickname changes.
-    stargazer_titles: HashMap<String, adw::WindowTitle>,
     /// "{name} is typing…" label per stargazer, shown/hidden by
     /// `pending_typing_updates`.
     stargazer_typing_labels: HashMap<String, gtk::Label>,
@@ -648,6 +659,7 @@ impl AsyncComponent for AppModel {
             circles_changed_token: 0,
             pending_circle_push_queue: RefCell::new(Vec::new()),
             share_picker_request: RefCell::new(None),
+            pending_script_ui: RefCell::new(Vec::new()),
             pending_circle_invite_toasts: RefCell::new(Vec::new()),
             pending_circle_join_toasts: RefCell::new(Vec::new()),
             pending_affirm_toasts: RefCell::new(Vec::new()),
@@ -782,6 +794,10 @@ impl AsyncComponent for AppModel {
                 }
             });
         }
+
+        // Screenshot-script mode — inert unless ZODIA_SCREENSHOT_SCRIPT is
+        // set (see screenshot_script.rs / scripts/generate-screenshots.sh).
+        crate::screenshot_script::maybe_start(sender.input_sender().clone());
 
         AsyncComponentParts { model, widgets }
     }
@@ -1486,6 +1502,9 @@ impl AsyncComponent for AppModel {
                                 entry.remove(&peer_pk);
                             }
                             self.network_changed_token += 1;
+                            crate::aspect_view::refresh_active_call_button(
+                                interp_key, others_present(&mut self.editor_presence, interp_key),
+                            );
                         }
                         feed_item = crate::feed_item::state_event_to_feed_item(
                             &event, now_ts, interp_key.clone(), false,
@@ -1654,6 +1673,19 @@ impl AsyncComponent for AppModel {
                 if let Some(s) = &self.feed_view_sender {
                     let item = crate::feed_item::FeedItem::doc_edited(&interp_key, &me, &edit_op_id, ts);
                     let _ = s.send(crate::feed_view::FeedViewMsg::Push(item));
+
+                    // If `interp_key` is a currently-active transit/sky-aspect/
+                    // house-transit, its Sky-feed card's "reading" text was
+                    // resolved from the DB at the last tick (up to 10 minutes
+                    // stale). Recompute it now so a publish shows up on the
+                    // card immediately instead of waiting for the next tick.
+                    if let Some(chart) = self.chart.as_ref() {
+                        if let Some(item) = crate::transit_ticker::active_item_for_key(
+                            chart, &self.store, &self.baseline, &interp_key,
+                        ).await {
+                            let _ = s.send(crate::feed_view::FeedViewMsg::Push(item));
+                        }
+                    }
                 }
                 self.network_changed_token += 1;
             }
@@ -1707,6 +1739,12 @@ impl AsyncComponent for AppModel {
                         warn!("editor presence publish: {e}");
                     }
                 }
+                // Give the just-(un)registered call button its real initial
+                // state — remote presence may already be known even though
+                // this message only ever announces our OWN join/leave.
+                crate::aspect_view::refresh_active_call_button(
+                    &interp_key, others_present(&mut self.editor_presence, &interp_key),
+                );
             }
             AppMsg::TouchKeySubscription { interp_key } => {
                 if let (Some(client), Some(chart)) = (&self.zodia_client, &self.chart) {
@@ -2046,6 +2084,54 @@ impl AsyncComponent for AppModel {
                 self.circles_changed_token += 1;
                 self.refresh_circle_page(&id_hex).await;
             }
+            AppMsg::ScriptQuery(reply) => {
+                use crate::stargazer_list::StargazerState;
+                let discovered_peer = self.stargazers.values()
+                    .find(|s| matches!(s.state, StargazerState::Discovered))
+                    .map(|s| s.peer_id.clone());
+                let pending_peer = self.stargazers.values()
+                    .find(|s| matches!(s.state, StargazerState::OutgoingPending))
+                    .map(|s| s.peer_id.clone());
+                let connected_peer = self.stargazers.values()
+                    .find(|s| matches!(s.state, StargazerState::Connected { .. }))
+                    .map(|s| s.peer_id.clone());
+                let incoming_consent = self.stargazers.values()
+                    .any(|s| matches!(s.state, StargazerState::IncomingPending { .. }));
+                // "First" circle = alphabetically by name, matching the
+                // sidebar's own sort — scripts only ever create one anyway.
+                let first_circle_id_hex = {
+                    let mut sorted: Vec<(&String, &String)> = self.circles.iter().collect();
+                    sorted.sort_by(|a, b| a.1.cmp(b.1));
+                    sorted.first().map(|(id, _)| (*id).clone())
+                };
+                let circle_member_count = match (&self.zodia_client, &first_circle_id_hex) {
+                    (Some(client), Some(id_hex)) => match decode_circle_id(id_hex) {
+                        Ok(circle_id) => client.circle_members(circle_id).await
+                            .map(|m| m.len()).unwrap_or(0),
+                        Err(_) => 0,
+                    },
+                    _ => 0,
+                };
+                // Whichever transit/sky-aspect/house-transit is first in
+                // the currently-active set, if any — same key space
+                // `active_item_for_key`/`PublishDocEdit` key off.
+                let first_sky_interp_key = self.chart.as_ref().and_then(|chart| {
+                    let ts = chart.transits_at(zodia_core::current_jdn()).ok()?;
+                    ts.transit_aspects.first().map(|ta| ta.interp_key().to_sig())
+                        .or_else(|| ts.sky_aspects.first().map(|a| format!("sky:{}", a.sig())))
+                        .or_else(|| ts.house_transits.first().map(|ht| ht.interp_key().to_sig()))
+                });
+                let _ = reply.0.send(crate::screenshot_script::ScriptStateSnapshot {
+                    discovered_peer, pending_peer, connected_peer, incoming_consent,
+                    first_circle_id_hex, circle_member_count, first_sky_interp_key,
+                });
+            }
+            AppMsg::ScriptUi(cmd) => {
+                self.pending_script_ui.borrow_mut().push(cmd);
+            }
+            AppMsg::ScriptQuit => {
+                relm4::main_application().quit();
+            }
         }
     }
 
@@ -2331,6 +2417,14 @@ impl AsyncComponent for AppModel {
             if self.on_setup_page { "setup" } else { "main" }
         );
 
+        // ── screenshot-script widget commands (inert in normal runs) ──────────
+
+        for cmd in self.pending_script_ui.borrow_mut().drain(..) {
+            crate::screenshot_script::run_ui_cmd(
+                &cmd, widgets.split_view.upcast_ref(), &widgets.content_stack,
+            );
+        }
+
         // ── lazily populate aspect views ──────────────────────────────────────
 
         if !self.on_setup_page && widgets.chart_container.first_child().is_none() {
@@ -2345,6 +2439,7 @@ impl AsyncComponent for AppModel {
                     identity:         Rc::clone(&self.identity),
                     parent_sender:    sender.clone(),
                     ollama_models:    self.ollama_models.borrow().clone(),
+                    split_view:       Some(widgets.split_view.clone()),
                 });
                 nav.set_vexpand(true);
                 widgets.chart_container.append(&nav);
@@ -2353,6 +2448,7 @@ impl AsyncComponent for AppModel {
                 // here on first paint (no transit aspect-table any more).
                 let (feed_sender, nav) = mount_sky_feed(
                     &widgets.sky_container,
+                    &widgets.split_view,
                     &sender,
                     self.identity.public_key(),
                 );
@@ -2526,30 +2622,10 @@ impl AsyncComponent for AppModel {
             widgets.toast_overlay.add_toast(toast);
         }
 
-        // ── rebuild network view and sync page titles when content changes ────
+        // ── rebuild network view when content changes ─────────────────────────
 
         if self.network_changed_token != widgets.network_changed_token_shown {
             send_network_refresh(self);
-            // Keep open peer page titles in sync with nicknames.
-            for s in self.stargazers.values()
-                .filter(|s| matches!(s.state, StargazerState::Connected { .. }))
-            {
-                let peer_hex = hex::encode_upper(&s.peer_id.0[..4]);
-                let glyph    = if s.solar_month > 0 { sign_glyph(s.solar_month) } else { "" };
-                if let Some(tw) = widgets.stargazer_titles.get(&peer_hex) {
-                    let mut title = format!("{glyph}  {}", self.resolved_peer_name(&peer_hex));
-                    if !self.connected_channels.contains_key(&s.peer_id) {
-                        if let Some(&seen_at) = self.last_seen.get(&s.peer_id.0) {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            title.push_str(&format!(" · Last seen {}", crate::util::format_last_seen(now, seen_at)));
-                        }
-                    }
-                    tw.set_title(&title);
-                }
-            }
             widgets.network_changed_token_shown = self.network_changed_token;
         }
 
@@ -2571,19 +2647,17 @@ impl AsyncComponent for AppModel {
             if let Some(their_blob) = their_blob {
                 let tag = hex::encode_upper(&peer_id.0[..4]);
                 if let Some(chart) = &self.chart {
-                    let nickname = self.stargazer_nicknames.get(&tag).map(|s| s.as_str());
                     if widgets.content_stack.child_by_name(&tag).is_some() {
                         // Page already built — switch to it directly.
                         widgets.content_stack.set_visible_child_name(&tag);
                     } else {
-                        let (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, switcher_title) =
+                        let (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label) =
                             stargazer_page::build_stargazer_page(
                                 &peer_id, their_blob, chart,
                                 self.store.clone(),
                                 Rc::clone(&self.baseline),
                                 Rc::clone(&self.identity),
                                 &sender,
-                                nickname,
                                 &widgets.split_view,
                                 &self.ollama_models.borrow(),
                             );
@@ -2596,8 +2670,7 @@ impl AsyncComponent for AppModel {
                         widgets.stargazer_msg_lists.insert(tag.clone(), msg_list);
                         widgets.stargazer_actions.insert(tag.clone(), (call_btn, send_btn, entry));
                         widgets.stargazer_typing_labels.insert(tag.clone(), typing_label);
-                        widgets.stargazer_seen_labels.insert(tag.clone(), seen_label);
-                        widgets.stargazer_titles.insert(tag, switcher_title);
+                        widgets.stargazer_seen_labels.insert(tag, seen_label);
                     }
                     // On narrow windows, show the peer page instead of the
                     // sidebar. The header's sidebar-toggle button brings it
@@ -3401,8 +3474,6 @@ fn build_widgets(
     relm4::Sender<crate::network_tab::NetworkTabMsg>,
     relm4::Sender<crate::sidebar::SidebarMsg>,
 ) {
-    root.set_default_size(800, 620);
-
     let outer_stack = gtk::Stack::new();
     outer_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     outer_stack.set_transition_duration(200);
@@ -3458,12 +3529,15 @@ fn build_widgets(
             identity:         Rc::clone(&model.identity),
             parent_sender:    sender.clone(),
             ollama_models:    model.ollama_models.borrow().clone(),
+            split_view:       Some(split_view.clone()),
         });
         nav.set_vexpand(true);
         chart_container.append(&nav);
 
         // Phase E: Sky becomes the activity feed.
-        let (feed_sender, nav) = mount_sky_feed(&sky_container, &sender, model.identity.public_key());
+        let (feed_sender, nav) = mount_sky_feed(
+            &sky_container, &split_view, &sender, model.identity.public_key(),
+        );
         *model.sky_nav.borrow_mut() = Some(nav);
         // Route the sender onto the model via the message bus (init has &model).
         let _ = sender.input_sender().send(AppMsg::__SetFeedSender(feed_sender));
@@ -3508,7 +3582,6 @@ fn build_widgets(
         stargazer_msg_lists: HashMap::new(),
         stargazer_chat_shown: HashMap::new(),
         stargazer_actions: HashMap::new(),
-        stargazer_titles: HashMap::new(),
         stargazer_typing_labels: HashMap::new(),
         stargazer_seen_labels: HashMap::new(),
         consent_bar,
@@ -3750,6 +3823,15 @@ fn prune_stale_presence(map: &mut HashMap<String, HashMap<[u8; 32], u64>>) {
     });
 }
 
+/// Whether anyone else is currently present in `interp_key`'s editor —
+/// pruning stale entries first, same as `AppMsg::StartEditorAudio`'s own
+/// check. Used to keep the detail page's call button's sensitivity/tooltip
+/// (`aspect_view::refresh_active_call_button`) honest.
+fn others_present(map: &mut HashMap<String, HashMap<[u8; 32], u64>>, interp_key: &str) -> bool {
+    prune_stale_presence(map);
+    map.get(interp_key).map(|peers| !peers.is_empty()).unwrap_or(false)
+}
+
 /// Live-refresh helper: load the doc, decode body, push into the currently-
 /// visible TextBuffer if the user is on that key's page.  No-op otherwise.
 async fn push_doc_body_refresh(store: &ZodiaStore, interp_key: &str, me: &[u8; 32]) {
@@ -3834,11 +3916,15 @@ fn spawn_transit_ticker(
 /// `sky_container.first_child().is_none()`.
 fn mount_sky_feed(
     sky_container: &gtk::Box,
+    split_view:    &adw::NavigationSplitView,
     parent_sender: &relm4::component::AsyncComponentSender<AppModel>,
     me:            [u8; 32],
 ) -> (relm4::Sender<crate::feed_view::FeedViewMsg>, adw::NavigationView) {
     let (widget, sender) = crate::feed_view::launch(
-        crate::feed_view::FeedViewInit { filter_key: None, initial: Vec::new(), me },
+        crate::feed_view::FeedViewInit {
+            filter_key: None, initial: Vec::new(), me,
+            split_view: split_view.clone(),
+        },
         parent_sender.input_sender(),
         |out| match out {
             crate::feed_view::FeedViewOut::Activate { event_id, payload } =>
@@ -3901,18 +3987,31 @@ pub(crate) fn show_content_if_collapsed(split_view: &adw::NavigationSplitView) {
     }
 }
 
-fn make_tab_toolbar(
-    title: &str,
-    body: &impl IsA<gtk::Widget>,
+/// Build the standard "list page" header shared by `AspectView` (Chart) and
+/// `FeedView` (Sky): sidebar toggle, `title_widget` as the pill filter slot
+/// (may be left empty by the caller, e.g. Synastry with nothing to filter),
+/// and the glyph-legend help button. Callers own an `adw::ToolbarView` and
+/// wrap only their OWN root page's content with this header, never
+/// anything pushed on top of it — that's what makes the header disappear
+/// on its own once a detail page is pushed onto the surrounding
+/// `AdwNavigationView`, instead of needing to manually hide/show a
+/// separately-owned bar (see `designing-gnome-ui`'s per-page-header
+/// guidance: chrome should belong to the page it applies to).
+pub(crate) fn build_list_header(
     split_view: &adw::NavigationSplitView,
-) -> adw::ToolbarView {
+    title_widget: &impl IsA<gtk::Widget>,
+) -> adw::HeaderBar {
+    let header = adw::HeaderBar::new();
+    header.set_show_start_title_buttons(false);
+    header.set_show_end_title_buttons(false);
+    // We already show our own sidebar-toggle button for "go back to the
+    // sidebar" on narrow windows; AdwHeaderBar's automatic back button
+    // (shown by default for a non-root page in a navigation view) would
+    // otherwise duplicate that exact action.
+    header.set_show_back_button(false);
+    header.set_title_widget(Some(title_widget));
+
     let sidebar_btn = sidebar_toggle_button(split_view);
-    relm4::view! {
-        header = adw::HeaderBar {
-            #[wrap(Some)]
-            set_title_widget = &adw::WindowTitle::new(title, "") {},
-        }
-    }
     #[cfg(not(target_os = "macos"))]
     header.pack_start(&sidebar_btn);
     #[cfg(target_os = "macos")]
@@ -3922,22 +4021,16 @@ fn make_tab_toolbar(
     // explanation anywhere, a real barrier for anyone not already fluent
     // in astrology notation. Same dialog from every tab, not duplicated
     // per-page content.
-    relm4::view! {
-        help_btn = gtk::Button {
-            set_icon_name: "help-about-symbolic",
-            set_tooltip_text: Some("Glyph legend"),
-        }
-    }
+    let help_btn = gtk::Button::new();
+    help_btn.set_icon_name("help-about-symbolic");
+    help_btn.set_tooltip_text(Some("Glyph legend"));
     {
         let parent = header.clone();
         help_btn.connect_clicked(move |_| present_glyph_legend(&parent));
     }
     header.pack_end(&help_btn);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(body));
-    toolbar
+    header
 }
 
 /// A dialog explaining every glyph used across the app — planet symbols,
@@ -3946,7 +4039,7 @@ fn make_tab_toolbar(
 /// enumeration helpers the rest of the UI uses, so it can't silently drift
 /// out of sync with what's actually shown (e.g. a newly added aspect kind
 /// shows up here automatically via `AspectKind::all()`).
-fn present_glyph_legend(parent: &impl IsA<gtk::Widget>) {
+pub(crate) fn present_glyph_legend(parent: &impl IsA<gtk::Widget>) {
     let dialog = adw::AlertDialog::new(Some("Glyph Legend"), None);
     dialog.add_response("close", "Close");
     dialog.set_default_response(Some("close"));
@@ -4079,8 +4172,7 @@ fn build_main_page(
             set_vexpand: true,
         }
     }
-    let chart_toolbar = make_tab_toolbar("Chart", &chart_container, &split_view);
-    content_stack.add_named(&chart_toolbar, Some("chart"));
+    content_stack.add_named(&chart_container, Some("chart"));
 
     // Sky view
     relm4::view! {
@@ -4089,8 +4181,7 @@ fn build_main_page(
             set_vexpand: true,
         }
     }
-    let sky_toolbar = make_tab_toolbar("Sky", &sky_container, &split_view);
-    content_stack.add_named(&sky_toolbar, Some("sky"));
+    content_stack.add_named(&sky_container, Some("sky"));
 
     // Network view — full Component owning toolbar, status label, and dynamic body.
     let (network_toolbar, network_tab_sender) = crate::network_tab::launch(

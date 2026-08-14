@@ -1931,8 +1931,7 @@ fn kind_str(key: &InterpKey) -> &'static str {
         InterpKey::SkyAspect { .. }      => "sky",
         InterpKey::Transit { .. }        => "transit",
         InterpKey::HouseTransit { .. }   => "house_transit",
-        InterpKey::PlacementSign { .. }  => "placement_sign",
-        InterpKey::PlacementHouse { .. } => "placement_house",
+        InterpKey::Placement { .. }       => "placement",
         InterpKey::PlacementAngle { .. } => "placement_angle",
     }
 }

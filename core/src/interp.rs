@@ -23,10 +23,9 @@ pub enum InterpKind {
     SkyAspect,
     /// Transiting planet occupying a natal house
     HouseTransit,
-    /// Natal planet's sign placement (e.g. "Jupiter in Virgo")
-    PlacementSign,
-    /// Natal planet's house placement (e.g. "Jupiter in house 9")
-    PlacementHouse,
+    /// Natal planet's sign + house placement together (e.g. "Jupiter in
+    /// Virgo, House 9") — one key, one community reading, per planet.
+    Placement,
     /// Sign placement of an angle (Ascendant or Midheaven)
     PlacementAngle,
 }
@@ -62,8 +61,8 @@ impl Angle {
 /// - `"synastry:jupiter_trine_venus"`
 /// - `"transit:saturn_square_natal_venus"`
 /// - `"house_transit:saturn:7"`
-/// - `"placement_sign:jupiter:virgo"`
-/// - `"placement_house:jupiter:9"`
+/// - `"placement:jupiter:virgo:9"` (sign + house together; house omitted —
+///   `"placement:jupiter:virgo"` — for stub charts with no house data)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InterpKey {
     Natal {
@@ -89,15 +88,13 @@ pub enum InterpKey {
         /// Natal house number (1–12)
         house: u8,
     },
-    PlacementSign {
+    Placement {
         planet: Planet,
         /// Sign index 0..11 (Aries..Pisces).
         sign:   u8,
-    },
-    PlacementHouse {
-        planet: Planet,
-        /// Natal house number (1–12)
-        house:  u8,
+        /// Natal house number (1–12). `None` only for stub charts with no
+        /// house system computed — every real chart has one.
+        house:  Option<u8>,
     },
     PlacementAngle {
         angle: Angle,
@@ -127,10 +124,10 @@ impl InterpKey {
                 format!("transit:{}_{}_{}", transiting.name(), kind.name(), natal_body.name()),
             Self::HouseTransit { transiting, house } =>
                 format!("house_transit:{}:{house}", transiting.name()),
-            Self::PlacementSign  { planet, sign } =>
-                format!("placement_sign:{}:{}", planet.name(), sign_name_lower(*sign)),
-            Self::PlacementHouse { planet, house } =>
-                format!("placement_house:{}:{house}", planet.name()),
+            Self::Placement { planet, sign, house } => match house {
+                Some(h) => format!("placement:{}:{}:{h}", planet.name(), sign_name_lower(*sign)),
+                None    => format!("placement:{}:{}", planet.name(), sign_name_lower(*sign)),
+            },
             Self::PlacementAngle { angle, sign } =>
                 format!("placement_angle:{}:{}", angle.tag(), sign_name_lower(*sign)),
         }
@@ -143,8 +140,7 @@ impl InterpKey {
             Self::SkyAspect   { .. }       => InterpKind::SkyAspect,
             Self::Transit     { .. }       => InterpKind::Transit,
             Self::HouseTransit { .. }      => InterpKind::HouseTransit,
-            Self::PlacementSign  { .. }    => InterpKind::PlacementSign,
-            Self::PlacementHouse { .. }    => InterpKind::PlacementHouse,
+            Self::Placement       { .. }    => InterpKind::Placement,
             Self::PlacementAngle { .. }    => InterpKind::PlacementAngle,
         }
     }
@@ -163,8 +159,8 @@ impl InterpKey {
     /// - `Natal { "moon_trine_venus" }`     → `"Moon trine Venus"`
     /// - `Transit { saturn, sun, square }`  → `"Saturn square Sun"`
     /// - `HouseTransit { jupiter, 7 }`      → `"Jupiter in house 7"`
-    /// - `PlacementSign { jupiter, 5 }`     → `"Jupiter in Virgo"`
-    /// - `PlacementHouse { jupiter, 9 }`    → `"Jupiter in House 9"`
+    /// - `Placement { jupiter, 5, Some(9) }` → `"Jupiter in Virgo, House 9"`
+    /// - `Placement { jupiter, 5, None }`    → `"Jupiter in Virgo"`
     pub fn plain_name(&self) -> String {
         match self {
             Self::Natal { aspect_sig }
@@ -179,12 +175,12 @@ impl InterpKey {
             Self::HouseTransit { transiting, house } => {
                 format!("{} transiting {house} house", cap(transiting.name()))
             }
-            Self::PlacementSign  { planet, sign } => {
-                format!("{} in {}", cap(planet.name()), cap(sign_name_lower(*sign)))
-            }
-            Self::PlacementHouse { planet, house } => {
-                format!("{} in House {house}", cap(planet.name()))
-            }
+            Self::Placement { planet, sign, house } => match house {
+                Some(h) => format!(
+                    "{} in {}, House {h}", cap(planet.name()), cap(sign_name_lower(*sign)),
+                ),
+                None => format!("{} in {}", cap(planet.name()), cap(sign_name_lower(*sign))),
+            },
             Self::PlacementAngle { angle, sign } => {
                 format!("{} in {}", angle.display_name(), cap(sign_name_lower(*sign)))
             }
@@ -228,8 +224,37 @@ pub fn parse_interp_sig(sig: &str) -> Option<InterpKey> {
             let house: u8  = h.parse().ok()?;
             Some(InterpKey::HouseTransit { transiting, house })
         }
-        // Placements omitted — feed cards don't surface them yet.
+        "placement" => {
+            // "planet:sign" or "planet:sign:house"
+            let mut parts = rest.splitn(3, ':');
+            let planet = crate::planet::Planet::from_name(parts.next()?)?;
+            let sign_name = parts.next()?;
+            let sign = (0..12).find(|&i| sign_name_lower(i) == sign_name)?;
+            let house = match parts.next() {
+                Some(h) => Some(h.parse::<u8>().ok()?),
+                None    => None,
+            };
+            Some(InterpKey::Placement { planet, sign, house })
+        }
+        // Placement angles omitted — feed cards don't surface them yet.
         _ => None,
+    }
+}
+
+/// Human-readable kind badge ("Transit", "Synastry", …) straight from a
+/// canonical key string's `kind:` prefix — same vocabulary `InterpKey::
+/// kind()`'s variants map to, but usable where only the sig string is
+/// available (e.g. the activity feed's `interp_key: String` fields).
+pub fn kind_label_for_sig(sig: &str) -> &'static str {
+    let kind = sig.split_once(':').map(|(k, _)| k).unwrap_or(sig);
+    match kind {
+        "natal"           => "Natal",
+        "synastry"        => "Synastry",
+        "transit"         => "Transit",
+        "sky"             => "Sky",
+        "house_transit"   => "House transit",
+        "placement" | "placement_angle" => "Placement",
+        _ => "Reading",
     }
 }
 
@@ -250,14 +275,13 @@ pub fn humanize_key(sig: &str) -> String {
                 return format!("{} transiting {house} house", cap(planet));
             }
         }
-        "placement_sign"  if rest.contains(':') => {
-            if let Some((planet, sign)) = rest.split_once(':') {
-                return format!("{} in {}", cap(planet), cap(sign));
-            }
-        }
-        "placement_house" if rest.contains(':') => {
-            if let Some((planet, house)) = rest.split_once(':') {
-                return format!("{} in House {house}", cap(planet));
+        "placement" if rest.contains(':') => {
+            let mut parts = rest.splitn(3, ':');
+            if let (Some(planet), Some(sign)) = (parts.next(), parts.next()) {
+                return match parts.next() {
+                    Some(house) => format!("{} in {}, House {house}", cap(planet), cap(sign)),
+                    None        => format!("{} in {}", cap(planet), cap(sign)),
+                };
             }
         }
         "placement_angle" if rest.contains(':') => {

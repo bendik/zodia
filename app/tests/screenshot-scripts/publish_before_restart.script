@@ -1,0 +1,10 @@
+# First launch of the sky-reading-persistence scenario. {OUT} is replaced
+# with the output directory by the test harness.
+wait-state has-sky-transit 30
+goto sky
+wait 1
+dump-sky-text {OUT}/before_publish.txt
+publish-first-sky-reading The stars ripple with unusual clarity today.
+wait 1
+dump-sky-text {OUT}/after_publish.txt
+quit

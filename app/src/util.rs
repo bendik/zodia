@@ -31,27 +31,6 @@ pub fn lon_to_sign_deg(lon: f64) -> (u8, String) {
     (sign_idx, format!("{deg}°{min:02}′"))
 }
 
-// ── presence ──────────────────────────────────────────────────────────────────
-
-/// "Last seen 5m ago" — style relative-time text for an offline peer's
-/// direct-channel close timestamp. Takes `now` explicitly rather than
-/// reading the clock itself so it stays a pure, deterministically
-/// testable function; callers pass the real current unix time.
-pub fn format_last_seen(now: u64, last_seen: u64) -> String {
-    let diff = now.saturating_sub(last_seen);
-    if diff < 60 {
-        "just now".to_string()
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86_400 {
-        format!("{}h ago", diff / 3600)
-    } else if diff < 7 * 86_400 {
-        format!("{}d ago", diff / 86_400)
-    } else {
-        "a while ago".to_string()
-    }
-}
-
 // ── aspect card formatters ────────────────────────────────────────────────────
 
 /// Multi-line card for a natal aspect — kept for future synastry/export views.
@@ -140,43 +119,3 @@ fn detect_wide(sep: f64) -> Option<AspectKind> {
         .copied()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn just_under_a_minute_reads_as_just_now() {
-        assert_eq!(format_last_seen(1000, 1000), "just now");
-        assert_eq!(format_last_seen(1059, 1000), "just now");
-    }
-
-    #[test]
-    fn minutes_boundary_is_exact() {
-        assert_eq!(format_last_seen(1060, 1000), "1m ago");
-        assert_eq!(format_last_seen(1000 + 3599, 1000), "59m ago");
-    }
-
-    #[test]
-    fn hours_boundary_is_exact() {
-        assert_eq!(format_last_seen(1000 + 3600, 1000), "1h ago");
-        assert_eq!(format_last_seen(1000 + 86_399, 1000), "23h ago");
-    }
-
-    #[test]
-    fn days_boundary_is_exact() {
-        assert_eq!(format_last_seen(1000 + 86_400, 1000), "1d ago");
-        assert_eq!(format_last_seen(1000 + 7 * 86_400 - 1, 1000), "6d ago");
-    }
-
-    #[test]
-    fn a_week_or_more_reads_as_a_while_ago() {
-        assert_eq!(format_last_seen(1000 + 7 * 86_400, 1000), "a while ago");
-    }
-
-    #[test]
-    fn clock_skew_never_underflows_or_shows_the_future() {
-        // last_seen after "now" (system clock adjustment, restart race) —
-        // must not panic on subtraction underflow or print a negative time.
-        assert_eq!(format_last_seen(1000, 2000), "just now");
-    }
-}

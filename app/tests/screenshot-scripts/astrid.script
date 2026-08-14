@@ -1,0 +1,41 @@
+# Primary instance ("Astrid", Oslo) — captures chart, circles, network.
+# {OUT} is replaced with the output directory by the test harness.
+set-window-size 800 600
+wait 2
+wait-state discovered 90
+wait 10                         # let iroh finish learning dialable addresses —
+                                # a dial fired seconds after the peer's endpoint
+                                # comes up times out on stale/empty addrs
+connect-first-peer
+wait 45                         # one full connect_peer retry cycle
+connect-first-peer              # no-op if connected; Reconnect-retry otherwise
+wait 45
+connect-first-peer
+wait-state connected 120        # Luna's script accepts the consent request
+goto chart
+wait 2                          # first goto lazily builds the whole tab
+scroll 1450                     # past summary/houses/balance to search + placements
+wait 1
+snapshot {OUT}/chart.png
+create-circle Moon Circle
+wait 5                          # key-bundle settle before inviting (mirrors the
+                                # cucumber suite's pre-invite settle window)
+invite-first-peer
+wait-state circle-member 60
+open-first-circle
+wait 4
+snapshot {OUT}/circles.png
+wait 4                          # `snapshot` is fire-and-forget on the driver
+                                # thread — it doesn't block until the async
+                                # GTK-side render actually completes, so the
+                                # next step (which navigates away) needs its
+                                # own buffer or it races the still-in-flight
+                                # capture. Same reasoning below before `quit`.
+# Network view last: by now Luna's Active status + display name have long
+# arrived and the sync layer has had a couple of minutes to catch up, so
+# the page shows a live peer rather than just-connected placeholders.
+goto network
+wait 2
+snapshot {OUT}/network.png
+wait 4
+quit

@@ -1,0 +1,17 @@
+# Secondary instance ("Luna", Bergen) — accepts the consent request and
+# captures the synastry view. {OUT} is replaced by the test harness.
+set-window-size 800 600
+wait 2
+wait-state incoming-consent 240  # Astrid may need several dial retries first
+accept-consent
+wait-state connected 180
+wait 5                          # Tier-1 chart exchange -> synastry computable
+open-first-peer
+wait 2
+peer-tab synastry
+wait 2
+snapshot {OUT}/synastry.png
+wait 150                        # stay online through Astrid's circle work and
+                                # her final network capture — if Luna quit
+                                # early, that shot would show an offline peer
+quit

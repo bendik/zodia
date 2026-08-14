@@ -1,0 +1,8 @@
+# Second launch of the sky-reading-persistence scenario, same data
+# directory as the first. {OUT} is replaced with the output directory by
+# the test harness.
+wait-state has-sky-transit 30
+goto sky
+wait 1
+dump-sky-text {OUT}/after_restart.txt
+quit
