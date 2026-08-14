@@ -149,7 +149,7 @@ impl SimpleAsyncComponent for AspectView {
                             #[name(empty_label)]
                             gtk::Label {
                                 set_label: "No aspects within default orbs",
-                                add_css_class: "dim-label",
+                                add_css_class: "dimmed",
                                 set_halign: gtk::Align::Center,
                                 set_margin_top: 12,
                                 set_visible: false,
@@ -223,6 +223,29 @@ impl SimpleAsyncComponent for AspectView {
                 Some(p_rows)
             } else { None };
 
+        // Search filter — the natal aspect list can run 20-45 flat rows
+        // with no built-in way to narrow it (confirmed against the actual
+        // FactoryVecDeque usage here, no prior filtering existed). A
+        // GtkSearchEntry filtering by row title is the proportionate fix
+        // per the designing-gnome-ui skill's own list-widget guidance —
+        // this list runs tens of rows, not the thousands a GtkListView +
+        // factory rewrite would actually be justified by.
+        let placements_group = placements_rows.as_ref().map(|p| p.widget().clone());
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_placeholder_text(Some("Search aspects…"));
+        search_entry.set_visible(!items_empty);
+        {
+            let aspects_group   = interp_group.clone();
+            let placements_group = placements_group.clone();
+            search_entry.connect_search_changed(move |entry| {
+                let query = entry.text().to_lowercase();
+                filter_preferences_group_rows(&aspects_group, &query);
+                if let Some(p) = &placements_group {
+                    filter_preferences_group_rows(p, &query);
+                }
+            });
+        }
+
         let model = AspectView {
             nav: root.clone(),
             store:         init.store,
@@ -240,6 +263,7 @@ impl SimpleAsyncComponent for AspectView {
         if let Some(p_rows) = model.placements_rows.as_ref() {
             widgets.content_box.prepend(p_rows.widget());
         }
+        widgets.content_box.prepend(&search_entry);
 
         // Elemental / modal balance — a classic natal-chart summary
         // ("Fire-dominant", "a lot of Cardinal energy") the app never
@@ -643,8 +667,13 @@ async fn build_doc_reading_group(
     // room, nothing to do with that. Was "Start discussion" / "voice
     // circle" in copy, which read as the same feature and confused at
     // least one real user into expecting circle-creation here.
+    // Plain label, not `pill` — that class reads as a prominent call-to-
+    // action (its other use in this app is the empty-state "contribute a
+    // reading" button), which this secondary action isn't. Keeping this
+    // and `generate_btn` both plain-labeled, `share_btn` icon-only-flat,
+    // and `publish_btn` the row's one `suggested-action` gives the row a
+    // clear two-tier hierarchy instead of four different button shapes.
     let audio_btn = gtk::Button::with_label("Talk about this");
-    audio_btn.add_css_class("pill");
     audio_btn.set_tooltip_text(Some(
         "Open a live voice room on this reading.  Anyone editing the doc \
          can join from their sidebar.  Audio mesh, max 6 participants.",
@@ -685,7 +714,7 @@ async fn build_doc_reading_group(
     ));
     hint.set_halign(gtk::Align::Start);
     hint.add_css_class("caption");
-    hint.add_css_class("dim-label");
+    hint.add_css_class("dimmed");
     editor_box.append(&hint);
 
     let body_holder = adw::PreferencesRow::new();
@@ -707,27 +736,39 @@ async fn build_doc_reading_group(
         let current_row = adw::ActionRow::new();
         current_row.set_title("Current revision");
         current_row.set_subtitle(&hex::encode(&rev[..8]));
-        // Affirm button — ♡ this revision so the community ranking signal
+        // Affirm control — ♡ this revision so the community ranking signal
         // reflects current-doc taste, not "the row that won years ago."
-        let affirm_btn = gtk::Button::from_icon_name("emblem-favorite-symbolic");
+        // A toggle, not a one-shot button: a misclick (or genuine change
+        // of mind) is always self-service, same as leaving a circle.
+        let already_affirmed = store.doc_has_affirmed(&key_sig, &rev, &me_bytes).await
+            .unwrap_or(false);
+        let affirm_btn = gtk::ToggleButton::new();
+        affirm_btn.set_icon_name("emblem-favorite-symbolic");
         affirm_btn.add_css_class("flat");
         affirm_btn.add_css_class("circular");
         affirm_btn.set_valign(gtk::Align::Center);
         affirm_btn.set_tooltip_text(Some(
             "Affirm this revision — your ♡ attaches to the current text, \
-             not to a frozen interpretation row.",
+             not to a frozen interpretation row. Click again to undo.",
         ));
+        // Set before connecting the handler so the initial state doesn't
+        // itself fire a spurious (re-)affirm/retract publish.
+        affirm_btn.set_active(already_affirmed);
         let key_for_aff = key_sig.clone();
         let sender_for_aff = sender.clone();
         let rev_copy = rev;
-        affirm_btn.connect_clicked(move |b| {
-            sender_for_aff.input(AppMsg::AffirmDocRev {
-                interp_key: key_for_aff.clone(),
-                target_rev: rev_copy,
-            });
-            // Visual feedback: dim the button after click so the user
-            // sees their tap registered (idempotent on the server side).
-            b.set_sensitive(false);
+        affirm_btn.connect_toggled(move |b| {
+            if b.is_active() {
+                sender_for_aff.input(AppMsg::AffirmDocRev {
+                    interp_key: key_for_aff.clone(),
+                    target_rev: rev_copy,
+                });
+            } else {
+                sender_for_aff.input(AppMsg::RetractDocAffirm {
+                    interp_key: key_for_aff.clone(),
+                    target_rev: rev_copy,
+                });
+            }
         });
         current_row.add_suffix(&affirm_btn);
         rev_group.add(&current_row);
@@ -875,6 +916,31 @@ fn relative_age(unix: u64) -> String {
 
 /// "aries" → "Aries" — `sign_name_lower` is deliberately lowercase for
 /// mid-sentence use elsewhere; UI labels here want it capitalized standalone.
+/// Show/hide each `AdwActionRow` inside `group` by whether its own title
+/// contains `query` (case-insensitive; empty query shows everything).
+/// Recurses through descendants rather than assuming a fixed depth, since
+/// `AdwPreferencesGroup`'s internal boxed-list wrapping isn't part of its
+/// public contract — matching by the row's own `title()` property (already
+/// set from `InterpRowInit.title` in `interp_row.rs::init_root`) avoids
+/// needing to know that shape at all.
+fn filter_preferences_group_rows(group: &adw::PreferencesGroup, query: &str) {
+    fn walk(widget: &gtk::Widget, query: &str) {
+        let mut child = widget.first_child();
+        while let Some(w) = child {
+            let next = w.next_sibling();
+            if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
+                let matches = query.is_empty()
+                    || row.title().to_lowercase().contains(query);
+                row.set_visible(matches);
+            } else {
+                walk(&w, query);
+            }
+            child = next;
+        }
+    }
+    walk(group.upcast_ref::<gtk::Widget>(), query);
+}
+
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {

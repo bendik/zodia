@@ -179,6 +179,15 @@ async fn peer_affirms(world: &mut ZodiaWorld, name: String, key: String) {
         .expect("affirm succeeds");
 }
 
+#[when(expr = "{string} retracts their affirmation of the current revision of {string}")]
+async fn peer_retracts_affirmation(world: &mut ZodiaWorld, name: String, key: String) {
+    world.clients.get(&name)
+        .unwrap_or_else(|| panic!("no peer named {name}"))
+        .retract_affirm(&key, [0u8; 32])
+        .await
+        .expect("retract_affirm succeeds");
+}
+
 #[when(expr = "{string} starts editing {string}")]
 async fn peer_starts_editing(world: &mut ZodiaWorld, name: String, key: String) {
     world.clients.get(&name)
@@ -671,6 +680,29 @@ async fn observes_doc_affirmation(world: &mut ZodiaWorld, name: String, key: Str
         matches!(event, StateEvent::DocAffirmed { interp_key, .. } if *interp_key == key)
     }).await;
     assert!(seen, "{name} did not observe a doc affirmation on {key} within {secs}s");
+}
+
+#[then(expr = "{string} observes the doc affirmation retracted on {string} within {int} seconds")]
+async fn observes_doc_affirmation_retracted(world: &mut ZodiaWorld, name: String, key: String, secs: u64) {
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::DocAffirmRetracted { interp_key, .. } if *interp_key == key)
+    }).await;
+    assert!(seen, "{name} did not observe the doc affirmation retracted on {key} within {secs}s");
+}
+
+#[then(expr = "{string} observes {string}'s affirmation retracted on {string} within {int} seconds")]
+async fn observes_named_affirmation_retracted(
+    world: &mut ZodiaWorld, name: String, retractor: String, key: String, secs: u64,
+) {
+    let (retractor_signing_key, _) = world.identities.get(&retractor)
+        .unwrap_or_else(|| panic!("no prior identity for peer {retractor}"))
+        .clone();
+    let retractor_verifying_key = PandaSigningKey::from_bytes(retractor_signing_key.as_bytes()).verifying_key();
+    let seen = wait_for(world, &name, secs, |event| {
+        matches!(event, StateEvent::DocAffirmRetracted { interp_key, by, .. }
+            if *interp_key == key && *by == retractor_verifying_key)
+    }).await;
+    assert!(seen, "{name} did not observe {retractor}'s affirmation retracted on {key} within {secs}s");
 }
 
 #[then(expr = "{string} observes a lagged events error within {int} seconds")]

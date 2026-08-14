@@ -26,7 +26,7 @@ ciborium.workspace = true
 blake3.workspace = true
 relm4 = { version = "0.10", features = ["macros", "libadwaita", "gnome_45"] }
 gtk4 = "0.10"
-libadwaita = { version = "0.8", features = ["v1_8"] }
+libadwaita = { version = "0.8", features = ["v1_9"] }
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -23,15 +23,17 @@ pub struct SidebarInit {
     pub peers_list:         gtk::ListBox,
     pub discussions_list:   gtk::ListBox,
     pub discussions_header: gtk::Label,
-    /// Private circles this device created or was invited into — one row
+    /// Private circles this device created or was invited into — one item
     /// per circle, each opening its own dynamically-added page (mirrors how
     /// connected-peer pages work). Circles rank above `peers_list` ("direct
     /// peer contact") since the user asked for circles to take precedence,
-    /// but below the static Chart/Sky/Network rows.
-    pub circles_list:       gtk::ListBox,
-    pub circles_header:     gtk::Label,
+    /// but below the static Chart/Sky/Network section. A standalone
+    /// `AdwSidebar` (own flat activation-index space, built and wired by
+    /// the caller — see `app.rs::build_main_page`) so this component only
+    /// needs to place it, same as any other pre-built widget it hosts.
+    pub circles_sidebar:    adw::Sidebar,
     pub notif_widget:       gtk::MenuButton,
-    pub split_view:         adw::OverlaySplitView,
+    pub split_view:         adw::NavigationSplitView,
     pub content_stack:      gtk::Stack,
 }
 
@@ -68,7 +70,7 @@ pub struct Sidebar {
 }
 
 pub struct SidebarWidgets {
-    nav_list:      gtk::ListBox,
+    nav_list:      adw::Sidebar,
     others_header: gtk::Label,
 }
 
@@ -90,63 +92,40 @@ impl SimpleComponent for Sidebar {
     ) -> ComponentParts<Self> {
         let SidebarInit {
             peers_list, discussions_list, discussions_header,
-            circles_list, circles_header,
+            circles_sidebar,
             notif_widget, split_view, content_stack,
         } = init;
 
         // ── Static nav list (Chart / Sky / Network) ──────────────────────────
-        relm4::view! {
-            nav_list = gtk::ListBox {
-                add_css_class: "navigation-sidebar",
-                set_selection_mode: gtk::SelectionMode::Single,
-            }
-        }
-
-        let make_nav_row = |icon: &str, label_text: &str| -> gtk::ListBoxRow {
-            relm4::view! {
-                row = gtk::ListBoxRow {
-                    #[wrap(Some)]
-                    set_child = &gtk::Box {
-                        set_orientation: gtk::Orientation::Horizontal,
-                        set_spacing: 10,
-                        set_margin_start: 12,
-                        set_margin_end: 12,
-                        set_margin_top: 10,
-                        set_margin_bottom: 10,
-
-                        gtk::Image {
-                            set_icon_name: Some(icon),
-                            set_pixel_size: 16,
-                        },
-
-                        gtk::Label {
-                            set_label: label_text,
-                            set_halign: gtk::Align::Start,
-                        },
-                    },
-                }
-            }
-            row
-        };
-
-        nav_list.append(&make_nav_row("weather-clear-symbolic",    "Chart"));
-        nav_list.append(&make_nav_row("night-light-symbolic",      "Sky"));
-        nav_list.append(&make_nav_row("network-wireless-symbolic", "Network"));
-        nav_list.select_row(nav_list.row_at_index(0).as_ref());
+        // AdwSidebar (libadwaita 1.9) — indices are fixed and always 0/1/2
+        // since this is the sidebar's only section for now (Circles/Others
+        // migrate to further sections in a later phase), so no index → page
+        // lookup table is needed yet.
+        let nav_list = adw::Sidebar::new();
+        nav_list.add_css_class("navigation-sidebar");
+        let nav_section = adw::SidebarSection::new();
+        nav_section.append(adw::SidebarItem::builder()
+            .title("Chart").icon_name("weather-clear-symbolic").build());
+        nav_section.append(adw::SidebarItem::builder()
+            .title("Sky").icon_name("night-light-symbolic").build());
+        nav_section.append(adw::SidebarItem::builder()
+            .title("Network").icon_name("network-wireless-symbolic").build());
+        nav_list.append(nav_section);
+        nav_list.set_selected(0);
 
         {
             let cs = content_stack.clone();
             let sv = split_view.clone();
             let pl = peers_list.clone();
-            nav_list.connect_row_activated(move |_, row| {
-                let page = match row.index() {
+            nav_list.connect_activated(move |_, index| {
+                let page = match index {
                     0 => "chart",
                     1 => "sky",
                     2 => "network",
                     _ => return,
                 };
                 cs.set_visible_child_name(page);
-                if sv.is_collapsed() { sv.set_show_sidebar(false); }
+                crate::app::show_content_if_collapsed(&sv);
                 pl.unselect_all();
             });
         }
@@ -154,7 +133,7 @@ impl SimpleComponent for Sidebar {
         // ── "Others" section header ──────────────────────────────────────────
         let others_header = gtk::Label::new(Some("Others"));
         others_header.add_css_class("heading");
-        others_header.add_css_class("dim-label");
+        others_header.add_css_class("dimmed");
         others_header.set_halign(gtk::Align::Start);
         others_header.set_margin_start(12);
         others_header.set_margin_end(12);
@@ -169,8 +148,7 @@ impl SimpleComponent for Sidebar {
                 append: &nav_list,
                 append: &discussions_header,
                 append: &discussions_list,
-                append: &circles_header,
-                append: &circles_list,
+                append: &circles_sidebar,
                 append: &others_header,
                 append: &peers_list,
             }
@@ -217,7 +195,7 @@ impl SimpleComponent for Sidebar {
         widgets.others_header.set_visible(self.others_visible);
         if self.unselect_token_shown.get() != self.unselect_token {
             self.unselect_token_shown.set(self.unselect_token);
-            widgets.nav_list.unselect_all();
+            widgets.nav_list.set_selected(gtk::INVALID_LIST_POSITION);
         }
     }
 }

@@ -190,6 +190,10 @@ pub enum AppMsg {
     PublishDocEdit { interp_key: String, new_body: String, ai_generated: bool },
     /// Phase F-collab: user affirmed the current revision of a doc.
     AffirmDocRev { interp_key: String, target_rev: [u8; 32] },
+    /// Undo a prior `AffirmDocRev` — the affirm control is a toggle, not
+    /// a one-shot button, so a misclick (or genuine change of mind) is
+    /// always self-service.
+    RetractDocAffirm { interp_key: String, target_rev: [u8; 32] },
     /// Phase F-collab: user proposed a veto on the newest edit of a doc.
     /// Authority gate (ring + window + newest-edit) checked locally before
     /// publish; if it passes, local rollback runs and `DocOp::Veto` ships.
@@ -472,7 +476,7 @@ pub struct AppWidgets {
     sky_container: gtk::Box,
 
     /// Overlay split view — sidebar on the left, content stack on the right.
-    split_view: adw::OverlaySplitView,
+    split_view: adw::NavigationSplitView,
     /// Generation of the network view / page titles we last rendered.
     network_changed_token_shown: u64,
 
@@ -482,10 +486,15 @@ pub struct AppWidgets {
     discussions_list:   gtk::ListBox,
     discussions_header: gtk::Label,
 
-    /// Circles sidebar section — one row per circle, rebuilt from
-    /// `model.circles` whenever `circles_changed_token` advances.
-    circles_list:       gtk::ListBox,
-    circles_header:     gtk::Label,
+    /// Circles sidebar section — one item per circle, rebuilt from
+    /// `model.circles` whenever `circles_changed_token` advances. A
+    /// standalone `AdwSidebar` (its own flat selection/activation index
+    /// space, independent of the static nav `AdwSidebar` from Phase 1 —
+    /// same "each section behaves independently" behavior the old
+    /// per-section `GtkListBox`es already had) holding one titled
+    /// `AdwSidebarSection`.
+    circles_sidebar:    adw::Sidebar,
+    circles_section:    adw::SidebarSection,
     circles_row_order:  Rc<RefCell<Vec<String>>>,
     circles_changed_token_shown: u64,
 
@@ -503,9 +512,8 @@ pub struct AppWidgets {
     stargazer_chat_shown: HashMap<String, usize>,
     /// Call and send buttons per stargazer — disabled when stargazer is offline.
     stargazer_actions: HashMap<String, (gtk::Button, gtk::Button, gtk::Entry)>,
-    /// ViewSwitcherTitle per stargazer — updated when the nickname changes.
-    #[allow(deprecated)]
-    stargazer_titles: HashMap<String, adw::ViewSwitcherTitle>,
+    /// Window title per stargazer — updated when the nickname changes.
+    stargazer_titles: HashMap<String, adw::WindowTitle>,
     /// "{name} is typing…" label per stargazer, shown/hidden by
     /// `pending_typing_updates`.
     stargazer_typing_labels: HashMap<String, gtk::Label>,
@@ -1452,6 +1460,18 @@ impl AsyncComponent for AppModel {
                             &event, now_ts, interp_key.clone(), targets_me,
                         );
                     }
+                    StateEvent::DocAffirmRetracted { interp_key, target_rev, by, .. } => {
+                        let voter = by.as_bytes();
+                        let _ = self.store.doc_retract_affirm(
+                            interp_key, target_rev, voter,
+                        ).await;
+                        // Just an affirmation count going down — not
+                        // newsworthy the way a new affirmation is, so no
+                        // feed item / toast, only a UI re-render so the
+                        // displayed count (and this voter's own toggle
+                        // state, if it's their own retraction) stays live.
+                        self.network_changed_token += 1;
+                    }
                     StateEvent::EditorPresenceChanged { interp_key, by, joined, timestamp, .. } => {
                         let me: [u8; 32] = self.identity.public_key();
                         let peer_pk: [u8; 32] = *by.as_bytes();
@@ -1669,6 +1689,15 @@ impl AsyncComponent for AppModel {
                 if let Some(client) = &self.zodia_client {
                     if let Err(e) = client.affirm_rev(&interp_key, target_rev).await {
                         warn!("affirm_rev publish: {e}");
+                    }
+                }
+            }
+            AppMsg::RetractDocAffirm { interp_key, target_rev } => {
+                let me: [u8; 32] = self.identity.public_key();
+                let _ = self.store.doc_retract_affirm(&interp_key, &target_rev, &me).await;
+                if let Some(client) = &self.zodia_client {
+                    if let Err(e) = client.retract_affirm(&interp_key, target_rev).await {
+                        warn!("retract_affirm publish: {e}");
                     }
                 }
             }
@@ -2364,7 +2393,7 @@ impl AsyncComponent for AppModel {
         if widgets.circles_changed_token_shown != self.circles_changed_token {
             widgets.circles_changed_token_shown = self.circles_changed_token;
             rebuild_circles_list(
-                &widgets.circles_list, &widgets.circles_header,
+                &widgets.circles_sidebar, &widgets.circles_section,
                 &self.circles, &widgets.circles_row_order,
             );
         }
@@ -2410,6 +2439,10 @@ impl AsyncComponent for AppModel {
             if let Some(s) = &self.sidebar_sender {
                 let _ = s.send(crate::sidebar::SidebarMsg::UnselectNav);
             }
+            // Same narrow-window handling as opening a peer page — this
+            // was previously missing here, an existing gap the redesign
+            // audit surfaced rather than something this change introduces.
+            show_content_if_collapsed(&widgets.split_view);
         }
 
         // ── circle pages: drop the page for any circle we just left ────────────
@@ -2503,7 +2536,6 @@ impl AsyncComponent for AppModel {
             {
                 let peer_hex = hex::encode_upper(&s.peer_id.0[..4]);
                 let glyph    = if s.solar_month > 0 { sign_glyph(s.solar_month) } else { "" };
-                #[allow(deprecated)]
                 if let Some(tw) = widgets.stargazer_titles.get(&peer_hex) {
                     let mut title = format!("{glyph}  {}", self.resolved_peer_name(&peer_hex));
                     if !self.connected_channels.contains_key(&s.peer_id) {
@@ -2567,13 +2599,10 @@ impl AsyncComponent for AppModel {
                         widgets.stargazer_seen_labels.insert(tag.clone(), seen_label);
                         widgets.stargazer_titles.insert(tag, switcher_title);
                     }
-                    // On narrow windows, hide the sidebar so the peer page
-                    // has full width.  The ToggleButton in the peer header
-                    // brings it back.
-                    let w = widgets.split_view.width();
-                    if w > 0 && w < 720 {
-                        widgets.split_view.set_show_sidebar(false);
-                    }
+                    // On narrow windows, show the peer page instead of the
+                    // sidebar. The header's sidebar-toggle button brings it
+                    // back.
+                    show_content_if_collapsed(&widgets.split_view);
                 }
             } else {
                 // Not connected yet — re-queue, will be retried on next update.
@@ -2725,6 +2754,7 @@ impl AsyncComponent for AppModel {
         if widgets.nav_to_sky_token_shown != self.nav_to_sky_token {
             widgets.nav_to_sky_token_shown = self.nav_to_sky_token;
             widgets.content_stack.set_visible_child_name("sky");
+            show_content_if_collapsed(&widgets.split_view);
         }
 
         // ── Phase F-collab: rebuild sidebar Discussions list ──────────────────
@@ -2779,7 +2809,7 @@ fn rebuild_discussions_list(
         )));
         subtitle.set_halign(gtk::Align::Start);
         subtitle.add_css_class("caption");
-        subtitle.add_css_class("dim-label");
+        subtitle.add_css_class("dimmed");
         text_box.append(&title);
         text_box.append(&subtitle);
         outer.append(&text_box);
@@ -2804,21 +2834,20 @@ fn rebuild_discussions_list(
     }
 }
 
-/// Wipe + repopulate the sidebar Circles list from `model.circles`. Each
-/// row's index is recorded in `row_order` so the click handler wired in
-/// `build_main_page` (fired via `ListBox::connect_row_activated`, which only
-/// gives us the row, not which circle it was for) can look up the right
-/// `id_hex`.
+/// Wipe + repopulate the sidebar Circles section from `model.circles`. Each
+/// item's index is recorded in `row_order` so the click handler wired in
+/// `build_main_page` (fired via `AdwSidebar::connect_activated`, which only
+/// gives us a flat index, not which circle it was for) can look up the
+/// right `id_hex`. The whole `sidebar` widget (title included) hides when
+/// there are no circles yet, same as the old header-label toggle.
 fn rebuild_circles_list(
-    list:      &gtk::ListBox,
-    header:    &gtk::Label,
+    sidebar:   &adw::Sidebar,
+    section:   &adw::SidebarSection,
     circles:   &HashMap<String, String>,
     row_order: &Rc<RefCell<Vec<String>>>,
 ) {
-    while let Some(row) = list.first_child() {
-        list.remove(&row);
-    }
-    header.set_visible(!circles.is_empty());
+    section.remove_all();
+    sidebar.set_visible(!circles.is_empty());
 
     let mut sorted: Vec<(&String, &String)> = circles.iter().collect();
     sorted.sort_by(|a, b| a.1.cmp(b.1));
@@ -2826,24 +2855,11 @@ fn rebuild_circles_list(
     let mut order = row_order.borrow_mut();
     order.clear();
     for (id_hex, name) in sorted {
-        let row = gtk::ListBoxRow::new();
-        let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        outer.set_margin_start(12);
-        outer.set_margin_end(12);
-        outer.set_margin_top(8);
-        outer.set_margin_bottom(8);
-        let dot = gtk::Label::new(None);
-        dot.set_markup(&format!(
-            "<span foreground='{}'>●</span>", crate::circle_page::circle_accent_hex(id_hex),
-        ));
-        outer.append(&dot);
-        let label = gtk::Label::new(Some(name));
-        label.set_halign(gtk::Align::Start);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        label.set_hexpand(true);
-        outer.append(&label);
-        row.set_child(Some(&outer));
-        list.append(&row);
+        let item = adw::SidebarItem::builder()
+            .title(name.as_str())
+            .suffix(&crate::circle_page::accent_dot(id_hex))
+            .build();
+        section.append(item);
         order.push(id_hex.clone());
     }
 }
@@ -2854,7 +2870,7 @@ fn rebuild_circles_list(
 /// form (see `docs/prd/circles.md` and the sidebar's own Circles section,
 /// which only ever lists what already exists).
 fn present_share_to_circle_picker(
-    parent:     &adw::OverlaySplitView,
+    parent:     &adw::NavigationSplitView,
     circles:    &HashMap<String, String>,
     sender:     &AsyncComponentSender<AppModel>,
     interp_key: String,
@@ -2920,7 +2936,7 @@ fn present_share_to_circle_picker(
 /// dialog shape as `present_share_to_circle_picker`'s "name a new circle"
 /// entry, just without the existing-circles list.
 fn present_name_circle_dialog(
-    parent: &adw::OverlaySplitView,
+    parent: &adw::NavigationSplitView,
     sender: &AsyncComponentSender<AppModel>,
     id_hex: String,
 ) {
@@ -3403,15 +3419,16 @@ fn build_widgets(
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
         discussions_list, discussions_header,
-        circles_list, circles_header, circles_row_order,
+        circles_sidebar, circles_section, circles_row_order,
     ) = build_main_page(model, sender, model.peers_factory.widget(), notif_widget);
     outer_stack.add_named(&main_view, Some("main"));
 
     // ── Responsive sidebar collapse via adw::Breakpoint ──────────────────────
     // Below 720 px: collapse the sidebar (burger button appears in headers).
-    // Above 720 px: sidebar is always visible side-by-side.
-    // adw::OverlaySplitView doesn't auto-collapse; we drive `collapsed` through
-    // a breakpoint so it integrates with the ADW adaptive layout system.
+    // Above 720 px: sidebar and content are always visible side-by-side.
+    // AdwNavigationSplitView doesn't auto-collapse either; we drive
+    // `collapsed` through a breakpoint so it integrates with the ADW
+    // adaptive layout system.
     {
         let bp = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
             adw::BreakpointConditionLengthType::MaxWidth,
@@ -3421,8 +3438,10 @@ fn build_widgets(
         bp.add_setter(&split_view, "collapsed", Some(&true.to_value()));
         let sv = split_view.clone();
         bp.connect_unapply(move |_| {
-            // Returning to wide layout: make the sidebar visible again.
-            sv.set_show_sidebar(true);
+            // Returning to wide layout: land back on the sidebar rather
+            // than wherever content happened to be showing, so the next
+            // time the window narrows it starts from a known state.
+            sv.set_show_content(false);
         });
         root.add_breakpoint(bp);
     }
@@ -3481,8 +3500,8 @@ fn build_widgets(
         content_stack,
         discussions_list,
         discussions_header,
-        circles_list,
-        circles_header,
+        circles_sidebar,
+        circles_section,
         circles_row_order,
         circles_changed_token_shown: u64::MAX, // force initial circles list build
         nav_to_sky_token_shown: 0,
@@ -3579,6 +3598,7 @@ fn op_id_for(ev: &StateEvent) -> [u8; 32] {
         StateEvent::DocEdited { op_id, .. }
         | StateEvent::DocVetoProposed { op_id, .. }
         | StateEvent::DocAffirmed { op_id, .. }
+        | StateEvent::DocAffirmRetracted { op_id, .. }
         | StateEvent::EditorPresenceChanged { op_id, .. }
         | StateEvent::InterpAuthored { op_id, .. }
         | StateEvent::ResponseAdded { op_id, .. }
@@ -3845,14 +3865,48 @@ fn mount_sky_feed(
     (sender, nav)
 }
 
-fn make_tab_toolbar(title: &str, body: &impl IsA<gtk::Widget>) -> (adw::ToolbarView, gtk::Button) {
-    relm4::view! {
-        sidebar_btn = gtk::Button {
-            set_icon_name: "open-menu-symbolic",
-            set_tooltip_text: Some("Show sidebar"),
-            set_visible: false,
-        }
+/// A "Show sidebar" hamburger button for a content page's header bar,
+/// visible only while `split_view` is collapsed (narrow window) — every
+/// content page (Chart/Sky, Network, a peer conversation, a circle) needs
+/// one; this used to be reimplemented independently in each of those 5
+/// places. `AdwNavigationSplitView` also grows an automatic back button
+/// of its own when collapsed, but that depends on ancestor-traversal
+/// behavior this codebase can't render-test right now (see the redesign
+/// plan's Verification section) — keeping one explicit, known-correct
+/// button per page is the safer bet until that's confirmed live.
+pub(crate) fn sidebar_toggle_button(split_view: &adw::NavigationSplitView) -> gtk::Button {
+    let btn = gtk::Button::from_icon_name("open-menu-symbolic");
+    btn.set_tooltip_text(Some("Show sidebar"));
+    btn.set_visible(split_view.is_collapsed());
+    {
+        let btn_for_signal = btn.clone();
+        split_view.connect_notify_local(Some("collapsed"), move |sv, _| {
+            btn_for_signal.set_visible(sv.is_collapsed());
+        });
     }
+    let sv = split_view.clone();
+    btn.connect_clicked(move |_| sv.set_show_content(false));
+    btn
+}
+
+/// When the split view is collapsed (narrow window), navigating to any
+/// content page should bring that content into view instead of leaving
+/// the sidebar showing — the `AdwNavigationSplitView` equivalent of the
+/// old manual `if w < 720 { split_view.set_show_sidebar(false) }` hack,
+/// driven by the widget's own collapsed state instead of a magic-number
+/// width check duplicating the `AdwBreakpoint`'s own 720px threshold.
+pub(crate) fn show_content_if_collapsed(split_view: &adw::NavigationSplitView) {
+    if split_view.is_collapsed() {
+        split_view.set_show_content(true);
+    }
+}
+
+fn make_tab_toolbar(
+    title: &str,
+    body: &impl IsA<gtk::Widget>,
+    split_view: &adw::NavigationSplitView,
+) -> adw::ToolbarView {
+    let sidebar_btn = sidebar_toggle_button(split_view);
     relm4::view! {
         header = adw::HeaderBar {
             #[wrap(Some)]
@@ -3883,7 +3937,7 @@ fn make_tab_toolbar(title: &str, body: &impl IsA<gtk::Widget>) -> (adw::ToolbarV
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(body));
-    (toolbar, sidebar_btn)
+    toolbar
 }
 
 /// A dialog explaining every glyph used across the app — planet symbols,
@@ -3985,14 +4039,14 @@ fn build_main_page(
 ) -> (
     adw::ToolbarView,                                   // outermost wrapper
     gtk::Box, gtk::Box,                                 // chart_container, sky_container
-    adw::OverlaySplitView,                              // split_view
+    adw::NavigationSplitView,                              // split_view
     gtk::Stack,                                         // content_stack
     relm4::Sender<crate::network_tab::NetworkTabMsg>,    // network_tab_sender
     relm4::Sender<crate::sidebar::SidebarMsg>,           // sidebar_sender
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // incoming consent bar
     gtk::Box, gtk::Label, gtk::Button, gtk::Button,     // call bar
     gtk::ListBox, gtk::Label,                           // discussions_list, discussions_header
-    gtk::ListBox, gtk::Label, Rc<RefCell<Vec<String>>>, // circles_list, circles_header, circles_row_order
+    adw::Sidebar, adw::SidebarSection, Rc<RefCell<Vec<String>>>, // circles_sidebar, circles_section, circles_row_order
 ) {
     // ── Content area — single crossfade Stack for all views ──────────────────
 
@@ -4000,10 +4054,18 @@ fn build_main_page(
     content_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     content_stack.set_transition_duration(150);
 
-    // ── Overlay split view (constructed early so children can capture it) ────
+    // ── Navigation split view (constructed early so children can capture it) ─
+    //
+    // AdwNavigationSplitView (not AdwOverlaySplitView): purpose-built for
+    // "sidebar list selects content shown in the same window," with
+    // automatic back-navigation on narrow widths instead of a hand-rolled
+    // hamburger button + width check per page — see `sidebar_toggle_button`
+    // and `show_content_if_collapsed` below, which replace what used to be
+    // 5 independent copies of that logic.
 
-    let split_view = adw::OverlaySplitView::new();
-    split_view.set_content(Some(&content_stack));
+    let split_view = adw::NavigationSplitView::new();
+    let content_page = adw::NavigationPage::new(&content_stack, "Content");
+    split_view.set_content(Some(&content_page));
     split_view.set_min_sidebar_width(200.0);
     split_view.set_max_sidebar_width(280.0);
     // On macOS put the sidebar on the right to avoid the traffic-light zone.
@@ -4017,7 +4079,7 @@ fn build_main_page(
             set_vexpand: true,
         }
     }
-    let (chart_toolbar, chart_sidebar_btn) = make_tab_toolbar("Chart", &chart_container);
+    let chart_toolbar = make_tab_toolbar("Chart", &chart_container, &split_view);
     content_stack.add_named(&chart_toolbar, Some("chart"));
 
     // Sky view
@@ -4027,7 +4089,7 @@ fn build_main_page(
             set_vexpand: true,
         }
     }
-    let (sky_toolbar, sky_sidebar_btn) = make_tab_toolbar("Sky", &sky_container);
+    let sky_toolbar = make_tab_toolbar("Sky", &sky_container, &split_view);
     content_stack.add_named(&sky_toolbar, Some("sky"));
 
     // Network view — full Component owning toolbar, status label, and dynamic body.
@@ -4050,7 +4112,7 @@ fn build_main_page(
     discussions_list.add_css_class("navigation-sidebar");
     let discussions_header = gtk::Label::new(Some("Discussions"));
     discussions_header.add_css_class("heading");
-    discussions_header.add_css_class("dim-label");
+    discussions_header.add_css_class("dimmed");
     discussions_header.set_halign(gtk::Align::Start);
     discussions_header.set_margin_start(12);
     discussions_header.set_margin_end(12);
@@ -4062,27 +4124,25 @@ fn build_main_page(
     // from `model.circles` on update_view (see `rebuild_circles_list`),
     // same treatment as Discussions above. Ranks above the "Others" (direct
     // peer) section per the user's own steer that circles take precedence.
-    let circles_list = gtk::ListBox::new();
-    circles_list.set_selection_mode(gtk::SelectionMode::None);
-    circles_list.add_css_class("navigation-sidebar");
-    let circles_header = gtk::Label::new(Some("Circles"));
-    circles_header.add_css_class("heading");
-    circles_header.add_css_class("dim-label");
-    circles_header.set_halign(gtk::Align::Start);
-    circles_header.set_margin_start(12);
-    circles_header.set_margin_end(12);
-    circles_header.set_margin_top(12);
-    circles_header.set_margin_bottom(2);
-    circles_header.set_visible(false);
+    // Standalone AdwSidebar (its own flat activation-index space,
+    // independent of the nav AdwSidebar from Phase 1) holding one titled
+    // "Circles" section — hidden as a whole (title included) while empty,
+    // same effect as the old header-label visibility toggle.
+    let circles_sidebar = adw::Sidebar::new();
+    circles_sidebar.add_css_class("navigation-sidebar");
+    circles_sidebar.set_visible(false);
+    let circles_section = adw::SidebarSection::new();
+    circles_section.set_title(Some("Circles"));
+    circles_sidebar.append(circles_section.clone());
 
-    // Row-index → circle_id_hex, kept in sync by `rebuild_circles_list` on
+    // Index → circle_id_hex, kept in sync by `rebuild_circles_list` on
     // every rebuild; the click handler below reads it at click time.
     let circles_row_order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     {
         let order = Rc::clone(&circles_row_order);
         let s = sender.clone();
-        circles_list.connect_row_activated(move |_, row| {
-            if let Some(id_hex) = order.borrow().get(row.index() as usize) {
+        circles_sidebar.connect_activated(move |_, index| {
+            if let Some(id_hex) = order.borrow().get(index as usize) {
                 s.input(AppMsg::OpenCirclePage(id_hex.clone()));
             }
         });
@@ -4093,34 +4153,21 @@ fn build_main_page(
         peers_list:         peers_list.clone(),
         discussions_list:   discussions_list.clone(),
         discussions_header: discussions_header.clone(),
-        circles_list:       circles_list.clone(),
-        circles_header:     circles_header.clone(),
+        circles_sidebar:    circles_sidebar.clone(),
         notif_widget:       notif_widget.clone(),
         split_view:         split_view.clone(),
         content_stack:      content_stack.clone(),
     });
-    split_view.set_sidebar(Some(&sidebar_toolbar));
+    let sidebar_page = adw::NavigationPage::new(&sidebar_toolbar, "Sidebar");
+    split_view.set_sidebar(Some(&sidebar_page));
 
     // Peer pages are added dynamically as named children when first opened.
-
-    // Burger button visibility for chart/sky is driven by the collapsed state.
-    // (Network tab handles its own sidebar btn internally.)
-    // The `collapsed` property itself is driven by an adw::Breakpoint attached
-    // to the root window in build_widgets — that is where we have access to
-    // the window and can register the breakpoint.
-    {
-        let btns = [chart_sidebar_btn.clone(), sky_sidebar_btn.clone()];
-        split_view.connect_notify_local(Some("collapsed"), move |sv, _| {
-            let collapsed = sv.is_collapsed();
-            for btn in &btns {
-                btn.set_visible(collapsed);
-            }
-        });
-        for btn in [chart_sidebar_btn, sky_sidebar_btn] {
-            let sv = split_view.clone();
-            btn.connect_clicked(move |_| sv.set_show_sidebar(true));
-        }
-    }
+    //
+    // Chart/Sky/Network's sidebar-toggle buttons are wired by
+    // `sidebar_toggle_button` at construction time — no external wiring
+    // needed here. The `collapsed` property itself is driven by an
+    // adw::Breakpoint attached to the root window in build_widgets, since
+    // that's where we have access to the window to register it.
 
     // peers_list and notif_widget are now owned by the Sidebar component.
     let _ = (peers_list, notif_widget);
@@ -4221,7 +4268,7 @@ fn build_main_page(
         consent_bar, consent_status, consent_accept_btn, consent_reject_btn,
         call_bar, call_status, accept_btn, hangup_btn,
         discussions_list, discussions_header,
-        circles_list, circles_header, circles_row_order,
+        circles_sidebar, circles_section, circles_row_order,
     )
 }
 

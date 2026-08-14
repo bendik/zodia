@@ -306,6 +306,7 @@ pub fn state_event_to_feed_item(
             payload: FeedPayload::DocEdited { editor: *by, interp_key: key.clone() },
         },
         StateEvent::DocVetoProposed { .. } => return None,  // app handler resolves
+        StateEvent::DocAffirmRetracted { .. } => return None,  // count going down isn't newsworthy
         StateEvent::DocAffirmed { by, interp_key: key, op_id, .. } => FeedItem {
             event_id:   *op_id.as_bytes(),
             timestamp,

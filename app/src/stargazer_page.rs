@@ -9,8 +9,12 @@
 //! Returns `(ToolbarView, gtk::ListBox, call_btn, send_btn)` — the caller
 //! appends chat rows to the `ListBox` whenever new messages arrive.
 //!
-//! `ViewSwitcherTitle` is deprecated in ADW 1.4 but the TabBar alternative
-//! exposes close buttons that cannot be hidden without fragile CSS hacks.
+//! Two top bars instead of one: the header carries the peer's name (via
+//! `AdwWindowTitle`, always visible, never competing for space), and a
+//! second bar below it carries the tab switcher (`AdwViewSwitcher`,
+//! always visible too). Avoids `AdwViewSwitcherTitle` (deprecated in ADW
+//! 1.4) without needing to hand-tune a width breakpoint for when title
+//! and switcher would collide in a single row — they just never share one.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -32,13 +36,12 @@ use crate::util::sign_glyph;
 
 /// Build the `adw::ToolbarView` for a connected stargazer.
 ///
-/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, switcher_title)`.
+/// Returns `(toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, window_title)`.
 /// `call_btn` and `send_btn` should be set insensitive when the stargazer is offline.
 /// `typing_label` is shown/hidden by the caller when a `TypingIndicatorChanged`
 /// event arrives for this peer; `seen_label` when a `ChatSeen` event arrives
-/// and the most recent message is ours. `switcher_title` is retained by the
+/// and the most recent message is ours. `window_title` is retained by the
 /// caller so the title can be updated when the nickname changes.
-#[allow(deprecated)] // ViewSwitcherTitle deprecated in ADW 1.4
 pub fn build_stargazer_page(
     peer_id: &PeerId,
     their_blob: &ConsentBlob,
@@ -48,9 +51,9 @@ pub fn build_stargazer_page(
     identity: Rc<IdentityKeypair>,
     sender: &AsyncComponentSender<AppModel>,
     nickname: Option<&str>,
-    split_view: &adw::OverlaySplitView,
+    split_view: &adw::NavigationSplitView,
     ollama_models: &[String],
-) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label, adw::ViewSwitcherTitle) {
+) -> (adw::ToolbarView, gtk::ListBox, gtk::Button, gtk::Button, gtk::Entry, gtk::Label, gtk::Label, adw::WindowTitle) {
     let peer_hex = hex::encode_upper(&peer_id.0[..4]);
 
     // ── compute their chart + synastry ────────────────────────────────────────
@@ -157,17 +160,7 @@ pub fn build_stargazer_page(
     // Sidebar toggle — visible only when the split view is collapsed.
     // On non-macOS: placed on the left (start).
     // On macOS: placed on the right (end) to avoid the traffic-light buttons.
-    let sidebar_btn = gtk::Button::from_icon_name("open-menu-symbolic");
-    sidebar_btn.set_tooltip_text(Some("Show sidebar"));
-    sidebar_btn.set_visible(split_view.is_collapsed());
-    {
-        let sv = split_view.clone();
-        let btn = sidebar_btn.clone();
-        split_view.connect_notify_local(Some("collapsed"), move |sv2, _| {
-            btn.set_visible(sv2.is_collapsed());
-        });
-        sidebar_btn.connect_clicked(move |_| sv.set_show_sidebar(true));
-    }
+    let sidebar_btn = crate::app::sidebar_toggle_button(split_view);
     #[cfg(not(target_os = "macos"))]
     header.pack_start(&sidebar_btn);
     #[cfg(target_os = "macos")]
@@ -176,28 +169,30 @@ pub fn build_stargazer_page(
     let their_solar_month = zodia_core::solar_month(their_blob.birth.jdn);
     let glyph = sign_glyph(their_solar_month);
 
-    let switcher_title = adw::ViewSwitcherTitle::new();
-    switcher_title.set_stack(Some(&view_stack));
     let title_text = nickname
         .filter(|n| !n.is_empty())
         .map(|n| format!("{glyph}  {n}"))
         .unwrap_or_else(|| format!("{glyph}  ···{peer_hex}"));
-    switcher_title.set_title(&title_text);
-    header.set_title_widget(Some(&switcher_title));
+    let window_title = adw::WindowTitle::new(&title_text, "");
+    header.set_title_widget(Some(&window_title));
 
     toolbar_view.add_top_bar(&header);
+
+    // Second top bar: the tab switcher, always visible — see this file's
+    // module doc comment for why this replaces AdwViewSwitcherTitle
+    // instead of hand-tuning a breakpoint.
+    let switcher_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    switcher_row.add_css_class("toolbar");
+    switcher_row.set_halign(gtk::Align::Center);
+    let view_switcher = adw::ViewSwitcher::new();
+    view_switcher.set_stack(Some(&view_stack));
+    view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+    switcher_row.append(&view_switcher);
+    toolbar_view.add_top_bar(&switcher_row);
+
     toolbar_view.set_content(Some(&view_stack));
 
-    // Bottom switcher bar (appears when window is too narrow for header tabs)
-    let switcher_bar = adw::ViewSwitcherBar::new();
-    switcher_bar.set_stack(Some(&view_stack));
-    switcher_title
-        .bind_property("title-visible", &switcher_bar, "reveal")
-        .sync_create()
-        .build();
-    toolbar_view.add_bottom_bar(&switcher_bar);
-
-    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, switcher_title)
+    (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label, window_title)
 }
 
 // ── messages tab ──────────────────────────────────────────────────────────────
@@ -244,7 +239,7 @@ fn build_messages_tab(
                 set_text: "Seen",
                 set_halign: gtk::Align::End,
                 set_margin_end: 16,
-                add_css_class: "dim-label",
+                add_css_class: "dimmed",
                 add_css_class: "caption",
                 set_visible: false,
             },
@@ -254,7 +249,7 @@ fn build_messages_tab(
                 set_text: "Typing…",
                 set_halign: gtk::Align::Start,
                 set_margin_start: 16,
-                add_css_class: "dim-label",
+                add_css_class: "dimmed",
                 add_css_class: "caption",
                 set_visible: false,
             },

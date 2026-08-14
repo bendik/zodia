@@ -247,6 +247,17 @@ pub enum DocOp {
         interp_key: String,
         joined:     bool,
     },
+
+    /// Undo a previously published `AffirmRev` against the same
+    /// `(interp_key, target_rev)` pair — self-service, same shape as a
+    /// read-only circle member leaving on their own. Only honoured
+    /// against the retractor's own prior affirmation: the materialiser
+    /// deletes the `(interp_key, target_rev, voter_pk)` row keyed by
+    /// this op's own author, never anyone else's.
+    RetractAffirm {
+        interp_key: String,
+        target_rev: [u8; 32],
+    },
 }
 
 impl DocOp {
@@ -257,7 +268,8 @@ impl DocOp {
             DocOp::Edit { interp_key, .. }
             | DocOp::Veto { interp_key, .. }
             | DocOp::AffirmRev { interp_key, .. }
-            | DocOp::EditorPresence { interp_key, .. } => interp_key,
+            | DocOp::EditorPresence { interp_key, .. }
+            | DocOp::RetractAffirm { interp_key, .. } => interp_key,
         }
     }
 
@@ -294,6 +306,19 @@ mod doc_op_tests {
         assert_eq!(DocOp::EditorPresence {
             interp_key: "natal:z".into(), joined: true,
         }.interp_key(), "natal:z");
+        assert_eq!(DocOp::RetractAffirm {
+            interp_key: "natal:w".into(), target_rev: [0u8; 32],
+        }.interp_key(), "natal:w");
+    }
+
+    #[test]
+    fn retract_affirm_roundtrip() {
+        let op = DocOp::RetractAffirm {
+            interp_key: "natal:sun_trine_moon".into(),
+            target_rev: [3u8; 32],
+        };
+        let bytes = op.encode();
+        assert_eq!(op, DocOp::decode(&bytes).unwrap());
     }
 
     #[test]

@@ -19,5 +19,14 @@
     <file>scalable/actions/sidebar-show-symbolic.svg</file>
     <file>scalable/actions/chat-message-new-symbolic.svg</file>
     <file>scalable/actions/x-office-calendar-symbolic.svg</file>
+    <file>scalable/actions/action-unavailable-symbolic.svg</file>
+    <file>scalable/actions/avatar-default-symbolic.svg</file>
+    <file>scalable/actions/dialog-information-symbolic.svg</file>
+    <file>scalable/actions/document-open-recent-symbolic.svg</file>
+    <file>scalable/actions/help-about-symbolic.svg</file>
+    <file>scalable/actions/open-menu-symbolic.svg</file>
+    <file>scalable/actions/system-log-out-symbolic.svg</file>
+    <file>scalable/actions/user-trash-symbolic.svg</file>
+    <file>scalable/actions/window-close-symbolic.svg</file>
   </gresource>
 </gresources>

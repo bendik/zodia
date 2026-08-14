@@ -313,7 +313,7 @@ impl SimpleComponent for SetupPage {
 
                 gtk::Label {
                     set_label: "Enter your birth details to find your astrological neighbourhood.",
-                    add_css_class: "dim-label",
+                    add_css_class: "dimmed",
                     set_wrap: true,
                     set_max_width_chars: 50,
                 },

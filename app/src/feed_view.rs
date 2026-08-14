@@ -194,7 +194,7 @@ impl SimpleComponent for FeedView {
             let moon_label = gtk::Label::new(Some(&format!(
                 "Today: {} {}", phase.symbol(), phase.name(),
             )));
-            moon_label.add_css_class("dim-label");
+            moon_label.add_css_class("dimmed");
             moon_label.add_css_class("caption");
             moon_label.set_halign(gtk::Align::Center);
             moon_label.set_margin_top(4);
@@ -242,7 +242,7 @@ impl SimpleComponent for FeedView {
         container.append(&filter_bar);
         container.append(&list);
         let empty_label = gtk::Label::new(Some("No activity yet"));
-        empty_label.add_css_class("dim-label");
+        empty_label.add_css_class("dimmed");
         empty_label.set_halign(gtk::Align::Center);
         empty_label.set_margin_top(24);
         container.append(&empty_label);
@@ -672,7 +672,7 @@ impl FactoryComponent for FeedCard {
         subtitle.set_wrap(true);
         subtitle.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         subtitle.add_css_class("caption");
-        subtitle.add_css_class("dim-label");
+        subtitle.add_css_class("dimmed");
 
         text_box.append(&title);
         text_box.append(&subtitle);
@@ -686,11 +686,11 @@ impl FactoryComponent for FeedCard {
         let footer = gtk::Label::new(None);
         footer.set_halign(gtk::Align::End);
         footer.add_css_class("caption");
-        footer.add_css_class("dim-label");
+        footer.add_css_class("dimmed");
         let sub_meta = gtk::Label::new(None);
         sub_meta.set_halign(gtk::Align::End);
         sub_meta.add_css_class("caption");
-        sub_meta.add_css_class("dim-label");
+        sub_meta.add_css_class("dimmed");
         right_col.append(&footer);
         right_col.append(&sub_meta);
         outer.append(&right_col);

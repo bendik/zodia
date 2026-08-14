@@ -133,14 +133,14 @@ impl FactoryComponent for InterpRow {
         suffix_box.set_valign(gtk::Align::Center);
 
         let symbol_lbl = gtk::Label::new(self.symbol_line.as_deref());
-        symbol_lbl.add_css_class("dim-label");
+        symbol_lbl.add_css_class("dimmed");
         symbol_lbl.add_css_class("aspect-list");
         symbol_lbl.set_halign(gtk::Align::End);
         symbol_lbl.set_visible(self.symbol_line.is_some());
         suffix_box.append(&symbol_lbl);
 
         let meta_lbl = gtk::Label::new(self.meta_line.as_deref());
-        meta_lbl.add_css_class("dim-label");
+        meta_lbl.add_css_class("dimmed");
         meta_lbl.add_css_class("caption");
         meta_lbl.set_halign(gtk::Align::End);
         meta_lbl.set_visible(self.meta_line.is_some());

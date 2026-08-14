@@ -136,6 +136,16 @@ pub enum StateEvent {
         interp_key: String,
         target_rev: [u8; 32],
     },
+    /// A previously published affirmation was retracted by its own
+    /// author. `by` is the retractor — same self-only shape as
+    /// `DocOp::RetractAffirm` itself, no ring/authority check needed
+    /// since a voter can only ever retract their own vote.
+    DocAffirmRetracted {
+        op_id:      Hash,
+        by:         VerifyingKey,
+        interp_key: String,
+        target_rev: [u8; 32],
+    },
     /// Phase F-collab: presence heartbeat for the per-key editor session.
     /// `joined = false` means "I left."
     EditorPresenceChanged {
@@ -300,6 +310,9 @@ fn materialize_doc(op_id: Hash, by: VerifyingKey, timestamp: Timestamp, doc: Doc
             op_id, by, interp_key, target_edit_op_id, timestamp: ts,
         },
         DocOp::AffirmRev { interp_key, target_rev } => StateEvent::DocAffirmed {
+            op_id, by, interp_key, target_rev,
+        },
+        DocOp::RetractAffirm { interp_key, target_rev } => StateEvent::DocAffirmRetracted {
             op_id, by, interp_key, target_rev,
         },
         DocOp::EditorPresence { interp_key, joined } =>

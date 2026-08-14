@@ -387,6 +387,13 @@ impl ZodiaClient {
         }).await
     }
 
+    /// Undo this client's own prior affirmation of a specific revision.
+    pub async fn retract_affirm(&self, interp_key: &str, target_rev: [u8; 32]) -> Result<(), ClientError> {
+        self.call(|reply| Command::RetractAffirm {
+            interp_key: interp_key.to_string(), target_rev, reply,
+        }).await
+    }
+
     /// Presence heartbeat for a key's editor session.
     pub async fn set_editor_presence(&self, interp_key: &str, joined: bool) -> Result<(), ClientError> {
         self.call(|reply| Command::SetEditorPresence {
@@ -471,6 +478,7 @@ enum Command {
     },
     Veto { interp_key: String, target_edit_op_id: Hash, reply: Reply },
     AffirmRev { interp_key: String, target_rev: [u8; 32], reply: Reply },
+    RetractAffirm { interp_key: String, target_rev: [u8; 32], reply: Reply },
     SetEditorPresence { interp_key: String, joined: bool, reply: Reply },
     Subscribe { interp_key: String, reply: Reply },
     Unsubscribe { interp_key: String, reply: Reply },
@@ -689,6 +697,10 @@ async fn handle_command(
         }
         Command::AffirmRev { interp_key, target_rev, reply } => {
             let op = DocOp::AffirmRev { interp_key, target_rev };
+            let _ = reply.send(node.publish_doc(op).await.map_err(sync_err));
+        }
+        Command::RetractAffirm { interp_key, target_rev, reply } => {
+            let op = DocOp::RetractAffirm { interp_key, target_rev };
             let _ = reply.send(node.publish_doc(op).await.map_err(sync_err));
         }
         Command::SetEditorPresence { interp_key, joined, reply } => {

@@ -49,8 +49,10 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 }
 
 /// A small colored dot rendered via Pango markup — no `CssProvider`
-/// plumbing needed for one-off per-widget color.
-fn accent_dot(id_hex: &str) -> gtk::Label {
+/// plumbing needed for one-off per-widget color. `pub` so the sidebar's
+/// Circles section (`app.rs::rebuild_circles_list`) can reuse it as an
+/// `AdwSidebarItem` suffix.
+pub fn accent_dot(id_hex: &str) -> gtk::Label {
     let dot = gtk::Label::new(None);
     dot.set_markup(&format!(
         "<span foreground='{}'>●</span>", circle_accent_hex(id_hex),
@@ -78,7 +80,7 @@ pub struct CirclePagePeer {
 /// single click, so it gets the same destructive-confirm treatment as
 /// other hard-to-undo actions.
 fn present_leave_circle_confirm(
-    parent:     &adw::OverlaySplitView,
+    parent:     &adw::NavigationSplitView,
     sender:     &AsyncComponentSender<AppModel>,
     id_hex:     &str,
     circle_name: &str,
@@ -107,6 +109,46 @@ fn present_leave_circle_confirm(
     dialog.present(Some(parent));
 }
 
+/// Confirm before revoking someone else's access — unlike leaving (which
+/// only affects yourself), this is the owner acting on another member
+/// without their input, so it gets the same destructive-confirm treatment
+/// as leaving, plus the `destructive-action` styling on the button itself
+/// (leaving doesn't need that — the icon alone reads clearly enough for
+/// "step out," but "revoke someone" benefits from the red warning too).
+fn present_revoke_confirm(
+    parent:      &adw::NavigationSplitView,
+    sender:      &AsyncComponentSender<AppModel>,
+    id_hex:      &str,
+    member_hex:  &str,
+    member_name: &str,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some("Revoke Access?"),
+        Some(&format!(
+            "{member_name} will stop receiving new shares in this circle. \
+             You can invite them back later.",
+        )),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("revoke", "Revoke");
+    dialog.set_response_appearance("revoke", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let s = sender.clone();
+    let id_hex_owned = id_hex.to_string();
+    let member_hex_owned = member_hex.to_string();
+    dialog.connect_response(None, move |_, response| {
+        if response == "revoke" {
+            s.input(AppMsg::RevokeFromCircle {
+                id_hex: id_hex_owned.clone(), member_hex: member_hex_owned.clone(),
+            });
+        }
+    });
+
+    dialog.present(Some(parent));
+}
+
 /// Build the `adw::ToolbarView` for one circle.
 pub fn build_circle_page(
     id_hex:         &str,
@@ -115,19 +157,9 @@ pub fn build_circle_page(
     known_peers:    &[CirclePagePeer],
     me_pubkey_hex:  &str,
     sender:         &AsyncComponentSender<AppModel>,
-    split_view:     &adw::OverlaySplitView,
+    split_view:     &adw::NavigationSplitView,
 ) -> adw::ToolbarView {
-    relm4::view! {
-        sidebar_btn = gtk::Button {
-            set_icon_name: "open-menu-symbolic",
-            set_tooltip_text: Some("Show sidebar"),
-            set_visible: split_view.is_collapsed(),
-        }
-    }
-    {
-        let sv = split_view.clone();
-        sidebar_btn.connect_clicked(move |_| sv.set_show_sidebar(true));
-    }
+    let sidebar_btn = crate::app::sidebar_toggle_button(split_view);
 
     let title_label = gtk::Label::new(Some(name));
     title_label.add_css_class("title");
@@ -199,14 +231,17 @@ pub fn build_circle_page(
             revoke_btn.set_tooltip_text(Some("Revoke access"));
             revoke_btn.add_css_class("flat");
             revoke_btn.add_css_class("circular");
+            revoke_btn.add_css_class("destructive-action");
             revoke_btn.set_valign(gtk::Align::Center);
             let s = sender.clone();
             let id_hex_owned = id_hex.to_string();
             let member_hex = member.pubkey_hex.clone();
+            let member_label = member.label.clone();
+            let split_view_owned = split_view.clone();
             revoke_btn.connect_clicked(move |_| {
-                s.input(AppMsg::RevokeFromCircle {
-                    id_hex: id_hex_owned.clone(), member_hex: member_hex.clone(),
-                });
+                present_revoke_confirm(
+                    &split_view_owned, &s, &id_hex_owned, &member_hex, &member_label,
+                );
             });
             row.add_suffix(&revoke_btn);
         }
@@ -218,7 +253,7 @@ pub fn build_circle_page(
         let hint = gtk::Label::new(Some(
             "No other discoverable peers to invite right now.",
         ));
-        hint.add_css_class("dim-label");
+        hint.add_css_class("dimmed");
         hint.add_css_class("caption");
         hint.set_margin_top(4);
         content_box.append(&hint);

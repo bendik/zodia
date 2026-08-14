@@ -46,7 +46,7 @@ pub struct NetSyncStatus {
 /// Spawn the Network tab, return its `ToolbarView` root + an input sender.
 /// `split_view` is captured for the sidebar toggle button.
 pub fn launch<F, M>(
-    split_view: adw::OverlaySplitView,
+    split_view: adw::NavigationSplitView,
     parent_input: &relm4::Sender<M>,
     map: F,
 ) -> (adw::ToolbarView, relm4::Sender<NetworkTabMsg>)
@@ -115,7 +115,7 @@ pub struct NetworkTabWidgets {
 }
 
 impl SimpleComponent for NetworkTab {
-    type Init    = adw::OverlaySplitView;
+    type Init    = adw::NavigationSplitView;
     type Input   = NetworkTabMsg;
     type Output  = NetworkTabOut;
     type Root    = adw::ToolbarView;
@@ -131,23 +131,7 @@ impl SimpleComponent for NetworkTab {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         // ── header ────────────────────────────────────────────────────────────
-        relm4::view! {
-            sidebar_btn = gtk::Button {
-                set_icon_name: "open-menu-symbolic",
-                set_tooltip_text: Some("Show sidebar"),
-                set_visible: split_view.is_collapsed(),
-            }
-        }
-        {
-            let sv = split_view.clone();
-            sidebar_btn.connect_clicked(move |_| sv.set_show_sidebar(true));
-        }
-        {
-            let btn = sidebar_btn.clone();
-            split_view.connect_notify_local(Some("collapsed"), move |sv, _| {
-                btn.set_visible(sv.is_collapsed());
-            });
-        }
+        let sidebar_btn = crate::app::sidebar_toggle_button(&split_view);
 
         relm4::view! {
             header = adw::HeaderBar {
@@ -171,7 +155,7 @@ impl SimpleComponent for NetworkTab {
         relm4::view! {
             status_label = gtk::Label {
                 set_label: "Starting up…",
-                add_css_class: "dim-label",
+                add_css_class: "dimmed",
                 add_css_class: "caption",
             }
         }
@@ -374,7 +358,7 @@ impl SimpleComponent for NetworkTab {
 
                 let kind_lbl = gtk::Label::new(Some(&kind));
                 kind_lbl.add_css_class("caption");
-                kind_lbl.add_css_class("dim-label");
+                kind_lbl.add_css_class("dimmed");
                 kind_lbl.set_valign(gtk::Align::Center);
                 row.add_prefix(&kind_lbl);
 

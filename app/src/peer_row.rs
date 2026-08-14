@@ -256,8 +256,8 @@ impl FactoryComponent for PeerRow {
             }
         }
 
-        // Initial dim-label state for pending rows.
-        if self.is_pending { label.add_css_class("dim-label"); }
+        // Initial dimmed state for pending rows.
+        if self.is_pending { label.add_css_class("dimmed"); }
 
         // Initial dot paint.
         dot.set_draw_func(paint_dot(self.dot_filled, self.dot_rgba));
@@ -363,9 +363,9 @@ impl FactoryComponent for PeerRow {
         widgets.label.set_text(&label_text(self.solar_month, &self.display_name, self.compat_glyph));
         widgets.label.set_tooltip_text(self.compat_tooltip.map(|t| format!("Synastry: {t}")).as_deref());
         if self.is_pending || self.is_muted {
-            widgets.label.add_css_class("dim-label");
+            widgets.label.add_css_class("dimmed");
         } else {
-            widgets.label.remove_css_class("dim-label");
+            widgets.label.remove_css_class("dimmed");
         }
 
         widgets.badge.set_visible(self.unread > 0);

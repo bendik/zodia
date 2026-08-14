@@ -1360,6 +1360,47 @@ impl ZodiaStore {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Remove one voter's affirmation against a (interp_key, revision)
+    /// pair. Returns `Ok(true)` if a row was actually deleted (the voter
+    /// had in fact affirmed it), `Ok(false)` if there was nothing to
+    /// retract — idempotent on a repeated or out-of-order retraction,
+    /// same shape as `doc_affirm_rev`'s own idempotency on double-affirm.
+    pub async fn doc_retract_affirm(
+        &self,
+        interp_key: &str,
+        target_rev: &[u8; 32],
+        voter_pk:   &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let r = sqlx::query(
+            "DELETE FROM doc_affirms WHERE interp_key = ? AND target_rev = ? AND voter_pk = ?",
+        )
+        .bind(interp_key)
+        .bind(target_rev.as_slice())
+        .bind(voter_pk.as_slice())
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Whether one voter has already affirmed a (interp_key, revision)
+    /// pair — used to render the affirm control's initial toggled state.
+    pub async fn doc_has_affirmed(
+        &self,
+        interp_key: &str,
+        target_rev: &[u8; 32],
+        voter_pk:   &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        let row = sqlx::query(
+            "SELECT 1 FROM doc_affirms WHERE interp_key = ? AND target_rev = ? AND voter_pk = ?",
+        )
+        .bind(interp_key)
+        .bind(target_rev.as_slice())
+        .bind(voter_pk.as_slice())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Count of affirmations targeting one (interp_key, revision).
     pub async fn doc_affirm_count(
         &self,
