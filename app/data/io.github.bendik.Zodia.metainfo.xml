@@ -88,6 +88,11 @@
   </supports>
 
   <releases>
+    <release version="0.13.1" date="2026-08-14">
+      <description>
+        <p>Fresh app screenshots showing the redesigned sidebar, plus build fixes so the 0.13 release actually ships on every platform (the aarch64 Linux build and the Flathub update both failed for 0.13.0).</p>
+      </description>
+    </release>
     <release version="0.13.0" date="2026-08-14">
       <description>
         <p>The sidebar and window chrome got a pass toward more current GNOME design: circles and the Chart/Sky/Network navigation now live in adaptive sidebar sections, icons are bundled so Zodia looks the same on macOS and Windows as it does on Linux, and a few lingering deprecated widgets are gone.</p>

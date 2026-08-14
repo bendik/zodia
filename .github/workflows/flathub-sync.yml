@@ -47,9 +47,14 @@ jobs:
       # an unauthenticated-but-working transport (HTTPS works anonymously
       # for a public repo's read access), then the PAT gets layered on
       # top afterward for the push step.
+      # NOTE: the rewrite must target .gitmodules itself (config -f), not
+      # .git/config — `git submodule sync` copies URLs FROM .gitmodules
+      # INTO .git/config, so writing .git/config first and then syncing
+      # (what this step did on the v0.13.0 run) just restores the SSH URL
+      # and fails identically.
       - name: Use HTTPS for submodule clone (CI has no SSH key)
         run: |
-          git config submodule.flatpak/flathub.url \
+          git config -f .gitmodules submodule.flatpak/flathub.url \
             https://github.com/flathub/io.github.bendik.Zodia.git
           git submodule sync flatpak/flathub
 
