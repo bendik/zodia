@@ -32,6 +32,13 @@ git -C "${FLATHUB}" commit -m "bump to ${TAG}"
 git -C "${FLATHUB}" push origin "HEAD:refs/heads/${BRANCH}"
 
 # 5. Record the updated submodule pointer in zodia
+#
+# HEAD:main, not plain "main": CI (triggered by a tag push) checks out in
+# detached HEAD, so there's no local branch named "main" to push — every
+# run before this fix died here with "src refspec main does not match
+# any". HEAD:main pushes whatever commit HEAD points at to remote main
+# and works the same whether HEAD is detached or on the branch (the
+# normal case for a manual local run).
 git add "${FLATHUB}"
 git commit -m "chore: update flathub submodule to ${TAG}"
-git push origin main
+git push origin HEAD:main
