@@ -202,9 +202,20 @@ pub fn build_stargazer_page(
         };
         let s = sync.clone();
         view_stack.connect_notify_local(Some("visible-child-name"), move |_, _| s());
+        // `pushed`/`popped`, not `notify::navigation-stack`: the stack is
+        // the same `GListModel` instance for the view's whole lifetime, so
+        // mutating its contents doesn't reliably re-notify that property —
+        // in particular a back-button-driven pop was observed to leave the
+        // property notify silent, so the tab header stayed hidden after
+        // backing out of a reading editor. The dedicated signals fire for
+        // every push/pop regardless of how it was triggered.
         let s = sync.clone();
-        their_av.connect_navigation_stack_notify(move |_| s());
-        syn_av.connect_navigation_stack_notify(move |_| sync());
+        their_av.connect_pushed(move |_| s());
+        let s = sync.clone();
+        their_av.connect_popped(move |_, _| s());
+        let s = sync.clone();
+        syn_av.connect_pushed(move |_| s());
+        syn_av.connect_popped(move |_, _| sync());
     }
 
     (toolbar_view, msg_list, call_btn, send_btn, entry, typing_label, seen_label)

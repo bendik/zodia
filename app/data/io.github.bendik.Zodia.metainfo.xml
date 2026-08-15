@@ -88,6 +88,12 @@
   </supports>
 
   <releases>
+    <release version="0.13.3" date="2026-08-15">
+      <description>
+        <p>Fixed a peer page's Their Chart/Synastry/Messages tab switcher staying hidden after backing out of a reading editor with its own back button — it relied on a navigation-stack property change that libadwaita doesn't reliably fire for a back-button pop, so the header stayed gone until you left the tab and came back.</p>
+        <p>Generated the missing baseline readings for sign+house placements (1,440 combinations) merged into a single reading last release — previously these had no default text until someone wrote or AI-generated one.</p>
+      </description>
+    </release>
     <release version="0.13.2" date="2026-08-14">
       <description>
         <p>Fixed the Sky feed showing "No reading yet" for a transit or sky aspect even after someone had actually published a reading for it — the card was reading from a static bundled file instead of the real community database, both right after publishing and after restarting the app.</p>
