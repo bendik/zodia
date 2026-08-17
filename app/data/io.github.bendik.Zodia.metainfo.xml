@@ -88,6 +88,13 @@
   </supports>
 
   <releases>
+    <release version="0.13.4" date="2026-08-17">
+      <description>
+        <p>Fixed interpretation readings in the aspect/synastry list and the Sky feed never showing a reading anyone had actually contributed — the preview was querying a legacy table that only ever holds bundled baseline text, not the real collaborative doc a contribution is saved to. Previews now resolve the same content the editor itself shows.</p>
+        <p>The peer sidebar's mute button now reveals and highlights on hover the same way the nickname edit icon next to it does, instead of always sitting semi-visible; an already-muted peer stays visible at rest as a status indicator.</p>
+        <p>Bumped the iroh networking library to 1.0.3.</p>
+      </description>
+    </release>
     <release version="0.13.3" date="2026-08-15">
       <description>
         <p>Fixed a peer page's Their Chart/Synastry/Messages tab switcher staying hidden after backing out of a reading editor with its own back button — it relied on a navigation-stack property change that libadwaita doesn't reliably fire for a back-button pop, so the header stayed gone until you left the tab and came back.</p>
