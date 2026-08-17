@@ -32,11 +32,13 @@ pub fn spawn(
     chart:    Arc<Chart>,
     baseline: Arc<BaselineStore>,
     store:    ZodiaStore,
+    me:       [u8; 32],
     out:      mpsc::Sender<FeedItem>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let me_vk = zodia_doc::VerifyingKey::from_bytes(&me).ok();
         loop {
-            tick(&chart, &store, &baseline, &out).await;
+            tick(&chart, &store, &baseline, me_vk.as_ref(), &out).await;
             tokio::time::sleep(TICK_INTERVAL).await;
         }
     })
@@ -50,9 +52,10 @@ async fn tick(
     chart:    &Chart,
     store:    &ZodiaStore,
     baseline: &BaselineStore,
+    me_vk:    Option<&zodia_doc::VerifyingKey>,
     out:      &mpsc::Sender<FeedItem>,
 ) {
-    let items = active_items(chart, store, baseline).await;
+    let items = active_items(chart, store, baseline, me_vk).await;
     trace!(count = items.len(), "transit_ticker tick");
     for item in items {
         let _ = out.send(item).await;
@@ -68,6 +71,7 @@ async fn active_items(
     chart:    &Chart,
     store:    &ZodiaStore,
     baseline: &BaselineStore,
+    me_vk:    Option<&zodia_doc::VerifyingKey>,
 ) -> Vec<FeedItem> {
     use zodia_core::transit_window;
 
@@ -96,7 +100,7 @@ async fn active_items(
         let (start_jdn, end_jdn) = transit_window(
             ta.transiting, natal_lon, ta.kind, now_jdn,
         );
-        let baseline_body = Some(resolve_top_body(store, baseline, &ta.interp_key()).await);
+        let baseline_body = Some(resolve_top_body(store, baseline, me_vk, &ta.interp_key()).await);
         items.push(build_personal_active(key, start_jdn, end_jdn, ta.orb, baseline_body));
     }
 
@@ -108,7 +112,7 @@ async fn active_items(
             a.body_a, b_lon, a.kind, now_jdn,
         );
         let sky_key = zodia_core::InterpKey::SkyAspect { aspect_sig: a.sig() };
-        let baseline_body = Some(resolve_top_body(store, baseline, &sky_key).await);
+        let baseline_body = Some(resolve_top_body(store, baseline, me_vk, &sky_key).await);
         items.push(build_global_active(key, start_jdn, end_jdn, a.orb, baseline_body));
     }
 
@@ -118,7 +122,7 @@ async fn active_items(
         let (start_jdn, end_jdn) = zodia_core::house_transit_window(
             ht.transiting, &chart.houses, now_jdn,
         );
-        let baseline_body = Some(resolve_top_body(store, baseline, &ht.interp_key()).await);
+        let baseline_body = Some(resolve_top_body(store, baseline, me_vk, &ht.interp_key()).await);
         items.push(build_house_active(key, start_jdn, end_jdn, baseline_body));
     }
 
@@ -133,9 +137,10 @@ pub(crate) async fn active_item_for_key(
     chart:      &Chart,
     store:      &ZodiaStore,
     baseline:   &BaselineStore,
+    me_vk:      Option<&zodia_doc::VerifyingKey>,
     target_sig: &str,
 ) -> Option<FeedItem> {
-    active_items(chart, store, baseline).await
+    active_items(chart, store, baseline, me_vk).await
         .into_iter()
         .find(|item| item.interp_key() == Some(target_sig))
 }

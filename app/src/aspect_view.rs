@@ -102,7 +102,7 @@ pub fn refresh_active_call_button(interp_key: &str, others_present: bool) {
 }
 
 use crate::aspect_list::{AspectItem, KeyEntry};
-use crate::interp_row::{InterpRow, InterpRowInit, InterpRowOut};
+use crate::interp_row::{InterpRow, InterpRowInit, InterpRowMsg, InterpRowOut};
 
 // ── public entry point ────────────────────────────────────────────────────────
 
@@ -162,9 +162,7 @@ pub struct AspectView {
     /// "Generate with AI" button is offered. See `AppModel`'s own
     /// `ollama_models` field for how this gets populated.
     ollama_models:    Vec<String>,
-    #[allow(dead_code)]
     rows:             FactoryVecDeque<InterpRow>,
-    #[allow(dead_code)]
     placements_rows:  Option<FactoryVecDeque<InterpRow>>,
 }
 
@@ -174,6 +172,10 @@ pub enum AspectViewMsg {
         keys:            Vec<KeyEntry>,
         transit_context: Option<String>,
     },
+    /// Sent when the detail page pops back to the list — re-fetches every
+    /// row's body preview so a reading just contributed in the editor
+    /// doesn't leave the list stuck showing "No interpretation yet."
+    RefreshRows,
 }
 
 #[relm4::component(async, pub)]
@@ -235,9 +237,10 @@ impl SimpleAsyncComponent for AspectView {
         sender: AsyncComponentSender<Self>,
     ) -> AsyncComponentParts<Self> {
         // Aspects factory.
+        let me_vk = zodia_doc::VerifyingKey::from_bytes(&init.identity.public_key()).ok();
         let mut row_inits: Vec<InterpRowInit> = Vec::with_capacity(init.items.len());
         for it in &init.items {
-            row_inits.push(build_row_init(it, &init.store, &init.baseline).await);
+            row_inits.push(build_row_init(it, &init.store, &init.baseline, me_vk.as_ref()).await);
         }
         let items_empty = row_inits.is_empty();
 
@@ -261,7 +264,7 @@ impl SimpleAsyncComponent for AspectView {
                 let mut p_inits: Vec<InterpRowInit> =
                     Vec::with_capacity(init.placements_items.len());
                 for it in &init.placements_items {
-                    p_inits.push(build_row_init(it, &init.store, &init.baseline).await);
+                    p_inits.push(build_row_init(it, &init.store, &init.baseline, me_vk.as_ref()).await);
                 }
                 let mut p_rows: FactoryVecDeque<InterpRow> = FactoryVecDeque::builder()
                     .launch(adw::PreferencesGroup::new())
@@ -316,6 +319,18 @@ impl SimpleAsyncComponent for AspectView {
 
         let widgets = view_output!();
         widgets.empty_label.set_visible(items_empty);
+
+        // `popped`, not `notify::navigation-stack`: the latter doesn't
+        // reliably fire for a same-GListModel-instance pop (see
+        // stargazer_page.rs's tab-switcher fix for the same issue). This is
+        // the only page ever pushed onto `root`, so any pop means "back to
+        // the list" — refresh every row's body preview so a reading just
+        // contributed in the editor shows up without needing to leave and
+        // re-enter the tab.
+        {
+            let s = sender.clone();
+            root.connect_popped(move |_, _| s.input(AspectViewMsg::RefreshRows));
+        }
 
         if let Some(p_rows) = model.placements_rows.as_ref() {
             widgets.content_box.prepend(p_rows.widget());
@@ -554,6 +569,13 @@ impl SimpleAsyncComponent for AspectView {
                     &self.ollama_models,
                 ).await;
                 self.nav.push(&page);
+            }
+            AspectViewMsg::RefreshRows => {
+                let me_vk = zodia_doc::VerifyingKey::from_bytes(&self.identity.public_key()).ok();
+                refresh_row_previews(&self.rows, &self.store, &self.baseline, me_vk.as_ref()).await;
+                if let Some(p_rows) = self.placements_rows.as_ref() {
+                    refresh_row_previews(p_rows, &self.store, &self.baseline, me_vk.as_ref()).await;
+                }
             }
         }
     }
@@ -1189,12 +1211,63 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Best interpretation text for `key`: community DB result first, baseline fallback.
-pub(crate) async fn resolve_top_body(store: &ZodiaStore, baseline: &BaselineStore, key: &InterpKey) -> String {
-    if let Ok(Some(body)) = store.top_body(key).await {
-        return body;
+/// Best interpretation text for `key`: the persisted collaborative doc
+/// first, bundled baseline as fallback — the exact order the editor itself
+/// resolves `display_body` in `build_doc_reading_card`. NOT
+/// `store.top_body()`/the `interpretations` table: that table is seeded
+/// from the bundled baseline TOML at startup and has no writer anywhere in
+/// the app (`AppMsg::PublishDocEdit` writes to the doc store via
+/// `doc_save_with_history`, never to `interpretations`) — querying it alone
+/// meant a list/feed preview could never show a reading anyone had actually
+/// written, only ever baseline text or nothing.
+pub(crate) async fn resolve_top_body(
+    store:    &ZodiaStore,
+    baseline: &BaselineStore,
+    me_vk:    Option<&zodia_doc::VerifyingKey>,
+    key:      &InterpKey,
+) -> String {
+    if let Some(vk) = me_vk {
+        if let Ok(Some(bytes)) = store.doc_load(&key.to_sig()).await {
+            if let Ok(d) = zodia_doc::InterpDoc::from_snapshot(vk, &bytes) {
+                let body = d.body_text();
+                if !body.is_empty() { return body; }
+            }
+        }
     }
     baseline.lookup(key).map(str::to_owned).unwrap_or_default()
+}
+
+/// Re-resolve every row's body preview in place (title/keys/etc. untouched)
+/// and push it via `InterpRowMsg::Update`. Cheap, local-only store lookups —
+/// fine to run in full on every "back to the list" navigation.
+async fn refresh_row_previews(
+    rows:     &FactoryVecDeque<InterpRow>,
+    store:    &ZodiaStore,
+    baseline: &BaselineStore,
+    me_vk:    Option<&zodia_doc::VerifyingKey>,
+) {
+    // `get`/`send` are plain `&self` lookups into the live component list —
+    // no `.guard()` needed (that's only for structural insert/remove).
+    for i in 0..rows.len() {
+        let Some(row) = rows.get(i).map(|r| (
+            r.keys.clone(), r.title.clone(), r.symbol_line.clone(),
+            r.meta_line.clone(), r.transit_context.clone(),
+        )) else { continue };
+        let (keys, title, symbol_line, meta_line, transit_context) = row;
+
+        let mut body_preview = String::new();
+        for e in &keys {
+            let candidate = resolve_top_body(store, baseline, me_vk, &e.key).await;
+            if !candidate.is_empty() {
+                body_preview = candidate;
+                break;
+            }
+        }
+
+        rows.send(i, InterpRowMsg::Update(Box::new(InterpRowInit {
+            keys, title, symbol_line, meta_line, transit_context, body_preview,
+        })));
+    }
 }
 
 /// Convert an `AspectItem` into the factory's `InterpRowInit`.  Body preview is
@@ -1204,10 +1277,11 @@ async fn build_row_init(
     it: &AspectItem,
     store: &ZodiaStore,
     baseline: &BaselineStore,
+    me_vk: Option<&zodia_doc::VerifyingKey>,
 ) -> InterpRowInit {
     let mut body_preview = String::new();
     for e in &it.keys {
-        let candidate = resolve_top_body(store, baseline, &e.key).await;
+        let candidate = resolve_top_body(store, baseline, me_vk, &e.key).await;
         if !candidate.is_empty() {
             body_preview = candidate;
             break;

@@ -85,6 +85,8 @@ pub struct PeerRow {
     is_connected_cell: Rc<Cell<bool>>,
     /// Live nickname read by the dialog when the user opens it.
     nickname:          Rc<RefCell<String>>,
+    /// Live mute state read by the hover-fade closures below.
+    is_muted_cell:     Rc<Cell<bool>>,
 }
 
 // ── widgets ───────────────────────────────────────────────────────────────────
@@ -149,6 +151,7 @@ impl FactoryComponent for PeerRow {
         Self {
             is_connected_cell: Rc::new(Cell::new(init.is_connected)),
             nickname:          Rc::new(RefCell::new(init.nickname)),
+            is_muted_cell:     Rc::new(Cell::new(init.is_muted)),
             peer_id:      init.peer_id,
             solar_month:  init.solar_month,
             display_name: init.display_name,
@@ -234,7 +237,10 @@ impl FactoryComponent for PeerRow {
                         add_css_class: "circular",
                         set_valign: gtk::Align::Center,
                         set_visible: self.is_connected,
-                        set_opacity: if self.is_muted { 1.0 } else { 0.35 },
+                        // Same reveal-on-hover as the nickname edit icon below —
+                        // a muted peer stays fully visible at rest as a status
+                        // indicator, an unmuted one hides until the row is hovered.
+                        set_opacity: if self.is_muted { 1.0 } else { 0.0 },
                         set_tooltip_text: Some(if self.is_muted { "Unmute" } else { "Mute" }),
                         connect_clicked[sender, peer_id = self.peer_id.clone()] => move |_| {
                             let _ = sender.output(PeerRowOut::ToggleMute(peer_id.clone()));
@@ -293,6 +299,29 @@ impl FactoryComponent for PeerRow {
             edit_img.add_controller(m_img);
         }
 
+        // Mute-icon hover fade — identical reveal pattern to the edit icon
+        // above, gated by live mute state so an already-muted peer doesn't
+        // disappear when the pointer leaves.
+        {
+            let muted_a = Rc::clone(&self.is_muted_cell);
+            let btn_a   = mute_btn.clone();
+            let muted_b = Rc::clone(&self.is_muted_cell);
+            let btn_b   = mute_btn.clone();
+            let m_row = gtk::EventControllerMotion::new();
+            m_row.connect_enter(move |_, _, _| if !muted_a.get() { btn_a.set_opacity(0.4); });
+            m_row.connect_leave(move |_| if !muted_b.get() { btn_b.set_opacity(0.0); });
+            root.add_controller(m_row);
+
+            let muted_c = Rc::clone(&self.is_muted_cell);
+            let btn_c   = mute_btn.clone();
+            let muted_d = Rc::clone(&self.is_muted_cell);
+            let btn_d   = mute_btn.clone();
+            let m_btn = gtk::EventControllerMotion::new();
+            m_btn.connect_enter(move |_, _, _| if !muted_c.get() { btn_c.set_opacity(1.0); });
+            m_btn.connect_leave(move |_| if !muted_d.get() { btn_d.set_opacity(0.4); });
+            mute_btn.add_controller(m_btn);
+        }
+
         // Edit-icon click → nickname dialog.
         {
             let pid       = self.peer_id.0;
@@ -341,6 +370,7 @@ impl FactoryComponent for PeerRow {
     fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
         let PeerRowMsg::Update(init) = msg;
         self.is_connected_cell.set(init.is_connected);
+        self.is_muted_cell.set(init.is_muted);
         *self.nickname.borrow_mut() = init.nickname;
         self.solar_month  = init.solar_month;
         self.display_name = init.display_name;
@@ -375,7 +405,7 @@ impl FactoryComponent for PeerRow {
 
         widgets.edit_img.set_visible(self.is_connected);
         widgets.mute_btn.set_visible(self.is_connected);
-        widgets.mute_btn.set_opacity(if self.is_muted { 1.0 } else { 0.35 });
+        widgets.mute_btn.set_opacity(if self.is_muted { 1.0 } else { 0.0 });
         widgets.mute_btn.set_tooltip_text(Some(if self.is_muted { "Unmute" } else { "Mute" }));
         widgets.remove_btn.set_visible(self.is_pending);
 

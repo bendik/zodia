@@ -43,7 +43,6 @@ impl std::fmt::Debug for InterpRowInit {
 // ── messages ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
-#[allow(dead_code)] // PR3 reactive wire reaches for Update; nothing sends it yet
 pub enum InterpRowMsg {
     /// Replace all display fields in place — no widget recreation.
     Update(Box<InterpRowInit>),

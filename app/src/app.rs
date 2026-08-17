@@ -712,6 +712,7 @@ impl AsyncComponent for AppModel {
                     chart.clone(),
                     Rc::clone(&model.baseline),
                     model.store.clone(),
+                    model.identity.public_key(),
                     sender.clone(),
                 ));
                 model.chart = Some(chart);
@@ -847,6 +848,7 @@ impl AsyncComponent for AppModel {
                             chart.clone(),
                             Rc::clone(&self.baseline),
                             self.store.clone(),
+                            self.identity.public_key(),
                             sender.clone(),
                         ));
                         self.chart = Some(chart);
@@ -1681,7 +1683,7 @@ impl AsyncComponent for AppModel {
                     // card immediately instead of waiting for the next tick.
                     if let Some(chart) = self.chart.as_ref() {
                         if let Some(item) = crate::transit_ticker::active_item_for_key(
-                            chart, &self.store, &self.baseline, &interp_key,
+                            chart, &self.store, &self.baseline, Some(&me_vk), &interp_key,
                         ).await {
                             let _ = s.send(crate::feed_view::FeedViewMsg::Push(item));
                         }
@@ -3893,6 +3895,7 @@ fn spawn_transit_ticker(
     chart:    Chart,
     baseline: Rc<BaselineStore>,
     store:    ZodiaStore,
+    me:       [u8; 32],
     sender:   relm4::component::AsyncComponentSender<AppModel>,
 ) -> tokio::task::JoinHandle<()> {
     // BaselineStore needs to cross into the spawned task — clone its
@@ -3903,7 +3906,7 @@ fn spawn_transit_ticker(
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::feed_item::FeedItem>(64);
         let chart_arc = std::sync::Arc::new(chart);
-        let _ticker = crate::transit_ticker::spawn(chart_arc, baseline_arc, store, tx);
+        let _ticker = crate::transit_ticker::spawn(chart_arc, baseline_arc, store, me, tx);
         while let Some(item) = rx.recv().await {
             let _ = sender.input_sender().send(AppMsg::__PushFeedItem(item));
         }
